@@ -31,6 +31,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Removal of `metadata.managedFields` from the YAML editor and write payloads.
 - Redacted SQLite mutation history for apply and delete outcomes.
 - Native Pod log streaming with follow, previous-container, tail, and container controls.
+- Native interactive Pod `exec` and `attach` sessions available in read-only mode with TTY input, resize handling, container selection, and Kubernetes RBAC authorization.
 - Local-only visual identity using the provided `haggis.svg` asset.
 
 ### Partially Implemented
@@ -45,7 +46,6 @@ The repository currently contains the first usable vertical slice. The backend a
 
 ### Remaining First-Release Work
 
-- Native interactive `exec` and `attach` sessions.
 - Native port-forward sessions.
 - Ephemeral debug containers and file copy operations.
 - Metrics API collection and CPU/memory charts.
@@ -96,6 +96,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Use the selected kubeconfig identity and Kubernetes RBAC as the authorization authority.
 - Start in read-only mode.
 - Maintain write mode independently per cluster context and reset it on context switch unless explicitly enabled again.
+- Allow interactive Pod `exec` and `attach` sessions in read-only mode; Kubernetes RBAC remains the authorization authority for those sessions.
 - Require a diff and server-side dry-run before applying edits where supported.
 - Use client-side apply/full-object updates for writes, with Kubernetes resource-version conflicts surfaced to the user.
 - Require stronger confirmation for deletes, evictions, drains, namespace changes, and other destructive operations.

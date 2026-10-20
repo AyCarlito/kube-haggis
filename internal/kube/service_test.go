@@ -1,6 +1,8 @@
 package kube
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,5 +122,32 @@ func TestBuildEventSummaries(t *testing.T) {
 	warnings := buildEventSummaries(items, true)
 	if len(warnings) != 1 || warnings[0].Type != "Warning" {
 		t.Fatalf("unexpected warning summaries: %+v", warnings)
+	}
+}
+
+// TestStreamPodSessionValidation verifies that invalid terminal requests stop before client creation.
+func TestStreamPodSessionValidation(t *testing.T) {
+	service := NewService("")
+	tests := []struct {
+		name      string
+		namespace string
+		pod       string
+		mode      PodSessionMode
+		command   []string
+		want      string
+	}{
+		{name: "missing namespace", pod: "api", mode: PodSessionExec, command: []string{"/bin/sh"}, want: "namespace is required"},
+		{name: "missing pod", namespace: "default", mode: PodSessionExec, command: []string{"/bin/sh"}, want: "Pod name is required"},
+		{name: "missing command", namespace: "default", pod: "api", mode: PodSessionExec, want: "command is required"},
+		{name: "unsupported mode", namespace: "default", pod: "api", mode: PodSessionMode("shell"), want: "unsupported Pod session mode"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := service.StreamPodSession(context.Background(), "", test.namespace, test.pod, "", test.mode, test.command, nil, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q error, got %v", test.want, err)
+			}
+		})
 	}
 }

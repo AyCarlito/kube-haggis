@@ -139,6 +139,15 @@ export function logsUrl(context: string, namespace: string, pod: string, contain
   })
 }
 
+/** Builds the browser WebSocket URL for a native Pod terminal session. */
+export function terminalUrl(context: string, namespace: string, pod: string, container: string, mode: 'exec' | 'attach', command: string): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const params = new URLSearchParams({ context, namespace, pod, mode })
+  if (container) params.set('container', container)
+  if (mode === 'exec' && command) params.set('command', command)
+  return `${protocol}//${window.location.host}/api/terminal?${params.toString()}`
+}
+
 /** Loads Events associated with one resource UID. */
 export function fetchResourceEvents(context: string, namespace: string, uid: string): Promise<ResourceEventsResponse> {
   return fetchJson<ResourceEventsResponse>(apiUrl('/api/events', { context, namespace, uid }))

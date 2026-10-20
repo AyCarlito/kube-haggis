@@ -28,7 +28,10 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { FitAddon } from '@xterm/addon-fit'
+import { Terminal } from '@xterm/xterm'
+import '@xterm/xterm/css/xterm.css'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { stringify } from 'yaml'
 import {
   applyResource,
@@ -40,6 +43,7 @@ import {
   fetchResources,
   logsUrl,
   resourceEventsWatchUrl,
+  terminalUrl,
   watchUrl,
 } from './api'
 import type {
@@ -53,6 +57,7 @@ import type {
   ResourceObject,
   ResourceSummary,
   RouteState,
+  TerminalMessage,
 } from './types'
 
 const commonDefinitions: ResourceDefinition[] = [
@@ -616,7 +621,7 @@ function ResourceDetailPage({ context, namespace, definition, name, definitions,
   if (error && !object) return <ConnectionState error={error} />
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
-  const detailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
+  const detailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
@@ -627,6 +632,7 @@ function ResourceDetailPage({ context, namespace, definition, name, definitions,
     {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
     {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
+    {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
     {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
     {tab === 'related' && <OwnerReferencesPanel object={object} definitions={definitions} namespace={resourceNamespace} onOpenResource={onOpenResource} />}
   </div>
@@ -714,6 +720,174 @@ function PodLogsPanel({ context, namespace, pod }: { context: string; namespace:
   }, [context, namespace, pod, container, follow, previous, tailLines])
 
   return <div className="logs-panel"><div className="logs-toolbar"><div className="logs-title"><TerminalSquare size={16} /><strong>Container output</strong><span>{follow ? 'following stream' : 'snapshot'}</span></div><div className="logs-controls"><label><span>Container</span><input value={container} onChange={(event) => setContainer(event.target.value)} placeholder="default" /></label><label><span>Tail</span><select value={tailLines} onChange={(event) => setTailLines(Number(event.target.value))}><option value={100}>100 lines</option><option value={200}>200 lines</option><option value={500}>500 lines</option><option value={1000}>1,000 lines</option></select></label><label className="check-control"><input type="checkbox" checked={previous} onChange={(event) => setPrevious(event.target.checked)} /><span>Previous</span></label><label className="check-control"><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /><span>Follow</span></label></div></div>{error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}<pre className="log-output">{loading && !logs ? <span className="log-placeholder"><LoaderCircle size={17} className="spin" /> Reading container output</span> : logs || 'No log lines returned.'}</pre></div>
+}
+
+/** Renders an interactive native exec or attach terminal for a Pod. */
+function PodTerminalPanel({ context, namespace, pod, object }: { context: string; namespace: string; pod: string; object: ResourceObject }) {
+  const [mode, setMode] = useState<'exec' | 'attach'>('exec')
+  const [container, setContainer] = useState('')
+  const [command, setCommand] = useState('/bin/sh')
+  const [status, setStatus] = useState<'idle' | 'connecting' | 'connected' | 'closed'>('idle')
+  const [error, setError] = useState('')
+  const socketRef = useRef<WebSocket | null>(null)
+  const terminalHostRef = useRef<HTMLDivElement | null>(null)
+  const terminalRef = useRef<Terminal | null>(null)
+  const fitAddonRef = useRef<FitAddon | null>(null)
+  const containers = podContainerNames(object)
+
+  useEffect(() => {
+    if (!container && containers.length) setContainer(containers[0])
+  }, [object])
+
+  useEffect(() => {
+    const host = terminalHostRef.current
+    if (!host) return
+    const terminal = new Terminal({
+      convertEol: true,
+      cursorBlink: true,
+      disableStdin: true,
+      fontFamily: "'DM Mono', 'SFMono-Regular', Consolas, monospace",
+      fontSize: 12,
+      lineHeight: 1.35,
+      scrollback: 5000,
+      theme: {
+        background: '#0b0e0b',
+        foreground: '#b7c8aa',
+        cursor: '#f09a62',
+        selectionBackground: 'rgba(215, 123, 77, .35)',
+      },
+    })
+    const fitAddon = new FitAddon()
+    terminal.loadAddon(fitAddon)
+    terminal.open(host)
+    fitAddon.fit()
+    terminalRef.current = terminal
+    fitAddonRef.current = fitAddon
+
+    const dataSubscription = terminal.onData((data) => {
+      const socket = socketRef.current
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data }))
+    })
+    const resizeSubscription = terminal.onResize(({ cols, rows }) => sendTerminalResize(socketRef.current, cols, rows))
+    const observer = new ResizeObserver(() => fitAddon.fit())
+    observer.observe(host)
+    return () => {
+      observer.disconnect()
+      dataSubscription.dispose()
+      resizeSubscription.dispose()
+      terminal.dispose()
+      terminalRef.current = null
+      fitAddonRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const terminal = terminalRef.current
+    if (!terminal) return
+    const connected = status === 'connected'
+    terminal.options.disableStdin = !connected
+    terminal.options.cursorBlink = connected
+    if (!connected) terminal.blur()
+  }, [status])
+
+  useEffect(() => {
+    return () => {
+      socketRef.current?.close()
+      socketRef.current = null
+      terminalRef.current?.reset()
+    }
+  }, [context, namespace, pod])
+
+  /** Opens a browser WebSocket backed by a Kubernetes TTY session. */
+  function connect() {
+    if (!namespace || namespace === 'all') {
+      setError('A Pod namespace is required to open a terminal session.')
+      return
+    }
+    socketRef.current?.close()
+    terminalRef.current?.reset()
+    setError('')
+    setStatus('connecting')
+    const socket = new WebSocket(terminalUrl(context, namespace, pod, container, mode, command))
+    socketRef.current = socket
+    socket.onopen = () => {
+      if (socketRef.current !== socket) return
+      setStatus('connected')
+      fitAddonRef.current?.fit()
+      terminalRef.current?.focus()
+    }
+    socket.onmessage = (event) => {
+      let message: TerminalMessage
+      try {
+        message = JSON.parse(event.data) as TerminalMessage
+      } catch {
+        setError('The terminal returned an invalid message.')
+        return
+      }
+      if (message.type === 'output') terminalRef.current?.write(message.data || '')
+      if (message.type === 'error') setError(message.message || 'The terminal session failed.')
+      if (message.type === 'closed') setStatus('closed')
+    }
+    socket.onerror = () => setError((current) => current || 'The terminal connection failed.')
+    socket.onclose = () => {
+      if (socketRef.current === socket) socketRef.current = null
+      setStatus('closed')
+    }
+  }
+
+  /** Closes the current browser and Kubernetes terminal session. */
+  function disconnect() {
+    const socket = socketRef.current
+    if (!socket) return
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'close' }))
+    socket.close()
+    socketRef.current = null
+    setStatus('closed')
+  }
+
+  const active = status === 'connecting' || status === 'connected'
+  const statusLabel = status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting' : status === 'closed' ? 'Disconnected' : 'Not connected'
+  const disconnected = status !== 'connected'
+  return <div className="terminal-panel">
+    <div className="terminal-toolbar">
+      <div className="logs-title"><TerminalSquare size={16} /><strong>Pod terminal</strong><span className={`terminal-session-status terminal-session-status-${status}`}><span />{statusLabel}</span></div>
+      <div className="terminal-controls">
+        <label><span>Mode</span><select value={mode} onChange={(event) => setMode(event.target.value as 'exec' | 'attach')} disabled={active}><option value="exec">Exec</option><option value="attach">Attach</option></select></label>
+        <label><span>Container</span><select value={container} onChange={(event) => setContainer(event.target.value)} disabled={active}><option value="">Default</option>{containers.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+        {mode === 'exec' && <label><span>Command</span><input value={command} onChange={(event) => setCommand(event.target.value)} disabled={active} /></label>}
+        {active ? <button className="secondary-button" onClick={disconnect}>Disconnect</button> : <button className="secondary-button" onClick={connect}>{status === 'closed' ? 'Reconnect' : 'Connect'}</button>}
+      </div>
+    </div>
+    {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
+    <div className={`terminal-surface ${disconnected ? 'terminal-surface-inactive' : ''}`}>
+      <div ref={terminalHostRef} className="terminal-host" aria-label="Pod terminal" />
+      {disconnected && <div className="terminal-overlay"><div><span className="terminal-overlay-icon"><TerminalSquare size={18} /></span><strong>{status === 'closed' ? 'Session disconnected' : 'Terminal not connected'}</strong><span>{status === 'closed' ? 'Reconnect to open a new TTY session.' : 'Connect to open a TTY session.'}</span></div></div>}
+    </div>
+    <div className="terminal-footer"><span><TerminalSquare size={14} /> TTY session / Kubernetes remote command</span><span>{mode === 'exec' ? 'command starts in a new process' : 'attached to the existing process'}</span></div>
+  </div>
+}
+
+/** Returns the container names available in a generic Pod object. */
+function podContainerNames(object: ResourceObject): string[] {
+  const spec = object.spec
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return []
+  const names: string[] = []
+  for (const field of ['containers', 'initContainers', 'ephemeralContainers']) {
+    const entries = (spec as Record<string, unknown>)[field]
+    if (!Array.isArray(entries)) continue
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+      const name = (entry as Record<string, unknown>).name
+      if (typeof name === 'string' && name && !names.includes(name)) names.push(name)
+    }
+  }
+  return names
+}
+
+/** Sends the current terminal element dimensions to Kubernetes. */
+function sendTerminalResize(socket: WebSocket | null, cols: number, rows: number) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return
+  socket.send(JSON.stringify({ type: 'resize', cols, rows }))
 }
 
 /** Renders the live Event stream associated with a resource UID. */

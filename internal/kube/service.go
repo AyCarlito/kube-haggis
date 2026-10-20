@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -19,9 +20,11 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/yaml"
 )
 
@@ -433,6 +436,76 @@ func (s *Service) PodLogs(ctx context.Context, contextName, namespace, pod, cont
 		return nil, fmt.Errorf("open logs for Pod %q: %w", pod, err)
 	}
 	return stream, nil
+}
+
+// PodSessionMode identifies the native Kubernetes Pod stream operation.
+type PodSessionMode string
+
+const (
+	// PodSessionExec starts a command inside a running container.
+	PodSessionExec PodSessionMode = "exec"
+	// PodSessionAttach connects to the existing process streams in a container.
+	PodSessionAttach PodSessionMode = "attach"
+)
+
+// StreamPodSession opens a TTY-backed native exec or attach session.
+func (s *Service) StreamPodSession(ctx context.Context, contextName, namespace, pod, container string, mode PodSessionMode, command []string, stdin io.Reader, stdout io.Writer, sizes remotecommand.TerminalSizeQueue) error {
+	if strings.TrimSpace(namespace) == "" || namespace == "all" {
+		return fmt.Errorf("namespace is required for Pod sessions")
+	}
+	if strings.TrimSpace(pod) == "" {
+		return fmt.Errorf("Pod name is required for Pod sessions")
+	}
+
+	discoveryMode := ""
+	switch mode {
+	case PodSessionExec:
+		if len(command) == 0 {
+			return fmt.Errorf("command is required for exec sessions")
+		}
+		discoveryMode = "exec"
+	case PodSessionAttach:
+		discoveryMode = "attach"
+	default:
+		return fmt.Errorf("unsupported Pod session mode %q", mode)
+	}
+
+	_, _, restConfig, err := s.clients(contextName)
+	if err != nil {
+		return err
+	}
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return fmt.Errorf("create typed Kubernetes client: %w", err)
+	}
+	request := clientset.CoreV1().RESTClient().Post().Resource("pods").Namespace(namespace).Name(pod).SubResource(discoveryMode)
+	if mode == PodSessionExec {
+		request.VersionedParams(&corev1.PodExecOptions{
+			Container: container,
+			Command:   command,
+			Stdin:     true,
+			Stdout:    true,
+			TTY:       true,
+		}, scheme.ParameterCodec)
+	} else {
+		request.VersionedParams(&corev1.PodAttachOptions{
+			Container: container,
+			Stdin:     true,
+			Stdout:    true,
+			TTY:       true,
+		}, scheme.ParameterCodec)
+	}
+
+	executor, err := remotecommand.NewSPDYExecutor(restConfig, http.MethodPost, request.URL())
+	if err != nil {
+		return fmt.Errorf("create Pod %s executor: %w", mode, err)
+	}
+	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:             stdin,
+		Stdout:            stdout,
+		Tty:               true,
+		TerminalSizeQueue: sizes,
+	})
 }
 
 // EventsForResource returns Events whose involvedObject UID matches a resource.

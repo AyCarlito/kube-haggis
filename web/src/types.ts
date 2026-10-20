@@ -133,6 +133,15 @@ export interface ResourceOwnerReference {
   blockOwnerDeletion?: boolean
 }
 
+/** Represents one browser message exchanged with a native Pod terminal. */
+export interface TerminalMessage {
+  type: 'input' | 'resize' | 'output' | 'error' | 'closed'
+  data?: string
+  message?: string
+  rows?: number
+  cols?: number
+}
+
 /** Represents the browser route used by the single-page application. */
 export interface RouteState {
   path: string

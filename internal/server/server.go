@@ -44,6 +44,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/events/watch", s.handleEventWatch)
 	mux.HandleFunc("/api/logs", s.handleLogs)
+	mux.Handle("/api/terminal", s.terminalHandler())
 	mux.HandleFunc("/api/resource", s.handleResource)
 	mux.HandleFunc("/", s.handleFrontend)
 	return s.withLogging(mux)
