@@ -39,10 +39,12 @@ import { stringify } from 'yaml'
 import {
   applyResource,
   applyNodeAction,
+  applyPVCAction,
   applyWorkloadAction,
   fetchContexts,
   fetchDiscovery,
   fetchOverview,
+  fetchPVCOperations,
   fetchResource,
   fetchResourceEvents,
   fetchRelated,
@@ -80,6 +82,11 @@ import type {
   NodeTaint,
   NodeMetric,
   PodMetric,
+  PVCAction,
+  PVCActionRequest,
+  PVCActionResponse,
+  PVCOperationInfo,
+  PVCOperationState,
   WorkloadAction,
   WorkloadActionRequest,
   WorkloadActionResponse,
@@ -833,7 +840,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
   const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
-  const detailTabs = (targetedWorkloadResource(definition) || targetedNodeResource(definition)) && !isNew ? [...baseDetailTabs.slice(0, 1), 'operations', ...baseDetailTabs.slice(1)] : baseDetailTabs
+  const detailTabs = (targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) && !isNew ? [...baseDetailTabs.slice(0, 1), 'operations', ...baseDetailTabs.slice(1)] : baseDetailTabs
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
@@ -844,6 +851,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
        {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
         {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
         {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+        {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
       {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
@@ -1074,6 +1082,173 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
   </div>
 }
 
+/** Renders a two-step PVC resize and VolumeSnapshot workflow with capability states. */
+function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, onRefresh }: { context: string; namespace: string; name: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+  const [info, setInfo] = useState<PVCOperationInfo | null>(null)
+  const [action, setAction] = useState<PVCAction>('resize')
+  const [storage, setStorage] = useState(pvcRequestedStorage(object))
+  const [snapshotName, setSnapshotName] = useState('')
+  const [snapshotClassName, setSnapshotClassName] = useState('')
+  const [review, setReview] = useState<PVCActionResponse | null>(null)
+  const [confirmed, setConfirmed] = useState(false)
+  const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    setError('')
+    setInfo(null)
+    setReview(null)
+    setConfirmed(false)
+    setStorage(pvcRequestedStorage(object))
+    setSnapshotName('')
+    fetchPVCOperations(context, namespace, name)
+      .then((response) => {
+        if (!active) return
+        setInfo(response)
+        setSnapshotClassName((current) => response.snapshot.classes.some((item) => item.name === current) ? current : response.snapshot.classes[0]?.name || '')
+      })
+      .catch((loadError: Error) => active && setError(loadError.message))
+      .finally(() => active && setLoading(false))
+    return () => {
+      active = false
+    }
+  }, [context, namespace, name, object])
+
+  /** Clears an older review when the operator changes the native PVC operation. */
+  function changeAction(value: PVCAction) {
+    setAction(value)
+    setReview(null)
+    setConfirmed(false)
+    setError('')
+    setSuccess('')
+  }
+
+  /** Builds the explicit, resource-versioned request sent to the PVC operation endpoint. */
+  function buildPVCRequest(dryRun: boolean, isConfirmed: boolean): PVCActionRequest | null {
+    const expectedResourceVersion = metadataString(object, 'resourceVersion')
+    if (!expectedResourceVersion) {
+      setError('The PVC has no resource version. Refresh it before starting a storage operation.')
+      return null
+    }
+    const request: PVCActionRequest = { action, dryRun, confirmed: isConfirmed, expectedResourceVersion }
+    if (action === 'resize') {
+      if (info?.resize.state !== 'available') {
+        setError(info?.resize.message || 'PVC expansion is not available for this claim.')
+        return null
+      }
+      if (!storage.trim()) {
+        setError('A larger target storage size is required.')
+        return null
+      }
+      request.storage = storage.trim()
+    } else {
+      if (info?.snapshot.state !== 'available') {
+        setError(info?.snapshot.message || 'The VolumeSnapshot API is not available.')
+        return null
+      }
+      if (!snapshotName.trim()) {
+        setError('A snapshot name is required.')
+        return null
+      }
+      if (!snapshotClassName) {
+        setError('Choose a VolumeSnapshotClass before reviewing the snapshot.')
+        return null
+      }
+      request.snapshotName = snapshotName.trim()
+      request.snapshotClassName = snapshotClassName
+    }
+    return request
+  }
+
+  /** Runs Kubernetes server-side dry-run validation used as the PVC review gate. */
+  async function reviewPVCAction() {
+    if (!writeEnabled) {
+      setError('Enable write mode before reviewing a PVC operation.')
+      return
+    }
+    const request = buildPVCRequest(true, false)
+    if (!request) return
+    setBusy('review')
+    setError('')
+    setSuccess('')
+    try {
+      const result = await applyPVCAction(context, namespace, name, request)
+      setReview(result)
+      setConfirmed(false)
+    } catch (reviewError) {
+      setError((reviewError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /** Applies only the exact PVC operation and resource version that passed review. */
+  async function applyReviewedPVCAction() {
+    if (!writeEnabled) {
+      setError('Enable write mode before applying a PVC operation.')
+      return
+    }
+    if (!review) {
+      setError('Run the server-side dry-run before applying this PVC operation.')
+      return
+    }
+    if (!confirmed) {
+      setError('Confirm that you reviewed the dry-run before applying this PVC operation.')
+      return
+    }
+    const request = buildPVCRequest(false, true)
+    if (!request) return
+    setBusy('apply')
+    setError('')
+    setSuccess('')
+    try {
+      const result = await applyPVCAction(context, namespace, name, request)
+      setSuccess(action === 'resize' ? 'PVC resize applied. Kubernetes will complete expansion asynchronously.' : `VolumeSnapshot ${result.snapshotName || snapshotName.trim()} creation requested.`)
+      setReview(null)
+      setConfirmed(false)
+      try {
+        await onRefresh()
+      } catch (refreshError) {
+        setError(`PVC operation applied, but the PVC refresh failed: ${(refreshError as Error).message}`)
+      }
+    } catch (applyError) {
+      setError((applyError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const resizeAvailable = info?.resize.state === 'available'
+  const snapshotAvailable = info?.snapshot.state === 'available'
+  const selectedAvailable = action === 'resize' ? resizeAvailable : snapshotAvailable
+  const disabled = !writeEnabled || Boolean(busy) || Boolean(review) || loading || !selectedAvailable
+  const capabilityMessage = action === 'resize' ? info?.resize.message : info?.snapshot.message
+  const snapshotClasses = info?.snapshot.classes || []
+
+  return <div className="pvc-operation-panel">
+    <div className="pvc-operation-header"><div className="logs-title"><HardDrive size={16} /><strong>PVC operations</strong><span>native storage APIs</span></div><span className="pvc-operation-scope">review then apply</span></div>
+    <div className="pvc-operation-intro"><strong>Resize this claim or create a point-in-time VolumeSnapshot.</strong><span>Resize changes only the PVC storage request. Snapshot creation references this PVC and never reads Secret data. Both workflows preserve the current resource version and require a Kubernetes server-side dry-run before confirmation.</span></div>
+    {info && <div className="pvc-capability-grid"><div className="pvc-capability-card"><div><strong>Resize</strong><span className={`pvc-state-chip pvc-state-${pvcOperationStateTone(info.resize.state)}`}>{pvcOperationStateLabel(info.resize.state)}</span></div><span>{info.resize.message || 'StorageClass capability is being checked.'}</span>{info.resize.storageClassName && <code>class / {info.resize.storageClassName}</code>}</div><div className="pvc-capability-card"><div><strong>Snapshots</strong><span className={`pvc-state-chip pvc-state-${pvcOperationStateTone(info.snapshot.state)}`}>{pvcOperationStateLabel(info.snapshot.state)}</span></div><span>{info.snapshot.message || 'Snapshot API capability is being checked.'}</span><code>{info.snapshot.classes.length} readable class{info.snapshot.classes.length === 1 ? '' : 'es'}</code></div></div>}
+    {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to review and apply PVC operations. Kubernetes RBAC still authorizes every final request.</div>}
+    {loading && <div className="pvc-capability-loading"><LoaderCircle size={15} className="spin" /> Reading StorageClass and VolumeSnapshot capabilities</div>}
+    {!loading && info && !selectedAvailable && <div className="pvc-operation-unavailable"><AlertTriangle size={15} /><span>{capabilityMessage || 'This native PVC operation is unavailable for the selected cluster.'}</span></div>}
+    <form className="pvc-operation-form" onSubmit={(event) => { event.preventDefault(); void reviewPVCAction() }}>
+      <div className="pvc-action-picker"><label className="pvc-operation-field"><span>Operation</span><select value={action} onChange={(event) => changeAction(event.target.value as PVCAction)} disabled={Boolean(busy) || Boolean(review) || loading}><option value="resize">Resize claim</option><option value="snapshot">Create VolumeSnapshot</option></select></label><div className="pvc-action-detail">{action === 'resize' ? 'Increase the requested storage only when the StorageClass explicitly allows expansion.' : 'Create a namespaced VolumeSnapshot from this PVC through snapshot.storage.k8s.io/v1.'}</div></div>
+      {action === 'resize' && <div className="pvc-operation-grid"><label className="pvc-operation-field"><span>Current request</span><input value={info?.requestedStorage || storage || '—'} readOnly /></label><label className="pvc-operation-field"><span>Target storage <em>must be larger</em></span><input value={storage} onChange={(event) => setStorage(event.target.value)} disabled={disabled} placeholder="20Gi" /></label></div>}
+      {action === 'snapshot' && <div className="pvc-operation-grid"><label className="pvc-operation-field"><span>Snapshot name</span><input value={snapshotName} onChange={(event) => setSnapshotName(event.target.value)} disabled={disabled} placeholder="data-copy" required /></label><label className="pvc-operation-field"><span>VolumeSnapshotClass</span><select value={snapshotClassName} onChange={(event) => setSnapshotClassName(event.target.value)} disabled={disabled}><option value="">Choose a class</option>{snapshotClasses.map((item) => <option key={item.name} value={item.name}>{item.name}{item.driver ? ` / ${item.driver}` : ''}</option>)}</select></label></div>}
+      <div className="pvc-operation-actions"><span>{selectedAvailable ? 'Review first; no cluster state changes during dry-run.' : 'The selected native capability must be available before review.'}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review) || loading || !selectedAvailable}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review operation'}</button></div>
+    </form>
+    {review && <div className="pvc-review"><div className="pvc-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{action === 'resize' ? 'Resize is ready' : 'Snapshot is ready'}</strong></div><p>Kubernetes accepted this exact resource-versioned request during server-side dry-run. No cluster state has changed.</p><label className="pvc-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the dry-run and explicitly confirm this {action === 'resize' ? 'PVC resize' : 'VolumeSnapshot creation'}.</span></label><div className="pvc-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setConfirmed(false); setError('') }} disabled={Boolean(busy)}>Change operation</button><button type="button" className="primary-button" onClick={() => void applyReviewedPVCAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
+    {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
+    {success && <div className="operation-success"><Check size={15} />{success}</div>}
+    <div className="pvc-operation-footer"><span><ShieldCheck size={14} /> Full-object PVC update / native snapshot create</span><span>RBAC, conflicts, unsupported APIs, and absent snapshot CRDs stay visible.</span></div>
+  </div>
+}
+
 /** Describes one native Node operation exposed by the detail form. */
 type NodeActionOption = {
   action: NodeAction
@@ -1273,6 +1448,36 @@ function targetedNodeResource(definition: ResourceDefinition): boolean {
   return definition.group === '' && definition.version === 'v1' && definition.resource === 'nodes' && !definition.namespaced
 }
 
+/** Returns true only for the namespaced built-in PersistentVolumeClaim resource. */
+function targetedPVCResource(definition: ResourceDefinition): boolean {
+  return definition.group === '' && definition.version === 'v1' && definition.resource === 'persistentvolumeclaims' && definition.namespaced
+}
+
+/** Converts one PVC capability state into a compact panel label. */
+function pvcOperationStateLabel(state: PVCOperationState): string {
+  switch (state) {
+    case 'available':
+      return 'Available'
+    case 'permission-denied':
+      return 'RBAC denied'
+    case 'unsupported':
+      return 'Unsupported'
+    case 'unavailable':
+      return 'Unavailable'
+    case 'empty':
+      return 'No classes'
+    default:
+      return 'Read failed'
+  }
+}
+
+/** Maps a PVC capability state to the existing field-console color language. */
+function pvcOperationStateTone(state: PVCOperationState): 'good' | 'warning' | 'neutral' {
+  if (state === 'available') return 'good'
+  if (state === 'permission-denied' || state === 'error') return 'warning'
+  return 'neutral'
+}
+
 /** Returns the user-facing name for one native Node action. */
 function nodeActionLabel(action: NodeAction): string {
   const labels: Record<NodeAction, string> = {
@@ -1415,6 +1620,12 @@ function nestedObjectValue(object: ResourceObject, path: string[]): unknown {
     value = (value as Record<string, unknown>)[field]
   }
   return value
+}
+
+/** Reads the current requested storage string from a generic PVC object. */
+function pvcRequestedStorage(object: ResourceObject): string {
+  const value = nestedObjectValue(object, ['spec', 'resources', 'requests', 'storage'])
+  return typeof value === 'string' ? value : ''
 }
 
 /** Renders one related-resource target as a deep-link when it is verified and discovered. */

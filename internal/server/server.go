@@ -29,6 +29,8 @@ type Server struct {
 	related        relatedLoader
 	workloadAction workloadActionLoader
 	nodeAction     nodeActionLoader
+	pvcOperations  pvcOperationsLoader
+	pvcAction      pvcActionLoader
 }
 
 // relatedLoader describes the read-only relationship aggregation seam used by the HTTP handler.
@@ -57,6 +59,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/pod/copy", s.handlePodCopy)
 	mux.HandleFunc("/api/workload/action", s.handleWorkloadAction)
 	mux.HandleFunc("/api/node/action", s.handleNodeAction)
+	mux.HandleFunc("/api/pvc/operations", s.handlePVCOperations)
+	mux.HandleFunc("/api/pvc/action", s.handlePVCAction)
 	mux.Handle("/api/terminal", s.terminalHandler())
 	mux.Handle("/api/port-forward", s.portForwardHandler())
 	mux.HandleFunc("/api/resource", s.handleResource)
@@ -475,7 +479,9 @@ func writeError(writer http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	case strings.Contains(message, "not supported by this kubernetes api server"):
 		status = http.StatusNotImplemented
-	case strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "unsupported workload action") || strings.Contains(message, "unsupported node action") || strings.Contains(message, "not a supported workload") || strings.Contains(message, "not supported for node") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
+	case strings.Contains(message, "not available on this kubernetes api server"):
+		status = http.StatusNotImplemented
+	case strings.Contains(message, "pvc resize is unsupported") || strings.Contains(message, "unsupported pvc operation") || strings.Contains(message, "volumesnapshot api is unavailable") || strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "unsupported workload action") || strings.Contains(message, "unsupported node action") || strings.Contains(message, "not a supported workload") || strings.Contains(message, "not supported for node") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
 		status = http.StatusBadRequest
 	}
 	writeJSON(writer, status, map[string]string{"error": err.Error()})

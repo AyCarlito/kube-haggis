@@ -10,6 +10,9 @@ import type {
   RelatedResourcesResponse,
   NodeActionRequest,
   NodeActionResponse,
+  PVCActionRequest,
+  PVCActionResponse,
+  PVCOperationInfo,
   WorkloadActionRequest,
   WorkloadActionResponse,
 } from './types'
@@ -152,6 +155,23 @@ export function applyWorkloadAction(
       namespace: definition.namespaced ? namespace : '',
       name,
     }),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      body: JSON.stringify(request),
+    },
+  )
+}
+
+/** Loads native resize and VolumeSnapshot capability states for one PVC. */
+export function fetchPVCOperations(context: string, namespace: string, name: string): Promise<PVCOperationInfo> {
+  return fetchJson<PVCOperationInfo>(apiUrl('/api/pvc/operations', { context, namespace, name }))
+}
+
+/** Runs one reviewed native PVC resize or VolumeSnapshot operation. */
+export function applyPVCAction(context: string, namespace: string, name: string, request: PVCActionRequest): Promise<PVCActionResponse> {
+  return fetchJson<PVCActionResponse>(
+    apiUrl('/api/pvc/action', { context, namespace, name }),
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },

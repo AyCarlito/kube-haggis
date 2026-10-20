@@ -207,6 +207,71 @@ export interface WorkloadActionResponse {
   status: string
 }
 
+/** Identifies the explicit capability states returned for native PVC operations. */
+export type PVCOperationState = 'available' | 'unsupported' | 'unavailable' | 'permission-denied' | 'error' | 'empty'
+
+/** Describes whether the PVC StorageClass permits a larger storage request. */
+export interface PVCResizeCapability {
+  state: PVCOperationState
+  message?: string
+  storageClassName?: string
+  currentStorage?: string
+  allowVolumeExpansion: boolean
+}
+
+/** Describes one non-secret VolumeSnapshotClass choice returned by discovery. */
+export interface VolumeSnapshotClass {
+  name: string
+  driver?: string
+  deletionPolicy?: string
+}
+
+/** Describes snapshot API discovery and the readable classes available for one PVC. */
+export interface VolumeSnapshotCapability {
+  state: PVCOperationState
+  message?: string
+  apiGroupVersion?: string
+  classes: VolumeSnapshotClass[]
+}
+
+/** Contains the read-only capability and concurrency data used by the PVC Operations UI. */
+export interface PVCOperationInfo {
+  name: string
+  namespace: string
+  resourceVersion: string
+  requestedStorage?: string
+  storageClassName?: string
+  resize: PVCResizeCapability
+  snapshot: VolumeSnapshotCapability
+}
+
+/** Identifies the native PVC operation exposed by the focused detail form. */
+export type PVCAction = 'resize' | 'snapshot'
+
+/** Describes one explicit PVC resize or VolumeSnapshot request. */
+export interface PVCActionRequest {
+  action: PVCAction
+  dryRun: boolean
+  confirmed?: boolean
+  expectedResourceVersion?: string
+  storage?: string
+  snapshotName?: string
+  snapshotClassName?: string
+}
+
+/** Contains the redacted result of one native PVC storage operation. */
+export interface PVCActionResponse {
+  action: PVCAction
+  resource: string
+  namespace: string
+  name: string
+  dryRun: boolean
+  resourceVersion?: string
+  snapshotName?: string
+  snapshotClassName?: string
+  status: string
+}
+
 /** Describes one explicit native operation request for a cluster-scoped Node. */
 export interface NodeActionRequest {
   action: NodeAction
