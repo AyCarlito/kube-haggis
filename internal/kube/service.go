@@ -440,24 +440,16 @@ func (s *Service) ApplyResource(ctx context.Context, contextName, group, version
 
 // DeleteResource deletes a resource with optional dry-run and force behavior.
 func (s *Service) DeleteResource(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced, dryRun, force bool) error {
+	return s.DeleteResourceWithOptions(ctx, contextName, group, version, resource, namespace, name, namespaced, ResourceDeleteOptions{DryRun: dryRun, Force: force})
+}
+
+// DeleteResourceWithOptions deletes one resource with optional dry-run, force, and resource-version preconditions.
+func (s *Service) DeleteResourceWithOptions(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool, options ResourceDeleteOptions) error {
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return err
 	}
-	resourceClient, err := resourceInterface(dynamicClient, schema.GroupVersionResource{Group: group, Version: version, Resource: resource}, namespace, namespaced, false)
-	if err != nil {
-		return err
-	}
-	dryRunValues := []string(nil)
-	if dryRun {
-		dryRunValues = []string{metav1.DryRunAll}
-	}
-	options := metav1.DeleteOptions{DryRun: dryRunValues}
-	if force {
-		gracePeriod := int64(0)
-		options.GracePeriodSeconds = &gracePeriod
-	}
-	return resourceClient.Delete(ctx, name, options)
+	return deleteResource(ctx, dynamicClient, schema.GroupVersionResource{Group: group, Version: version, Resource: resource}, namespace, name, namespaced, options)
 }
 
 // PodLogs opens a native Kubernetes Pod log stream for one container.
@@ -705,6 +697,26 @@ func resourceInterface(client dynamic.Interface, gvr schema.GroupVersionResource
 		return client.Resource(gvr).Namespace(namespace), nil
 	}
 	return client.Resource(gvr), nil
+}
+
+// deleteResource sends one generic delete with Kubernetes dry-run and concurrency options.
+func deleteResource(ctx context.Context, client dynamic.Interface, gvr schema.GroupVersionResource, namespace, name string, namespaced bool, options ResourceDeleteOptions) error {
+	resourceClient, err := resourceInterface(client, gvr, namespace, namespaced, true)
+	if err != nil {
+		return err
+	}
+	deleteOptions := metav1.DeleteOptions{}
+	if options.DryRun {
+		deleteOptions.DryRun = []string{metav1.DryRunAll}
+	}
+	if options.Force {
+		gracePeriod := int64(0)
+		deleteOptions.GracePeriodSeconds = &gracePeriod
+	}
+	if resourceVersion := strings.TrimSpace(options.ExpectedResourceVersion); resourceVersion != "" {
+		deleteOptions.Preconditions = &metav1.Preconditions{ResourceVersion: &resourceVersion}
+	}
+	return resourceClient.Delete(ctx, name, deleteOptions)
 }
 
 // metricsSourceResult contains one metrics.k8s.io collection result before it is added to the overview.

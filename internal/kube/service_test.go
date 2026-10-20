@@ -8,6 +8,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -326,5 +327,49 @@ func TestStreamPodSessionValidation(t *testing.T) {
 				t.Fatalf("expected %q error, got %v", test.want, err)
 			}
 		})
+	}
+}
+
+// TestDeleteResourceUsesDryRunAndResourceVersion verifies generic deletes carry Kubernetes safety options.
+func TestDeleteResourceUsesDryRunAndResourceVersion(t *testing.T) {
+	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	client := fake.NewSimpleDynamicClient(runtime.NewScheme(), &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata": map[string]interface{}{
+			"name":            "api",
+			"namespace":       "default",
+			"resourceVersion": "7",
+		},
+	}})
+
+	if err := deleteResource(context.Background(), client, gvr, "default", "api", true, ResourceDeleteOptions{DryRun: true, Force: true, ExpectedResourceVersion: "7"}); err != nil {
+		t.Fatalf("delete resource: %v", err)
+	}
+	if len(client.Actions()) != 1 {
+		t.Fatalf("expected one delete action, got %d", len(client.Actions()))
+	}
+	deleteAction, ok := client.Actions()[0].(clienttesting.DeleteAction)
+	if !ok {
+		t.Fatalf("expected delete action, got %T", client.Actions()[0])
+	}
+	options := deleteAction.GetDeleteOptions()
+	if len(options.DryRun) != 1 || options.DryRun[0] != metav1.DryRunAll || options.GracePeriodSeconds == nil || *options.GracePeriodSeconds != 0 {
+		t.Fatalf("delete options lost dry-run or force behavior: %+v", options)
+	}
+	if options.Preconditions == nil || options.Preconditions.ResourceVersion == nil || *options.Preconditions.ResourceVersion != "7" {
+		t.Fatalf("delete options lost resource-version precondition: %+v", options.Preconditions)
+	}
+}
+
+// TestDeleteResourceRequiresNamespace verifies namespaced generic deletes cannot accidentally target every namespace.
+func TestDeleteResourceRequiresNamespace(t *testing.T) {
+	client := fake.NewSimpleDynamicClient(runtime.NewScheme())
+	err := deleteResource(context.Background(), client, schema.GroupVersionResource{Version: "v1", Resource: "secrets"}, "all", "credentials", true, ResourceDeleteOptions{ExpectedResourceVersion: "9"})
+	if err == nil || !strings.Contains(err.Error(), "namespace is required") {
+		t.Fatalf("expected namespace guard, got %v", err)
+	}
+	if len(client.Actions()) != 0 {
+		t.Fatalf("namespace validation should happen before Kubernetes calls: %v", client.Actions())
 	}
 }

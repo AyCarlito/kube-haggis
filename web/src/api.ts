@@ -4,6 +4,9 @@ import type {
   EphemeralContainerRequest,
   PodOperationResponse,
   ResourceDefinition,
+  ResourceDeleteItem,
+  ResourceDeleteResponse,
+  BulkDeleteResponse,
   ResourceEventsResponse,
   ResourceListResponse,
   ResourceObject,
@@ -134,6 +137,65 @@ export function applyResource(
       method: 'PATCH',
       headers: { 'Content-Type': 'application/apply-patch+yaml', 'X-KubeHaggis-Write': 'enabled' },
       body,
+    },
+  )
+}
+
+/** Runs one generic resource delete as a server-side dry-run or reviewed mutation. */
+export function deleteResource(
+  context: string,
+  definition: ResourceDefinition,
+  namespace: string,
+  name: string,
+  expectedResourceVersion: string,
+  dryRun: boolean,
+  confirmed: boolean,
+  confirmName: string,
+): Promise<ResourceDeleteResponse> {
+  return fetchJson<ResourceDeleteResponse>(
+    apiUrl('/api/resource', {
+      context,
+      group: definition.group,
+      version: definition.version,
+      resource: definition.resource,
+      namespace: definition.namespaced ? namespace : '',
+      name,
+      namespaced: String(definition.namespaced),
+      expectedResourceVersion,
+      dryRun: String(dryRun),
+      confirmed: String(confirmed),
+      confirmName,
+    }),
+    {
+      method: 'DELETE',
+      headers: { 'X-KubeHaggis-Write': 'enabled' },
+    },
+  )
+}
+
+/** Runs a bounded generic bulk delete with per-item dry-run or mutation results. */
+export function deleteResources(
+  context: string,
+  definition: ResourceDefinition,
+  namespace: string,
+  items: ResourceDeleteItem[],
+  dryRun: boolean,
+  confirmed: boolean,
+  confirmation: string,
+): Promise<BulkDeleteResponse> {
+  return fetchJson<BulkDeleteResponse>(
+    apiUrl('/api/resources/delete', {
+      context,
+      group: definition.group,
+      version: definition.version,
+      resource: definition.resource,
+      namespace: definition.namespaced ? namespace : '',
+      namespaced: String(definition.namespaced),
+    }),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      body: JSON.stringify({ items, dryRun, confirmed, confirmation }),
     },
   )
 }

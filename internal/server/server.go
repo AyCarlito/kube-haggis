@@ -27,6 +27,7 @@ type Server struct {
 	audit          *audit.Store
 	overview       func(context.Context, string) (kube.ClusterOverview, error)
 	related        relatedLoader
+	resourceDelete resourceDeleteLoader
 	workloadAction workloadActionLoader
 	nodeAction     nodeActionLoader
 	pvcOperations  pvcOperationsLoader
@@ -35,6 +36,9 @@ type Server struct {
 
 // relatedLoader describes the read-only relationship aggregation seam used by the HTTP handler.
 type relatedLoader func(context.Context, string, string, string, string, string, string, bool) (kube.RelatedResourceList, error)
+
+// resourceDeleteLoader describes the generic resource deletion seam used by HTTP handlers.
+type resourceDeleteLoader func(context.Context, string, string, string, string, string, string, bool, kube.ResourceDeleteOptions) error
 
 // New creates an HTTP server for the KubeHaggis API.
 func New(kubernetes *kube.Service, webDir string, logger *slog.Logger, auditStore *audit.Store) *Server {
@@ -50,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/overview", s.handleOverview)
 	mux.HandleFunc("/api/discovery", s.handleDiscovery)
 	mux.HandleFunc("/api/resources", s.handleResources)
+	mux.HandleFunc("/api/resources/delete", s.handleBulkResourceDelete)
 	mux.HandleFunc("/api/related", s.handleRelated)
 	mux.HandleFunc("/api/watch", s.handleWatch)
 	mux.HandleFunc("/api/events", s.handleEvents)
@@ -343,14 +348,56 @@ func (s *Server) handleResource(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, fmt.Errorf("name is required"))
 			return
 		}
-		err := s.kube.DeleteResource(request.Context(), query.Get("context"), group, version, resource, namespace, name, namespaced, parseBool(query.Get("dryRun")), parseBool(query.Get("force")))
-		if err != nil {
-			s.recordMutation(request, "delete", group, version, resource, namespace, name, parseBool(query.Get("dryRun")), false, err.Error())
+		deleteItem, validationErr := normalizeResourceDeleteItem(kube.ResourceDeleteItem{
+			Name:            name,
+			Namespace:       namespace,
+			ResourceVersion: query.Get("expectedResourceVersion"),
+		}, namespace, namespaced)
+		if validationErr != nil {
+			s.recordMutation(request, "delete", group, version, resource, namespace, name, parseBool(query.Get("dryRun")), false, "delete request validation failed")
+			writeError(writer, validationErr)
+			return
+		}
+		name = deleteItem.Name
+		namespace = deleteItem.Namespace
+		dryRun := parseBool(query.Get("dryRun"))
+		if !dryRun && !parseBool(query.Get("confirmed")) {
+			err := fmt.Errorf("destructive delete confirmation is required after a successful dry-run")
+			s.recordMutation(request, "delete", group, version, resource, namespace, name, false, false, deleteAuditDetail(err))
 			writeError(writer, err)
 			return
 		}
-		s.recordMutation(request, "delete", group, version, resource, namespace, name, parseBool(query.Get("dryRun")), true, "")
-		writeJSON(writer, http.StatusOK, map[string]string{"status": "deleted", "name": name})
+		if !dryRun && query.Get("confirmName") != name {
+			err := fmt.Errorf("delete confirmation requires the exact resource name")
+			s.recordMutation(request, "delete", group, version, resource, namespace, name, false, false, deleteAuditDetail(err))
+			writeError(writer, err)
+			return
+		}
+		expectedResourceVersion := deleteItem.ResourceVersion
+		if expectedResourceVersion == "" {
+			err := fmt.Errorf("resource version is required for safe deletion; refresh the resource and review again")
+			s.recordMutation(request, "delete", group, version, resource, namespace, name, dryRun, false, deleteAuditDetail(err))
+			writeError(writer, err)
+			return
+		}
+		err := s.deleteResource(request.Context(), query.Get("context"), group, version, resource, namespace, name, namespaced, kube.ResourceDeleteOptions{
+			DryRun:                  dryRun,
+			Force:                   parseBool(query.Get("force")),
+			ExpectedResourceVersion: expectedResourceVersion,
+		})
+		if err != nil {
+			s.recordMutation(request, "delete", group, version, resource, namespace, name, dryRun, false, deleteAuditDetail(err))
+			writeError(writer, fmt.Errorf("%s", deleteErrorMessage(err)))
+			return
+		}
+		detail := "resource deleted"
+		status := "deleted"
+		if dryRun {
+			detail = "resource deletion dry-run passed"
+			status = "dry-run passed"
+		}
+		s.recordMutation(request, "delete", group, version, resource, namespace, name, dryRun, true, detail)
+		writeJSON(writer, http.StatusOK, map[string]interface{}{"status": status, "name": name, "namespace": namespace, "dryRun": dryRun})
 	default:
 		writer.Header().Set("Allow", "GET, POST, PATCH, DELETE")
 		writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -481,7 +528,7 @@ func writeError(writer http.ResponseWriter, err error) {
 		status = http.StatusNotImplemented
 	case strings.Contains(message, "not available on this kubernetes api server"):
 		status = http.StatusNotImplemented
-	case strings.Contains(message, "pvc resize is unsupported") || strings.Contains(message, "unsupported pvc operation") || strings.Contains(message, "volumesnapshot api is unavailable") || strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "unsupported workload action") || strings.Contains(message, "unsupported node action") || strings.Contains(message, "not a supported workload") || strings.Contains(message, "not supported for node") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
+	case strings.Contains(message, "pvc resize is unsupported") || strings.Contains(message, "unsupported pvc operation") || strings.Contains(message, "volumesnapshot api is unavailable") || strings.Contains(message, "confirmation") || strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "unsupported workload action") || strings.Contains(message, "unsupported node action") || strings.Contains(message, "not a supported workload") || strings.Contains(message, "not supported for node") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
 		status = http.StatusBadRequest
 	}
 	writeJSON(writer, status, map[string]string{"error": err.Error()})

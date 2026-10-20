@@ -39,6 +39,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Targeted workload operations for scale, restart, pause/resume, rollback, image changes, and Job/CronJob scheduling with dry-run review and confirmation.
 - Native Node cordon, uncordon, drain, and taint workflows with eviction-only drain safety review and explicit confirmation.
 - PVC resize and VolumeSnapshot workflows with StorageClass/API capability states, dry-run review, and explicit confirmation.
+- High-friction single and bulk delete workflows with resource-version preconditions, server-side dry-run review, exact confirmations, per-item results, and redacted audit outcomes.
 - Local-only visual identity using the provided `haggis.svg` asset.
 
 ### Partially Implemented
@@ -52,7 +53,6 @@ The repository currently contains the first usable vertical slice. The backend a
 
 ### Remaining First-Release Work
 
-- Delete confirmations, bulk operations, and stronger destructive-action review.
 - Schema-generated forms for structural CRDs.
 - Kubeconfig reload controls and file-change handling.
 - UI for local mutation history.

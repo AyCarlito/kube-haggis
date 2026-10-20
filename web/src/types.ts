@@ -49,6 +49,42 @@ export interface ResourceListResponse {
   resourceVersion: string
 }
 
+/** Describes one safe, resource-versioned selection in a generic bulk delete. */
+export interface ResourceDeleteItem {
+  name: string
+  namespace?: string
+  resourceVersion: string
+}
+
+/** Contains the redacted result of one generic resource deletion. */
+export interface ResourceDeleteResponse {
+  name: string
+  namespace?: string
+  dryRun: boolean
+  status: string
+}
+
+/** Reports one generic bulk-delete result without returning resource bodies. */
+export interface BulkDeleteItemResult {
+  name: string
+  namespace?: string
+  success: boolean
+  status: string
+  error?: string
+}
+
+/** Contains bulk-delete counts and bounded per-item results. */
+export interface BulkDeleteResponse {
+  resource: string
+  namespace?: string
+  dryRun: boolean
+  total: number
+  succeeded: number
+  failed: number
+  status: string
+  items: BulkDeleteItemResult[]
+}
+
 /** Contains node counters shown on the cluster overview. */
 export interface NodeOverview {
   total: number

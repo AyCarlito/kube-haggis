@@ -27,6 +27,7 @@ import {
   Settings2,
   ShieldCheck,
   TerminalSquare,
+  Trash2,
   Upload,
   X,
   Zap,
@@ -41,6 +42,8 @@ import {
   applyNodeAction,
   applyPVCAction,
   applyWorkloadAction,
+  deleteResource,
+  deleteResources,
   fetchContexts,
   fetchDiscovery,
   fetchOverview,
@@ -66,6 +69,9 @@ import type {
   EventSummary,
   PortForwardMessage,
   ResourceDefinition,
+  ResourceDeleteItem,
+  ResourceDeleteResponse,
+  BulkDeleteResponse,
   ResourceListResponse,
   ResourceObject,
   ResourceSummary,
@@ -671,16 +677,30 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   const [search, setSearch] = useState('')
   const [labelSelector, setLabelSelector] = useState('')
   const [watching, setWatching] = useState(false)
+  const [refreshNonce, setRefreshNonce] = useState(0)
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([])
+  const [bulkReview, setBulkReview] = useState<BulkDeleteResponse | null>(null)
+  const [bulkReviewSelection, setBulkReviewSelection] = useState<string[]>([])
+  const [bulkResults, setBulkResults] = useState<BulkDeleteResponse | null>(null)
+  const [bulkConfirmed, setBulkConfirmed] = useState(false)
+  const [bulkConfirmation, setBulkConfirmation] = useState('')
+  const [bulkBusy, setBulkBusy] = useState<'review' | 'apply' | ''>('')
+  const [bulkError, setBulkError] = useState('')
 
   useEffect(() => {
     let active = true
     let stream: EventSource | undefined
+    setBulkReview(null)
+    setBulkReviewSelection([])
+    setBulkConfirmed(false)
+    setBulkConfirmation('')
     const load = () => {
       setLoading(true)
       fetchResources(context, definition, namespace, labelSelector)
         .then((data) => {
           if (!active) return
           setResponse(data)
+          setSelectedKeys((current) => current.filter((key) => data.items.some((item) => resourceItemKey(item) === key)))
           setError('')
           if (!stream && data.resourceVersion) {
             stream = new EventSource(watchUrl(context, definition, namespace, data.resourceVersion))
@@ -698,10 +718,123 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
       stream?.close()
       setWatching(false)
     }
-  }, [context, definition, namespace, labelSelector])
+  }, [context, definition, namespace, labelSelector, refreshNonce])
 
   if (!context) return <SetupState />
   const filtered = response?.items.filter((item) => item.name.toLowerCase().includes(search.toLowerCase())) ?? []
+  const selected = response?.items.filter((item) => selectedKeys.includes(resourceItemKey(item))) ?? []
+  const allFilteredSelected = filtered.length > 0 && filtered.every((item) => selectedKeys.includes(resourceItemKey(item)))
+  const selectionLocked = Boolean(bulkReview) || Boolean(bulkBusy)
+
+  /** Clears a bulk review and any stale result when the selection changes. */
+  function clearBulkReview() {
+    setBulkReview(null)
+    setBulkReviewSelection([])
+    setBulkConfirmed(false)
+    setBulkConfirmation('')
+    setBulkError('')
+  }
+
+  /** Changes one row selection and invalidates any older destructive review. */
+  function toggleSelection(item: ResourceSummary, checked: boolean) {
+    if (selectionLocked) return
+    clearBulkReview()
+    const key = resourceItemKey(item)
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      if (checked) next.add(key)
+      else next.delete(key)
+      return [...next]
+    })
+    setBulkResults(null)
+  }
+
+  /** Selects or clears the currently filtered rows without selecting hidden rows. */
+  function toggleFilteredSelection(checked: boolean) {
+    if (selectionLocked) return
+    clearBulkReview()
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      filtered.forEach((item) => {
+        if (checked) next.add(resourceItemKey(item))
+        else next.delete(resourceItemKey(item))
+      })
+      return [...next]
+    })
+    setBulkResults(null)
+  }
+
+  /** Runs a Kubernetes dry-run for the exact selected resource versions. */
+  async function reviewBulkDelete() {
+    if (!writeEnabled) {
+      setBulkError('Enable write mode before reviewing a bulk delete.')
+      return
+    }
+    if (!selected.length) {
+      setBulkError('Select at least one resource before reviewing a bulk delete.')
+      return
+    }
+    if (selected.some((item) => !item.resourceVersion)) {
+      setBulkError('Every selected resource needs a resource version. Refresh the list and select it again.')
+      return
+    }
+    setBulkBusy('review')
+    setBulkError('')
+    setBulkResults(null)
+    try {
+      const result = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), true, false, '')
+      setBulkReview(result)
+      setBulkReviewSelection(selected.map(resourceDeleteReviewKey).sort())
+      setBulkConfirmed(false)
+      setBulkConfirmation('')
+    } catch (reviewError) {
+      setBulkError((reviewError as Error).message)
+    } finally {
+      setBulkBusy('')
+    }
+  }
+
+  /** Applies only the selection and resource versions that passed the bulk dry-run. */
+  async function applyReviewedBulkDelete() {
+    if (!writeEnabled) {
+      setBulkError('Enable write mode before applying a bulk delete.')
+      return
+    }
+    if (!bulkReview || bulkReview.status !== 'dry-run passed') {
+      setBulkError('Resolve every dry-run error before applying this bulk delete.')
+      return
+    }
+    const currentSelection = selected.map(resourceDeleteReviewKey).sort()
+    if (currentSelection.length !== bulkReviewSelection.length || currentSelection.some((key, index) => key !== bulkReviewSelection[index])) {
+      setBulkReview(null)
+      setBulkReviewSelection([])
+      setBulkConfirmed(false)
+      setBulkConfirmation('')
+      setBulkError('The selection or a resource version changed after review. Refresh the list and review the delete again.')
+      return
+    }
+    const expectedConfirmation = bulkDeleteConfirmation(selected.length)
+    if (!bulkConfirmed || bulkConfirmation.trim() !== expectedConfirmation) {
+      setBulkError(`Type ${expectedConfirmation} and check the confirmation box before deleting.`)
+      return
+    }
+    setBulkBusy('apply')
+    setBulkError('')
+    try {
+      const result = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), false, true, bulkConfirmation.trim())
+      setBulkResults(result)
+      setBulkReview(null)
+      setBulkReviewSelection([])
+      setBulkConfirmed(false)
+      setBulkConfirmation('')
+      setSelectedKeys((current) => current.filter((key) => !result.items.some((item) => item.success && resourceItemKey(item) === key)))
+      setRefreshNonce((value) => value + 1)
+    } catch (applyError) {
+      setBulkError((applyError as Error).message)
+    } finally {
+      setBulkBusy('')
+    }
+  }
 
   return (
     <div className="resource-page">
@@ -712,15 +845,22 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
       <div className="table-toolbar">
         <label className="search-field"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${definition.resource}`} /><kbd>/</kbd></label>
         <label className="filter-field"><ListFilter size={15} /><input value={labelSelector} onChange={(event) => setLabelSelector(event.target.value)} placeholder="label selector" /></label>
-        <button className="icon-button toolbar-action" onClick={() => window.location.reload()} aria-label="Refresh resources"><RefreshCw size={16} /></button>
+        <button className="icon-button toolbar-action" onClick={() => setRefreshNonce((value) => value + 1)} aria-label="Refresh resources"><RefreshCw size={16} /></button>
         <button className="primary-button" disabled={!writeEnabled} onClick={onCreate} title={writeEnabled ? `Create a ${definition.kind}` : 'Enable write mode to create resources'}><span>+</span> New {definition.kind}</button>
       </div>
+      <div className="selection-toolbar">
+        <span><strong>{selected.length}</strong> selected / {definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster scope' : namespace}</span>
+        <div><button type="button" className="secondary-button danger-button" disabled={!writeEnabled || !selected.length || selectionLocked} onClick={() => void reviewBulkDelete()}><Trash2 size={14} /> Review delete{selected.length ? ` (${selected.length})` : ''}</button>{selected.length > 0 && <button type="button" className="text-button" disabled={selectionLocked} onClick={() => { setSelectedKeys([]); clearBulkReview(); setBulkResults(null) }}>Clear selection</button>}</div>
+      </div>
       {error ? <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div> : null}
+      {bulkError ? <div className="inline-error page-error"><AlertTriangle size={15} />{bulkError}</div> : null}
+      {bulkReview && <BulkDeleteReviewPanel definition={definition} namespace={namespace} items={selected} review={bulkReview} confirmed={bulkConfirmed} confirmation={bulkConfirmation} busy={bulkBusy} onConfirmed={setBulkConfirmed} onConfirmation={setBulkConfirmation} onCancel={clearBulkReview} onApply={() => void applyReviewedBulkDelete()} />}
+      {bulkResults && <BulkDeleteResults definition={definition} result={bulkResults} />}
       <div className="resource-table-wrap">
-        <table className="resource-table"><thead><tr><th><span className="table-check" /></th><th>Name</th><th>Namespace</th><th>Status</th><th>Ready</th><th>Age</th><th>Labels</th><th /></tr></thead><tbody>
+        <table className="resource-table"><thead><tr><th><input className="table-checkbox" type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || selectionLocked} aria-label="Select all visible resources" onChange={(event) => toggleFilteredSelection(event.target.checked)} /></th><th>Name</th><th>Namespace</th><th>Status</th><th>Ready</th><th>Age</th><th>Labels</th><th /></tr></thead><tbody>
           {loading && !response ? <tr><td colSpan={8}><div className="table-loading"><LoaderCircle size={18} className="spin" /> Reading API objects</div></td></tr> : null}
           {!loading && !filtered.length ? <tr><td colSpan={8}><div className="table-empty"><Box size={20} /><strong>No matching objects</strong><span>Try a different search or label selector.</span></div></td></tr> : null}
-          {filtered.map((item) => <ResourceRow key={`${item.namespace}/${item.name}`} item={item} onOpen={onOpen} />)}
+          {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
         </tbody></table>
       </div>
       <div className="table-footer"><span>Showing {filtered.length} of {response?.items.length ?? 0}</span><span><span className="table-footer-dot" /> updates arrive through the Kubernetes watch</span></div>
@@ -729,10 +869,32 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
 }
 
 /** Renders one row in the generic resource table. */
-function ResourceRow({ item, onOpen }: { item: ResourceSummary; onOpen: (name: string, namespace?: string) => void }) {
+function ResourceRow({ item, selected, selectionDisabled, onToggle, onOpen }: { item: ResourceSummary; selected: boolean; selectionDisabled: boolean; onToggle: (item: ResourceSummary, checked: boolean) => void; onOpen: (name: string, namespace?: string) => void }) {
   const statusTone = item.status.toLowerCase() === 'true' || item.status.toLowerCase() === 'running' || item.status.toLowerCase() === 'active' ? 'good' : item.status.toLowerCase() === 'failed' || item.status.toLowerCase() === 'false' ? 'warning' : 'neutral'
   const labels = Object.entries(item.labels ?? {}).slice(0, 2)
-  return <tr onClick={() => onOpen(item.name, item.namespace)}><td><span className="table-check" /></td><td><button className="resource-name" onClick={(event) => { event.stopPropagation(); onOpen(item.name, item.namespace) }}>{item.name}</button><span className="resource-uid">{item.uid.slice(0, 12)}</span></td><td><span className="namespace-cell">{item.namespace || 'cluster'}</span></td><td><span className={`status-pill status-${statusTone}`}><span />{item.status}</span></td><td><code className="ready-cell">{item.ready || '—'}</code></td><td><span className="age-cell">{relativeTime(item.createdAt)}</span></td><td><div className="label-stack">{labels.map(([key, value]) => <span key={key}>{key}={value}</span>)}{Object.keys(item.labels ?? {}).length > 2 && <span>+{Object.keys(item.labels ?? {}).length - 2}</span>}</div></td><td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
+  return <tr className={selected ? 'resource-row-selected' : ''} onClick={() => onOpen(item.name, item.namespace)}><td><input className="table-checkbox" type="checkbox" checked={selected} disabled={selectionDisabled} aria-label={`Select ${item.name}`} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggle(item, event.target.checked)} /></td><td><button className="resource-name" onClick={(event) => { event.stopPropagation(); onOpen(item.name, item.namespace) }}>{item.name}</button><span className="resource-uid">{item.uid.slice(0, 12)}</span></td><td><span className="namespace-cell">{item.namespace || 'cluster'}</span></td><td><span className={`status-pill status-${statusTone}`}><span />{item.status}</span></td><td><code className="ready-cell">{item.ready || '—'}</code></td><td><span className="age-cell">{relativeTime(item.createdAt)}</span></td><td><div className="label-stack">{labels.map(([key, value]) => <span key={key}>{key}={value}</span>)}{Object.keys(item.labels ?? {}).length > 2 && <span>+{Object.keys(item.labels ?? {}).length - 2}</span>}</div></td><td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
+}
+
+/** Renders the high-friction dry-run and confirmation review for a bulk delete. */
+function BulkDeleteReviewPanel({ definition, namespace, items, review, confirmed, confirmation, busy, onConfirmed, onConfirmation, onCancel, onApply }: { definition: ResourceDefinition; namespace: string; items: ResourceSummary[]; review: BulkDeleteResponse; confirmed: boolean; confirmation: string; busy: 'review' | 'apply' | ''; onConfirmed: (confirmed: boolean) => void; onConfirmation: (confirmation: string) => void; onCancel: () => void; onApply: () => void }) {
+  const expectedConfirmation = bulkDeleteConfirmation(items.length)
+  const ready = review.status === 'dry-run passed'
+  const canApply = ready && confirmed && confirmation.trim() === expectedConfirmation && busy !== 'apply'
+  const reviewFailures = review.items.filter((item) => !item.success)
+  return <div className={`bulk-delete-review ${ready ? '' : 'bulk-delete-review-blocked'}`}>
+    <div className="bulk-delete-heading"><span className={ready ? 'review-ready' : 'node-review-blocked-chip'}>{ready ? <><Check size={13} /> Dry-run passed</> : <><AlertTriangle size={13} /> Review blocked</>}</span><strong>Delete {items.length} {definition.kind}{items.length === 1 ? '' : 's'}</strong></div>
+    <p>{ready ? 'Kubernetes accepted this exact resource-versioned deletion set during server-side dry-run. No cluster state has changed.' : 'No deletion was submitted. Resolve every listed item error, refresh if needed, and review the full selection again.'}</p>
+    <div className="bulk-delete-scope"><span>Resource context</span><strong>{definition.group ? `${definition.group}/${definition.version}` : definition.version} / {definition.resource} / {namespace === 'all' || !definition.namespaced ? 'cluster scope' : namespace}</strong></div>
+    <div className="bulk-delete-items"><div className="bulk-delete-items-heading"><span>Selected resources</span><span>{items.length} total</span></div>{items.slice(0, 8).map((item) => <code key={resourceItemKey(item)}>{item.namespace ? `${item.namespace}/` : ''}{item.name} @ rv/{item.resourceVersion}</code>)}{items.length > 8 && <span className="bulk-delete-more">+{items.length - 8} more selected</span>}</div>
+    {reviewFailures.length > 0 && <div className="bulk-delete-failures"><strong>Dry-run errors</strong>{reviewFailures.map((item) => <span key={`${item.namespace || ''}/${item.name}`}><AlertTriangle size={12} />{item.namespace ? `${item.namespace}/` : ''}{item.name}: {item.error || 'delete review failed'}</span>)}</div>}
+    {ready && <><label className="destructive-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => onConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed every selected resource and understand this permanently deletes {items.length} Kubernetes object{items.length === 1 ? '' : 's'}. There is no undo, and owner/finalizer behavior may affect related resources.</span></label><label className="destructive-confirm-input"><span>Type <strong>{expectedConfirmation}</strong> to authorize the final delete</span><input value={confirmation} onChange={(event) => onConfirmation(event.target.value)} disabled={busy === 'apply'} autoComplete="off" spellCheck={false} /></label></>}
+    <div className="bulk-delete-actions"><button type="button" className="secondary-button" onClick={onCancel} disabled={Boolean(busy)}>Change selection</button><button type="button" className="danger-button primary-button" onClick={onApply} disabled={!canApply}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />} {busy === 'apply' ? 'Deleting' : `Delete ${items.length} resources`}</button></div>
+  </div>
+}
+
+/** Renders safe per-item outcomes after a bulk delete attempt. */
+function BulkDeleteResults({ definition, result }: { definition: ResourceDefinition; result: BulkDeleteResponse }) {
+  return <div className="bulk-delete-results"><div className="bulk-delete-results-heading"><div><span className="eyebrow"><span className="eyebrow-mark" /> Mutation results</span><strong>{titleCase(definition.resource)} / {result.succeeded} succeeded / {result.failed} failed</strong></div><span className={result.failed ? 'status-pill status-warning' : 'status-pill status-good'}><span />{result.status}</span></div><div className="bulk-result-list">{result.items.map((item) => <div className="bulk-result-row" key={`${item.namespace || ''}/${item.name}`}><span className={item.success ? 'bulk-result-mark bulk-result-success' : 'bulk-result-mark bulk-result-failure'}>{item.success ? <Check size={13} /> : <AlertTriangle size={13} />}</span><div><strong>{item.namespace ? `${item.namespace}/` : ''}{item.name}</strong><span>{item.success ? item.status : item.error || 'delete failed'}</span></div></div>)}</div></div>
 }
 
 /** Renders the tabbed detail view for one generic resource. */
@@ -846,7 +1008,8 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
     <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
-    <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => setTab(item)}>{item === 'yaml' ? 'YAML editor' : titleCase(item)}</button>)}</div>
+     {!isNew && <DeleteReviewPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} />}
+     <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => setTab(item)}>{item === 'yaml' ? 'YAML editor' : titleCase(item)}</button>)}</div>
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
        {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
         {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
@@ -860,6 +1023,77 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
       {tab === 'files' && definition.resource === 'pods' && !isNew && <PodFileCopyPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
       {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
       {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
+  </div>
+}
+
+/** Renders a version-aware dry-run and exact-name confirmation flow for one delete. */
+function DeleteReviewPanel({ context, namespace, definition, name, resourceVersion, writeEnabled, onDeleted }: { context: string; namespace: string; definition: ResourceDefinition; name: string; resourceVersion: string; writeEnabled: boolean; onDeleted: () => void }) {
+  const [review, setReview] = useState<ResourceDeleteResponse | null>(null)
+  const [confirmed, setConfirmed] = useState(false)
+  const [confirmationText, setConfirmationText] = useState('')
+  const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
+  const [error, setError] = useState('')
+
+  /** Runs the server-side Kubernetes dry-run before exposing final delete controls. */
+  async function reviewDelete() {
+    if (!writeEnabled) {
+      setError('Enable write mode before reviewing a delete.')
+      return
+    }
+    if (!resourceVersion) {
+      setError('This resource has no resource version. Refresh it before reviewing a delete.')
+      return
+    }
+    setBusy('review')
+    setError('')
+    try {
+      const result = await deleteResource(context, definition, namespace, name, resourceVersion, true, false, '')
+      setReview(result)
+      setConfirmed(false)
+      setConfirmationText('')
+    } catch (reviewError) {
+      setError((reviewError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /** Applies only the reviewed resource version after both confirmation controls pass. */
+  async function applyReviewedDelete() {
+    if (!writeEnabled) {
+      setError('Enable write mode before applying a delete.')
+      return
+    }
+    if (!review || review.status !== 'dry-run passed') {
+      setError('Run the server-side dry-run before applying this delete.')
+      return
+    }
+    if (!confirmed || confirmationText.trim() !== name) {
+      setError(`Check the confirmation box and type the exact resource name, ${name}.`)
+      return
+    }
+    setBusy('apply')
+    setError('')
+    try {
+      await deleteResource(context, definition, namespace, name, resourceVersion, false, true, confirmationText.trim())
+      onDeleted()
+    } catch (applyError) {
+      setError((applyError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const ready = review?.status === 'dry-run passed'
+  const canApply = Boolean(ready && confirmed && confirmationText.trim() === name && busy !== 'apply')
+  return <div className="delete-review-panel">
+    <div className="delete-review-header"><div className="logs-title"><Trash2 size={16} /><strong>Delete resource</strong><span>destructive action</span></div><span className="delete-review-scope">review then delete</span></div>
+    <div className="delete-review-intro"><strong>{definition.kind} / {namespace || 'cluster scope'} / {name}</strong><span>Deletion is permanent. KubeHaggis requires this exact resource version to pass a Kubernetes server-side dry-run before the final request.</span></div>
+    {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to review and delete. Kubernetes RBAC still authorizes the final request.</div>}
+    {!review && <div className="delete-review-start"><span>No cluster state changes during review. The final delete is a separate, confirmed request.</span><button type="button" className="danger-button primary-button" disabled={!writeEnabled || Boolean(busy)} onClick={() => void reviewDelete()}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing delete' : 'Review delete'}</button></div>}
+    {review && <div className={`delete-review ${ready ? '' : 'delete-review-blocked'}`}><div className="delete-review-heading"><span className={ready ? 'review-ready' : 'node-review-blocked-chip'}>{ready ? <><Check size={13} /> Dry-run passed</> : <><AlertTriangle size={13} /> Review blocked</>}</span><strong>{ready ? 'Delete is ready for final confirmation' : 'Delete cannot proceed'}</strong></div><p>{ready ? 'Kubernetes accepted this exact resource-versioned delete during server-side dry-run. No cluster state has changed.' : 'No deletion was submitted. Refresh the resource and resolve the review failure before retrying.'}</p>{ready && <><label className="destructive-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed this exact resource and understand Kubernetes will permanently delete it. Related resources may be affected by owner references or finalizers.</span></label><label className="destructive-confirm-input"><span>Type the exact resource name to authorize deletion: <strong>{name}</strong></span><input value={confirmationText} onChange={(event) => setConfirmationText(event.target.value)} disabled={busy === 'apply'} autoComplete="off" spellCheck={false} /></label></>}
+      <div className="delete-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setConfirmed(false); setConfirmationText(''); setError('') }} disabled={Boolean(busy)}>Change review</button><button type="button" className="danger-button primary-button" onClick={() => void applyReviewedDelete()} disabled={!canApply}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />} {busy === 'apply' ? 'Deleting' : 'Confirm and delete'}</button></div></div>}
+    {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
   </div>
 }
 
@@ -1075,7 +1309,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
       {action === 'schedule' && <label className="workload-operation-field"><span>Cron schedule</span><input value={schedule} onChange={(event) => setSchedule(event.target.value)} disabled={disabled} placeholder="*/15 * * * *" /></label>}
       <div className="workload-operation-actions"><span>{selectedOption?.detail}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review)}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review action'}</button></div>
     </form>
-    {review && <div className="workload-review"><div className="workload-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{workloadActionLabel(action)} is ready</strong></div><p>Kubernetes accepted this exact resource-versioned operation for server-side dry-run. No cluster state has changed.</p><label className="workload-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the action and understand it changes workload state.</span></label><div className="workload-review-actions"><button type="button" className="secondary-button" onClick={editAction} disabled={Boolean(busy)}>Change action</button><button type="button" className="primary-button" onClick={() => void applyReviewedAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
+    {review && <div className="workload-review"><div className="workload-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{workloadActionLabel(action)} is ready</strong></div><p>Kubernetes accepted this exact resource-versioned operation for server-side dry-run. No cluster state has changed; the final request can still change live workload behavior.</p><label className="workload-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the exact action and authorize the final request to change workload state.</span></label><div className="workload-review-actions"><button type="button" className="secondary-button" onClick={editAction} disabled={Boolean(busy)}>Change action</button><button type="button" className="primary-button" onClick={() => void applyReviewedAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
     {success && <div className="operation-success"><Check size={15} />{success}</div>}
     <div className="workload-operation-footer"><span><ShieldCheck size={14} /> Native dynamic update / subresource</span><span>RBAC denials, conflicts, and unsupported APIs stay visible.</span></div>
@@ -1242,7 +1476,7 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
       {action === 'snapshot' && <div className="pvc-operation-grid"><label className="pvc-operation-field"><span>Snapshot name</span><input value={snapshotName} onChange={(event) => setSnapshotName(event.target.value)} disabled={disabled} placeholder="data-copy" required /></label><label className="pvc-operation-field"><span>VolumeSnapshotClass</span><select value={snapshotClassName} onChange={(event) => setSnapshotClassName(event.target.value)} disabled={disabled}><option value="">Choose a class</option>{snapshotClasses.map((item) => <option key={item.name} value={item.name}>{item.name}{item.driver ? ` / ${item.driver}` : ''}</option>)}</select></label></div>}
       <div className="pvc-operation-actions"><span>{selectedAvailable ? 'Review first; no cluster state changes during dry-run.' : 'The selected native capability must be available before review.'}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review) || loading || !selectedAvailable}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review operation'}</button></div>
     </form>
-    {review && <div className="pvc-review"><div className="pvc-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{action === 'resize' ? 'Resize is ready' : 'Snapshot is ready'}</strong></div><p>Kubernetes accepted this exact resource-versioned request during server-side dry-run. No cluster state has changed.</p><label className="pvc-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the dry-run and explicitly confirm this {action === 'resize' ? 'PVC resize' : 'VolumeSnapshot creation'}.</span></label><div className="pvc-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setConfirmed(false); setError('') }} disabled={Boolean(busy)}>Change operation</button><button type="button" className="primary-button" onClick={() => void applyReviewedPVCAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
+    {review && <div className="pvc-review"><div className="pvc-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{action === 'resize' ? 'Resize is ready' : 'Snapshot is ready'}</strong></div><p>Kubernetes accepted this exact resource-versioned request during server-side dry-run. No cluster state has changed; the final request is separate and must be explicitly authorized.</p><label className="pvc-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the exact dry-run and explicitly authorize this {action === 'resize' ? 'PVC resize' : 'VolumeSnapshot creation'}.</span></label><div className="pvc-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setConfirmed(false); setError('') }} disabled={Boolean(busy)}>Change operation</button><button type="button" className="primary-button" onClick={() => void applyReviewedPVCAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
     {success && <div className="operation-success"><Check size={15} />{success}</div>}
     <div className="pvc-operation-footer"><span><ShieldCheck size={14} /> Full-object PVC update / native snapshot create</span><span>RBAC, conflicts, unsupported APIs, and absent snapshot CRDs stay visible.</span></div>
@@ -1418,7 +1652,7 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
   const canApply = Boolean(review?.ready && review.status === 'dry-run passed' && confirmed && (action !== 'drain' || confirmationText.trim() === name))
   return <div className="node-operation-panel">
     <div className="node-operation-header"><div className="logs-title"><Server size={16} /><strong>Node operations</strong><span>typed core/v1 + policy/v1</span></div><span className="node-operation-scope">review then apply</span></div>
-    <div className="node-operation-intro"><strong>{nodeIsCordoned ? 'This Node is currently cordoned.' : 'This Node accepts scheduled workloads.'}</strong><span>Cordon and taint updates use full-object resource-versioned Node updates. Drain uses Kubernetes eviction APIs and never force-deletes Pods.</span></div>
+    <div className="node-operation-intro"><strong>{nodeIsCordoned ? 'This Node is currently cordoned.' : 'This Node accepts scheduled workloads.'}</strong><span>Cordon and taint updates use full-object resource-versioned Node updates. Drain is destructive: it can make workloads unavailable, uses Kubernetes eviction APIs, and never force-deletes Pods.</span></div>
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to review and apply Node operations. Kubernetes RBAC still authorizes every final request.</div>}
     <form className="node-operation-form" onSubmit={(event) => { event.preventDefault(); void reviewNodeAction() }}>
       <div className="node-action-picker"><label className="node-operation-field"><span>Operation</span><select value={action} onChange={(event) => changeNodeAction(event.target.value as NodeAction)} disabled={disabled}>{options.map((option) => <option key={option.action} value={option.action}>{option.label}</option>)}</select></label><div className="node-action-detail">{selectedOption?.detail}</div></div>
@@ -1437,7 +1671,7 @@ function nodeActionOptions(): NodeActionOption[] {
   return [
     { action: 'cordon', label: 'Cordon Node', detail: 'Mark the Node unschedulable while existing Pods continue running.' },
     { action: 'uncordon', label: 'Uncordon Node', detail: 'Allow the scheduler to place new Pods on this Node again.' },
-    { action: 'drain', label: 'Drain Node', detail: 'Cordon first, then evict eligible managed Pods through policy/v1.' },
+    { action: 'drain', label: 'Drain Node', detail: 'Destructive: cordon first, then evict eligible managed Pods through policy/v1 without force deletion.' },
     { action: 'add-taint', label: 'Add taint', detail: 'Add one validated key/effect/value scheduling rule without replacing another taint.' },
     { action: 'remove-taint', label: 'Remove taint', detail: 'Remove one exact existing key/effect/value tuple after a fresh Node read.' },
   ]
@@ -2361,6 +2595,26 @@ function routeHref(path: string, context: string, namespace: string): string {
 /** Converts a Kubernetes resource slug into a human-readable heading. */
 function titleCase(value: string): string {
   return value.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+/** Produces a stable namespace/name key for selection and result reconciliation. */
+function resourceItemKey(item: { name: string; namespace?: string }): string {
+  return `${item.namespace || ''}/${item.name}`
+}
+
+/** Converts a resource summary into the bounded coordinates sent for deletion review. */
+function resourceDeleteItem(item: ResourceSummary): ResourceDeleteItem {
+  return { name: item.name, namespace: item.namespace, resourceVersion: item.resourceVersion }
+}
+
+/** Captures the reviewed namespace/name and resource version for stale-review detection. */
+function resourceDeleteReviewKey(item: ResourceSummary): string {
+  return `${resourceItemKey(item)}@${item.resourceVersion}`
+}
+
+/** Builds the exact bounded phrase required before a bulk delete mutation. */
+function bulkDeleteConfirmation(count: number): string {
+  return `DELETE ${count}`
 }
 
 /** Produces a compact host representation for dashboard endpoint labels. */
