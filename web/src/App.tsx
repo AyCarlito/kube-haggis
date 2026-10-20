@@ -38,6 +38,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { stringify } from 'yaml'
 import {
   applyResource,
+  applyNodeAction,
   applyWorkloadAction,
   fetchContexts,
   fetchDiscovery,
@@ -73,6 +74,10 @@ import type {
   TerminalMessage,
   MetricsOverview,
   MetricsState,
+  NodeAction,
+  NodeActionRequest,
+  NodeActionResponse,
+  NodeTaint,
   NodeMetric,
   PodMetric,
   WorkloadAction,
@@ -102,6 +107,7 @@ const navGroups = [
     items: [
       { label: 'Cluster overview', resource: undefined, icon: Gauge },
       { label: 'Pods', resource: 'pods', icon: CircleDot },
+      { label: 'Nodes', resource: 'nodes', icon: Server },
       { label: 'Events', resource: 'events', icon: Activity },
     ],
   },
@@ -827,7 +833,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
   const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
-  const detailTabs = targetedWorkloadResource(definition) && !isNew ? [...baseDetailTabs.slice(0, 1), 'operations', ...baseDetailTabs.slice(1)] : baseDetailTabs
+  const detailTabs = (targetedWorkloadResource(definition) || targetedNodeResource(definition)) && !isNew ? [...baseDetailTabs.slice(0, 1), 'operations', ...baseDetailTabs.slice(1)] : baseDetailTabs
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
@@ -836,7 +842,8 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => setTab(item)}>{item === 'yaml' ? 'YAML editor' : titleCase(item)}</button>)}</div>
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
        {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
-       {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+        {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+        {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
       {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
@@ -1065,6 +1072,239 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     {success && <div className="operation-success"><Check size={15} />{success}</div>}
     <div className="workload-operation-footer"><span><ShieldCheck size={14} /> Native dynamic update / subresource</span><span>RBAC denials, conflicts, and unsupported APIs stay visible.</span></div>
   </div>
+}
+
+/** Describes one native Node operation exposed by the detail form. */
+type NodeActionOption = {
+  action: NodeAction
+  label: string
+  detail: string
+}
+
+/** Renders a two-step Node operation form with drain impact review and strong confirmation. */
+function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }: { context: string; name: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+  const options = nodeActionOptions()
+  const taints = nodeTaints(object)
+  const [action, setAction] = useState<NodeAction>('cordon')
+  const [taintKey, setTaintKey] = useState('')
+  const [taintValue, setTaintValue] = useState('')
+  const [taintEffect, setTaintEffect] = useState('NoSchedule')
+  const [taintIndex, setTaintIndex] = useState(0)
+  const [deleteEmptyDirData, setDeleteEmptyDirData] = useState(false)
+  const [ignoreDaemonSets, setIgnoreDaemonSets] = useState(false)
+  const [gracePeriod, setGracePeriod] = useState('')
+  const [review, setReview] = useState<NodeActionResponse | null>(null)
+  const [confirmed, setConfirmed] = useState(false)
+  const [confirmationText, setConfirmationText] = useState('')
+  const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const selectedOption = options.find((option) => option.action === action) || options[0]
+  const selectedTaint = taints[taintIndex]
+  const nodeIsCordoned = nodeUnschedulable(object)
+
+  useEffect(() => {
+    setTaintIndex((current) => Math.min(current, Math.max(taints.length - 1, 0)))
+    setReview(null)
+    setConfirmed(false)
+    setConfirmationText('')
+  }, [object])
+
+  /** Clears a review so the operator can change the Node operation. */
+  function editNodeAction() {
+    setReview(null)
+    setConfirmed(false)
+    setConfirmationText('')
+    setError('')
+  }
+
+  /** Changes the selected Node operation and invalidates an older dry-run review. */
+  function changeNodeAction(value: NodeAction) {
+    setAction(value)
+    setReview(null)
+    setConfirmed(false)
+    setConfirmationText('')
+    setError('')
+    setSuccess('')
+    if (value === 'remove-taint' && taints.length) {
+      const next = taints[Math.min(taintIndex, taints.length - 1)]
+      setTaintKey(next.key)
+      setTaintValue(next.value || '')
+      setTaintEffect(next.effect)
+    }
+  }
+
+  /** Builds and validates the explicit payload sent to the Node action endpoint. */
+  function buildNodeRequest(dryRun: boolean): NodeActionRequest | null {
+    const request: NodeActionRequest = {
+      action,
+      dryRun,
+      expectedResourceVersion: metadataString(object, 'resourceVersion'),
+    }
+    if (action === 'add-taint') {
+      if (!taintKey.trim()) {
+        setError('A taint key is required.')
+        return null
+      }
+      request.taintKey = taintKey.trim()
+      request.taintValue = taintValue.trim()
+      request.taintEffect = taintEffect
+    }
+    if (action === 'remove-taint') {
+      if (!selectedTaint) {
+        setError('This Node has no taints available to remove.')
+        return null
+      }
+      request.taintKey = selectedTaint.key
+      request.taintValue = selectedTaint.value || ''
+      request.taintEffect = selectedTaint.effect
+    }
+    if (action === 'drain') {
+      request.deleteEmptyDirData = deleteEmptyDirData
+      request.ignoreDaemonSets = ignoreDaemonSets
+      if (gracePeriod.trim()) {
+        const parsedGrace = Number(gracePeriod)
+        if (!Number.isInteger(parsedGrace) || parsedGrace < 0 || parsedGrace > 86400) {
+          setError('Eviction grace must be a whole number from 0 to 86400 seconds, or blank for each Pod default.')
+          return null
+        }
+        request.gracePeriodSeconds = parsedGrace
+      }
+    }
+    return request
+  }
+
+  /** Runs Kubernetes server-side dry-run validation used as the Node review gate. */
+  async function reviewNodeAction() {
+    if (!writeEnabled) {
+      setError('Enable write mode before reviewing a Node operation.')
+      return
+    }
+    const request = buildNodeRequest(true)
+    if (!request) return
+    setBusy('review')
+    setError('')
+    setSuccess('')
+    try {
+      const result = await applyNodeAction(context, name, request)
+      setReview(result)
+      setConfirmed(false)
+      setConfirmationText('')
+    } catch (reviewError) {
+      setError((reviewError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /** Applies only the exact Node operation and resource version that passed review. */
+  async function applyReviewedNodeAction() {
+    if (!writeEnabled) {
+      setError('Enable write mode before applying a Node operation.')
+      return
+    }
+    if (!review || !review.ready || review.status !== 'dry-run passed') {
+      setError('Resolve the drain limitations and pass a server-side dry-run before applying this operation.')
+      return
+    }
+    if (!confirmed) {
+      setError('Confirm that you reviewed the Node impact before applying this operation.')
+      return
+    }
+    if (action === 'drain' && confirmationText.trim() !== name) {
+      setError(`Type the exact Node name, ${name}, to confirm this drain.`)
+      return
+    }
+    const request = buildNodeRequest(false)
+    if (!request) return
+    setBusy('apply')
+    setError('')
+    setSuccess('')
+    try {
+      const result = await applyNodeAction(context, name, request)
+      const drainSummary = action === 'drain' ? ` ${result.evictedCount || 0} Pod(s) evicted; ${result.skippedCount || 0} left in place.` : ''
+      setSuccess(`${nodeActionLabel(action)} applied.${drainSummary}`)
+      setReview(null)
+      setConfirmed(false)
+      setConfirmationText('')
+      try {
+        await onRefresh()
+      } catch (refreshError) {
+        setError(`Node operation applied, but the Node refresh failed: ${(refreshError as Error).message}`)
+      }
+    } catch (applyError) {
+      setError((applyError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const disabled = !writeEnabled || Boolean(busy) || Boolean(review)
+  const canApply = Boolean(review?.ready && review.status === 'dry-run passed' && confirmed && (action !== 'drain' || confirmationText.trim() === name))
+  return <div className="node-operation-panel">
+    <div className="node-operation-header"><div className="logs-title"><Server size={16} /><strong>Node operations</strong><span>typed core/v1 + policy/v1</span></div><span className="node-operation-scope">review then apply</span></div>
+    <div className="node-operation-intro"><strong>{nodeIsCordoned ? 'This Node is currently cordoned.' : 'This Node accepts scheduled workloads.'}</strong><span>Cordon and taint updates use full-object resource-versioned Node updates. Drain uses Kubernetes eviction APIs and never force-deletes Pods.</span></div>
+    {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to review and apply Node operations. Kubernetes RBAC still authorizes every final request.</div>}
+    <form className="node-operation-form" onSubmit={(event) => { event.preventDefault(); void reviewNodeAction() }}>
+      <div className="node-action-picker"><label className="node-operation-field"><span>Operation</span><select value={action} onChange={(event) => changeNodeAction(event.target.value as NodeAction)} disabled={disabled}>{options.map((option) => <option key={option.action} value={option.action}>{option.label}</option>)}</select></label><div className="node-action-detail">{selectedOption?.detail}</div></div>
+      {action === 'add-taint' && <div className="node-operation-grid"><label className="node-operation-field"><span>Key</span><input value={taintKey} onChange={(event) => setTaintKey(event.target.value)} disabled={disabled} placeholder="example.com/pool" /></label><label className="node-operation-field"><span>Value <em>optional</em></span><input value={taintValue} onChange={(event) => setTaintValue(event.target.value)} disabled={disabled} placeholder="batch" /></label><label className="node-operation-field"><span>Effect</span><select value={taintEffect} onChange={(event) => setTaintEffect(event.target.value)} disabled={disabled}><option value="NoSchedule">NoSchedule</option><option value="PreferNoSchedule">PreferNoSchedule</option><option value="NoExecute">NoExecute</option></select></label></div>}
+      {action === 'remove-taint' && <div className="node-operation-grid"><label className="node-operation-field node-operation-field-wide"><span>Existing taint</span>{taints.length ? <select value={taintIndex} onChange={(event) => setTaintIndex(Number(event.target.value))} disabled={disabled}>{taints.map((taint, index) => <option key={`${taint.key}-${taint.effect}-${index}`} value={index}>{nodeTaintLabel(taint)}</option>)}</select> : <div className="node-empty-field">No taints are present on this Node.</div>}</label></div>}
+      {action === 'drain' && <div className="node-drain-options"><label className="node-operation-field"><span>Eviction grace <em>blank = each Pod default</em></span><input type="number" min="0" max="86400" step="1" value={gracePeriod} onChange={(event) => setGracePeriod(event.target.value)} disabled={disabled} placeholder="Pod default" /></label><label className="node-check-option"><input type="checkbox" checked={ignoreDaemonSets} onChange={(event) => setIgnoreDaemonSets(event.target.checked)} disabled={disabled} /><span><strong>Leave DaemonSet Pods in place</strong><small>Required for Nodes running DaemonSet agents; those Pods will remain.</small></span></label><label className="node-check-option"><input type="checkbox" checked={deleteEmptyDirData} onChange={(event) => setDeleteEmptyDirData(event.target.checked)} disabled={disabled} /><span><strong>Allow emptyDir data loss</strong><small>Required to evict Pods using local emptyDir volumes. This is a destructive acknowledgement.</small></span></label></div>}
+      <div className="node-operation-actions"><span>{selectedOption?.detail}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review)}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review operation'}</button></div>
+    </form>
+    {review && <div className={`node-review ${review.ready ? '' : 'node-review-blocked'}`}><div className="node-review-heading"><span className={review.ready ? 'review-ready' : 'node-review-blocked-chip'}>{review.ready ? <><Check size={13} /> Dry-run passed</> : <><AlertTriangle size={13} /> Review blocked</>}</span><strong>{nodeActionLabel(action)} {review.ready ? 'is ready' : 'needs attention'}</strong></div><p>{review.ready ? 'Kubernetes accepted this exact resource-versioned request during server-side dry-run. No cluster state has changed.' : 'No mutation was submitted. Resolve or explicitly acknowledge every listed Pod limitation, then refresh and review again.'}</p>{review.limitations?.length ? <div className="node-limitation-list"><strong>Safety notes</strong>{review.limitations.map((limitation) => <span key={limitation}><AlertTriangle size={12} />{limitation}</span>)}</div> : null}{review.pods?.length ? <div className="node-impact-table"><div className="node-impact-heading"><span>Pod impact</span><span>{review.podCount || review.pods.length} scheduled</span></div>{review.pods.map((pod) => <div className="node-impact-row" key={`${pod.namespace}/${pod.name}`}><div><strong>{pod.namespace}/{pod.name}</strong><span>{pod.phase}{pod.controller ? ` / ${pod.controller}` : ' / unmanaged'}</span></div><span className={`node-impact-status node-impact-${pod.action}`}>{pod.action}{pod.usesEmptyDir ? ' / emptyDir' : ''}</span></div>)}</div> : null}{review.ready && <><label className="node-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the Kubernetes dry-run and understand this operation changes Node scheduling state.</span></label>{action === 'drain' && <label className="node-operation-field node-confirm-name"><span>Type Node name to confirm <em>{name}</em></span><input value={confirmationText} onChange={(event) => setConfirmationText(event.target.value)} disabled={busy === 'apply'} placeholder={name} /></label>}<div className="node-review-actions"><button type="button" className="secondary-button" onClick={editNodeAction} disabled={Boolean(busy)}>Change operation</button><button type="button" className="primary-button" onClick={() => void applyReviewedNodeAction()} disabled={busy === 'apply' || !canApply}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : action === 'drain' ? 'Confirm and drain' : 'Confirm and apply'}</button></div></>}{error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}{success && <div className="operation-success"><Check size={15} />{success}</div>}</div>}
+    <div className="node-operation-footer"><span><ShieldCheck size={14} /> Native Node update / eviction</span><span>RBAC, conflicts, unsupported APIs, and Pod limits stay visible.</span></div>
+  </div>
+}
+
+/** Returns the native Node operation choices shown in the detail form. */
+function nodeActionOptions(): NodeActionOption[] {
+  return [
+    { action: 'cordon', label: 'Cordon Node', detail: 'Mark the Node unschedulable while existing Pods continue running.' },
+    { action: 'uncordon', label: 'Uncordon Node', detail: 'Allow the scheduler to place new Pods on this Node again.' },
+    { action: 'drain', label: 'Drain Node', detail: 'Cordon first, then evict eligible managed Pods through policy/v1.' },
+    { action: 'add-taint', label: 'Add taint', detail: 'Add one validated key/effect/value scheduling rule without replacing another taint.' },
+    { action: 'remove-taint', label: 'Remove taint', detail: 'Remove one exact existing key/effect/value tuple after a fresh Node read.' },
+  ]
+}
+
+/** Returns true only for the built-in cluster-scoped Node resource. */
+function targetedNodeResource(definition: ResourceDefinition): boolean {
+  return definition.group === '' && definition.version === 'v1' && definition.resource === 'nodes' && !definition.namespaced
+}
+
+/** Returns the user-facing name for one native Node action. */
+function nodeActionLabel(action: NodeAction): string {
+  const labels: Record<NodeAction, string> = {
+    cordon: 'Cordon',
+    uncordon: 'Uncordon',
+    drain: 'Drain',
+    'add-taint': 'Add taint',
+    'remove-taint': 'Remove taint',
+  }
+  return labels[action]
+}
+
+/** Reads the current Node unschedulable flag from an unstructured resource. */
+function nodeUnschedulable(object: ResourceObject): boolean {
+  return nestedObjectValue(object, ['spec', 'unschedulable']) === true
+}
+
+/** Reads validated-looking taint summaries from an unstructured Node object for form display. */
+function nodeTaints(object: ResourceObject): NodeTaint[] {
+  const rawTaints = nestedObjectValue(object, ['spec', 'taints'])
+  if (!Array.isArray(rawTaints)) return []
+  return rawTaints.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+    const candidate = entry as Record<string, unknown>
+    if (typeof candidate.key !== 'string' || typeof candidate.effect !== 'string') return []
+    return [{ key: candidate.key, value: typeof candidate.value === 'string' ? candidate.value : '', effect: candidate.effect }]
+  })
+}
+
+/** Formats one exact Node taint tuple for review and removal selection. */
+function nodeTaintLabel(taint: NodeTaint): string {
+  return `${taint.key}${taint.value ? `=${taint.value}` : ''}:${taint.effect}`
 }
 
 /** Returns the supported targeted action list for one native workload resource. */

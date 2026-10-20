@@ -28,6 +28,7 @@ type Server struct {
 	overview       func(context.Context, string) (kube.ClusterOverview, error)
 	related        relatedLoader
 	workloadAction workloadActionLoader
+	nodeAction     nodeActionLoader
 }
 
 // relatedLoader describes the read-only relationship aggregation seam used by the HTTP handler.
@@ -55,6 +56,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/pod/debug", s.handleEphemeralContainer)
 	mux.HandleFunc("/api/pod/copy", s.handlePodCopy)
 	mux.HandleFunc("/api/workload/action", s.handleWorkloadAction)
+	mux.HandleFunc("/api/node/action", s.handleNodeAction)
 	mux.Handle("/api/terminal", s.terminalHandler())
 	mux.Handle("/api/port-forward", s.portForwardHandler())
 	mux.HandleFunc("/api/resource", s.handleResource)
@@ -467,11 +469,13 @@ func writeError(writer http.ResponseWriter, err error) {
 	switch {
 	case strings.Contains(message, "conflict"):
 		status = http.StatusConflict
+	case strings.Contains(message, "drain blocked") || strings.Contains(message, "drain stopped"):
+		status = http.StatusConflict
 	case strings.Contains(message, "write mode") || strings.Contains(message, "denied by kubernetes rbac") || strings.Contains(message, "forbidden") || strings.Contains(message, "unauthorized"):
 		status = http.StatusForbidden
 	case strings.Contains(message, "not supported by this kubernetes api server"):
 		status = http.StatusNotImplemented
-	case strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "unsupported workload action") || strings.Contains(message, "not a supported workload") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
+	case strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "unsupported workload action") || strings.Contains(message, "unsupported node action") || strings.Contains(message, "not a supported workload") || strings.Contains(message, "not supported for node") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
 		status = http.StatusBadRequest
 	}
 	writeJSON(writer, status, map[string]string{"error": err.Error()})

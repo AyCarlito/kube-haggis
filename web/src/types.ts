@@ -207,6 +207,58 @@ export interface WorkloadActionResponse {
   status: string
 }
 
+/** Describes one explicit native operation request for a cluster-scoped Node. */
+export interface NodeActionRequest {
+  action: NodeAction
+  dryRun: boolean
+  expectedResourceVersion?: string
+  taintKey?: string
+  taintValue?: string
+  taintEffect?: string
+  deleteEmptyDirData?: boolean
+  ignoreDaemonSets?: boolean
+  gracePeriodSeconds?: number
+}
+
+/** Identifies the supported native operations exposed by the Node detail view. */
+export type NodeAction = 'cordon' | 'uncordon' | 'drain' | 'add-taint' | 'remove-taint'
+
+/** Contains one safe, non-secret Node taint summary. */
+export interface NodeTaint {
+  key: string
+  value?: string
+  effect: string
+}
+
+/** Describes one Pod's impact or limitation during a Node drain review. */
+export interface NodePodImpact {
+  namespace: string
+  name: string
+  phase: string
+  controller?: string
+  action: 'evict' | 'skipped' | 'blocked'
+  usesEmptyDir?: boolean
+  limitation?: string
+}
+
+/** Contains the redacted result of one native Node operation or drain review. */
+export interface NodeActionResponse {
+  action: NodeAction
+  resource: string
+  name: string
+  dryRun: boolean
+  ready: boolean
+  resourceVersion?: string
+  status: string
+  taints?: NodeTaint[]
+  pods?: NodePodImpact[]
+  podCount?: number
+  evictedCount?: number
+  skippedCount?: number
+  blockedCount?: number
+  limitations?: string[]
+}
+
 /** Describes the standard Kubernetes owner reference attached to a resource. */
 export interface ResourceOwnerReference {
   apiVersion: string

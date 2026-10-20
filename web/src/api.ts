@@ -8,6 +8,8 @@ import type {
   ResourceListResponse,
   ResourceObject,
   RelatedResourcesResponse,
+  NodeActionRequest,
+  NodeActionResponse,
   WorkloadActionRequest,
   WorkloadActionResponse,
 } from './types'
@@ -150,6 +152,18 @@ export function applyWorkloadAction(
       namespace: definition.namespaced ? namespace : '',
       name,
     }),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      body: JSON.stringify(request),
+    },
+  )
+}
+
+/** Runs one targeted native Node operation through the typed backend action path. */
+export function applyNodeAction(context: string, name: string, request: NodeActionRequest): Promise<NodeActionResponse> {
+  return fetchJson<NodeActionResponse>(
+    apiUrl('/api/node/action', { context, name }),
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
