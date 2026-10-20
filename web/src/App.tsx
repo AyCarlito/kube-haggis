@@ -49,6 +49,7 @@ import type {
   EventSummary,
   ResourceDefinition,
   ResourceListResponse,
+  ResourceOwnerReference,
   ResourceObject,
   ResourceSummary,
   RouteState,
@@ -190,9 +191,11 @@ export default function App() {
       namespace={route.namespace ?? selectedNamespace}
       definition={activeDefinition}
       name={validResourceName}
+      definitions={definitions}
       writeEnabled={writeEnabled}
       onBack={() => navigate(`/resources/${activeDefinition.resource}`, activeDefinition.resource)}
       onOpenEvent={(event) => navigate(`/resources/events/${encodeURIComponent(event.name)}`, 'events', event.name, event.namespace || undefined)}
+      onOpenResource={(definition, resourceName, resourceNamespace) => navigate(`/resources/${definition.resource}/${encodeURIComponent(resourceName)}`, definition.resource, resourceName, resourceNamespace)}
     />
   ) : route.resource && activeDefinition ? (
     <ResourceListPage
@@ -521,7 +524,7 @@ function ResourceRow({ item, onOpen }: { item: ResourceSummary; onOpen: (name: s
 }
 
 /** Renders the tabbed detail view for one generic resource. */
-function ResourceDetailPage({ context, namespace, definition, name, writeEnabled, onBack, onOpenEvent }: { context: string; namespace: string; definition: ResourceDefinition; name: string; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void }) {
+function ResourceDetailPage({ context, namespace, definition, name, definitions, writeEnabled, onBack, onOpenEvent, onOpenResource }: { context: string; namespace: string; definition: ResourceDefinition; name: string; definitions: ResourceDefinition[]; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
   const [object, setObject] = useState<ResourceObject | null>(null)
   const [yamlText, setYamlText] = useState('')
   const [originalYaml, setOriginalYaml] = useState('')
@@ -614,6 +617,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
   const detailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
+  const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
@@ -624,7 +628,41 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
     {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
     {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
-    {tab === 'related' && <QuietState icon={<Network size={22} />} title="Owner graph is next" detail="KubeHaggis will use ownerReferences to connect this object to its surrounding workload graph." />}
+    {tab === 'related' && <OwnerReferencesPanel object={object} definitions={definitions} namespace={resourceNamespace} onOpenResource={onOpenResource} />}
+  </div>
+}
+
+/** Renders standard Kubernetes owner relationships for a resource. */
+function OwnerReferencesPanel({ object, definitions, namespace, onOpenResource }: { object: ResourceObject; definitions: ResourceDefinition[]; namespace: string; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
+  const owners = readOwnerReferences(object)
+
+  if (!owners.length) {
+    return <QuietState icon={<Network size={22} />} title="No owner references" detail="Kubernetes did not declare an owner for this object." />
+  }
+
+  return <div className="relationship-panel">
+    <div className="panel relationship-summary-panel">
+      <PanelHeading eyebrow="Relationships" title="Owner references" action={`${owners.length} ${owners.length === 1 ? 'reference' : 'references'}`} tone="neutral" />
+      <p className="relationship-copy">These links come from Kubernetes <code>metadata.ownerReferences</code>. Controller owners are marked when Kubernetes identifies one.</p>
+    </div>
+    <div className="relationship-list">
+      {owners.map((owner, index) => {
+        const ownerDefinition = resolveOwnerDefinition(owner, definitions)
+        const ownerNamespace = ownerDefinition?.namespaced ? namespace : undefined
+        const row = <>
+          <span className="relationship-icon"><Network size={16} /></span>
+          <div className="relationship-main">
+            <div className="relationship-labels"><span className="relationship-kind">{owner.controller ? 'Controller owner' : 'Owner reference'}</span>{owner.blockOwnerDeletion && <span className="relationship-flag">Deletion blocked</span>}</div>
+            <strong>{owner.kind}/{owner.name}</strong>
+            <span className="relationship-meta"><code>{owner.apiVersion}</code>{owner.uid ? <><span>·</span><code>uid {owner.uid.slice(0, 12)}</code></> : null}</span>
+          </div>
+          {!ownerDefinition && <span className="relationship-unresolved">Not discovered</span>}
+        </>
+        return ownerDefinition
+          ? <button type="button" className="relationship-row relationship-row-button" key={`${owner.apiVersion}/${owner.kind}/${owner.name}/${owner.uid || index}`} aria-label={`Open owner ${owner.kind}/${owner.name}`} onClick={() => onOpenResource(ownerDefinition, owner.name, ownerNamespace)}>{row}</button>
+          : <div className="relationship-row" key={`${owner.apiVersion}/${owner.kind}/${owner.name}/${owner.uid || index}`}>{row}</div>
+      })}
+    </div>
   </div>
 }
 
@@ -769,6 +807,38 @@ function metadataString(object: ResourceObject, field: string): string {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return ''
   const value = (metadata as Record<string, unknown>)[field]
   return typeof value === 'string' ? value : ''
+}
+
+/** Reads valid standard owner references from an unstructured resource. */
+function readOwnerReferences(object: ResourceObject): ResourceOwnerReference[] {
+  const metadata = object.metadata
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return []
+  const rawReferences = (metadata as Record<string, unknown>).ownerReferences
+  if (!Array.isArray(rawReferences)) return []
+
+  return rawReferences.flatMap((rawReference) => {
+    if (!rawReference || typeof rawReference !== 'object' || Array.isArray(rawReference)) return []
+    const reference = rawReference as Record<string, unknown>
+    const apiVersion = typeof reference.apiVersion === 'string' ? reference.apiVersion : ''
+    const kind = typeof reference.kind === 'string' ? reference.kind : ''
+    const name = typeof reference.name === 'string' ? reference.name : ''
+    if (!apiVersion || !kind || !name) return []
+
+    const owner: ResourceOwnerReference = { apiVersion, kind, name }
+    if (typeof reference.uid === 'string' && reference.uid) owner.uid = reference.uid
+    if (typeof reference.controller === 'boolean') owner.controller = reference.controller
+    if (typeof reference.blockOwnerDeletion === 'boolean') owner.blockOwnerDeletion = reference.blockOwnerDeletion
+    return [owner]
+  })
+}
+
+/** Resolves an owner reference to a discovered generic resource definition. */
+function resolveOwnerDefinition(owner: ResourceOwnerReference, definitions: ResourceDefinition[]): ResourceDefinition | undefined {
+  const separator = owner.apiVersion.indexOf('/')
+  const group = separator === -1 ? '' : owner.apiVersion.slice(0, separator)
+  const version = separator === -1 ? owner.apiVersion : owner.apiVersion.slice(separator + 1)
+  return definitions.find((definition) => definition.group === group && definition.version === version && definition.kind === owner.kind)
+    ?? commonDefinitions.find((definition) => definition.group === group && definition.version === version && definition.kind === owner.kind)
 }
 
 /** Resolves a resource slug against discovered definitions and common fallbacks. */

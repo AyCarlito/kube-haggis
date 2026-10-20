@@ -123,6 +123,16 @@ export interface ClusterOverview {
 /** Represents an unstructured Kubernetes resource object. */
 export type ResourceObject = Record<string, unknown>
 
+/** Describes the standard Kubernetes owner reference attached to a resource. */
+export interface ResourceOwnerReference {
+  apiVersion: string
+  kind: string
+  name: string
+  uid?: string
+  controller?: boolean
+  blockOwnerDeletion?: boolean
+}
+
 /** Represents the browser route used by the single-page application. */
 export interface RouteState {
   path: string

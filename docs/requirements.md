@@ -25,6 +25,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Client-side full-object updates with resource-version handling and Kubernetes dry-run review.
 - Refresh the complete resource from Kubernetes after a successful YAML apply before updating the editor state.
 - Resource-scoped Events with live watches and navigation into generic Event details.
+- Owner-reference relationship view with controller/deletion flags and discovery-aware navigation to owner resources.
 - Per-context read-only/write-mode UI and backend write-mode guard.
 - Secret value masking with explicit reveal.
 - Removal of `metadata.managedFields` from the YAML editor and write payloads.
@@ -35,7 +36,7 @@ The repository currently contains the first usable vertical slice. The backend a
 ### Partially Implemented
 
 - Resource tables have search, namespace, label selector, and live updates, but status filters, sorting, configurable columns, and continuation-token pagination are still incomplete.
-- Resource detail pages have overview and YAML tabs. Resource-scoped Events are live, while related-resource tabs are still explanatory placeholders.
+- Resource detail pages have overview, YAML, live Events, and owner-reference relationship views. Broader related-resource tabs are still explanatory placeholders.
 - Event detail pages omit the Events tab because Events are not expected to have child Events.
 - CRDs support discovery, generic CRUD, and YAML editing. Schema-generated CRD forms are not implemented yet.
 - Client-side apply currently uses full-object Kubernetes updates rather than a three-way `kubectl apply` merge. Resource-version conflicts reach the UI as errors, but there is no dedicated conflict-resolution workflow yet.
@@ -48,7 +49,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Native port-forward sessions.
 - Ephemeral debug containers and file copy operations.
 - Metrics API collection and CPU/memory charts.
-- Resource-scoped Events and owner/reference relationship views.
+- Related-resource relationship views beyond standard `metadata.ownerReferences`.
 - Targeted workload forms and actions for scale, restart, pause/resume, rollback, image changes, and job scheduling.
 - Node cordon, uncordon, drain, and taint workflows.
 - PVC resize and snapshot workflows.
