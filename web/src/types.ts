@@ -180,6 +180,33 @@ export interface PodOperationResponse {
   container?: string
 }
 
+/** Describes one targeted native operation request for a built-in workload. */
+export interface WorkloadActionRequest {
+  action: WorkloadAction
+  dryRun: boolean
+  expectedResourceVersion?: string
+  replicas?: number
+  container?: string
+  image?: string
+  revision?: number
+  schedule?: string
+}
+
+/** Identifies the workload actions exposed by the targeted detail form. */
+export type WorkloadAction = 'scale' | 'restart' | 'pause' | 'resume' | 'rollback' | 'image' | 'schedule' | 'run-now'
+
+/** Contains the redacted outcome of one targeted workload operation. */
+export interface WorkloadActionResponse {
+  action: WorkloadAction
+  resource: string
+  namespace: string
+  name: string
+  dryRun: boolean
+  resourceVersion?: string
+  createdName?: string
+  status: string
+}
+
 /** Describes the standard Kubernetes owner reference attached to a resource. */
 export interface ResourceOwnerReference {
   apiVersion: string

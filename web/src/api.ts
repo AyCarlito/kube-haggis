@@ -8,6 +8,8 @@ import type {
   ResourceListResponse,
   ResourceObject,
   RelatedResourcesResponse,
+  WorkloadActionRequest,
+  WorkloadActionResponse,
 } from './types'
 
 /** Builds a backend API URL with encoded query parameters. */
@@ -127,6 +129,31 @@ export function applyResource(
       method: 'PATCH',
       headers: { 'Content-Type': 'application/apply-patch+yaml', 'X-KubeHaggis-Write': 'enabled' },
       body,
+    },
+  )
+}
+
+/** Runs one targeted workload operation through the native backend action path. */
+export function applyWorkloadAction(
+  context: string,
+  definition: ResourceDefinition,
+  namespace: string,
+  name: string,
+  request: WorkloadActionRequest,
+): Promise<WorkloadActionResponse> {
+  return fetchJson<WorkloadActionResponse>(
+    apiUrl('/api/workload/action', {
+      context,
+      group: definition.group,
+      version: definition.version,
+      resource: definition.resource,
+      namespace: definition.namespaced ? namespace : '',
+      name,
+    }),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      body: JSON.stringify(request),
     },
   )
 }

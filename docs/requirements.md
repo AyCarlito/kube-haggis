@@ -36,6 +36,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Ephemeral debug-container launch through `pods/ephemeralcontainers` and bounded native file download/upload through `pods/exec`.
 - Native `metrics.k8s.io/v1beta1` collection with node and Pod CPU/memory usage summaries, freshness states, and responsive overview charts.
 - Discovery-driven related-resource views for owner descendants, selectors, storage bindings, and safe native PodSpec references with explicit partial/RBAC states.
+- Targeted workload operations for scale, restart, pause/resume, rollback, image changes, and Job/CronJob scheduling with dry-run review and confirmation.
 - Local-only visual identity using the provided `haggis.svg` asset.
 
 ### Partially Implemented
@@ -49,7 +50,6 @@ The repository currently contains the first usable vertical slice. The backend a
 
 ### Remaining First-Release Work
 
-- Targeted workload forms and actions for scale, restart, pause/resume, rollback, image changes, and job scheduling.
 - Node cordon, uncordon, drain, and taint workflows.
 - PVC resize and snapshot workflows.
 - Delete confirmations, bulk operations, and stronger destructive-action review.

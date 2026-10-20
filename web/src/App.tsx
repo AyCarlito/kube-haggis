@@ -38,6 +38,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { stringify } from 'yaml'
 import {
   applyResource,
+  applyWorkloadAction,
   fetchContexts,
   fetchDiscovery,
   fetchOverview,
@@ -74,6 +75,9 @@ import type {
   MetricsState,
   NodeMetric,
   PodMetric,
+  WorkloadAction,
+  WorkloadActionRequest,
+  WorkloadActionResponse,
 } from './types'
 
 const commonDefinitions: ResourceDefinition[] = [
@@ -822,7 +826,8 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   if (error && !object) return <ConnectionState error={error} />
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
-  const detailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
+  const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
+  const detailTabs = targetedWorkloadResource(definition) && !isNew ? [...baseDetailTabs.slice(0, 1), 'operations', ...baseDetailTabs.slice(1)] : baseDetailTabs
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
@@ -830,7 +835,8 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
     <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => setTab(item)}>{item === 'yaml' ? 'YAML editor' : titleCase(item)}</button>)}</div>
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
-    {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
+       {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
+       {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
       {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
@@ -883,6 +889,292 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
     {notices.length ? <div className="relationship-notices">{notices.map((notice, index) => <RelatedNotice key={`${notice.type}-${notice.source}-${index}`} notice={notice} />)}</div> : null}
     {items.length ? <div className="relationship-list">{items.map((item, index) => <RelatedResourceRow key={`${item.type}-${item.source}-${item.namespace || ''}-${item.name || ''}-${item.uid || index}`} item={item} onOpenResource={onOpenResource} />)}</div> : notices.length ? <div className="relationship-limited"><AlertTriangle size={16} /><span>No resolved links are visible. The source states above explain what Kubernetes allowed this identity to read.</span></div> : <QuietState icon={<Network size={22} />} title="No related resources" detail={response?.message || 'No safe native relationship was found for this object.'} />}
   </div>
+}
+
+/** Describes one action option shown by a targeted workload form. */
+type WorkloadActionOption = {
+  action: WorkloadAction
+  label: string
+  detail: string
+}
+
+/** Renders a two-step dry-run and confirmation form for built-in workloads. */
+function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, onRefresh }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+  const options = workloadActionOptions(definition.resource)
+  const [action, setAction] = useState<WorkloadAction>(options[0]?.action || 'restart')
+  const [replicas, setReplicas] = useState(workloadReplicaCount(object))
+  const [container, setContainer] = useState(workloadContainerNames(definition.resource, object)[0] || '')
+  const [image, setImage] = useState(workloadContainerImage(definition.resource, object, container))
+  const [revision, setRevision] = useState('')
+  const [schedule, setSchedule] = useState(workloadSchedule(object))
+  const [review, setReview] = useState<WorkloadActionResponse | null>(null)
+  const [confirmed, setConfirmed] = useState(false)
+  const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const containers = workloadContainerNames(definition.resource, object)
+  const selectedOption = options.find((option) => option.action === action) || options[0]
+
+  useEffect(() => {
+    const nextOptions = workloadActionOptions(definition.resource)
+    if (!nextOptions.some((option) => option.action === action)) setAction(nextOptions[0]?.action || 'restart')
+  }, [definition.resource])
+
+  useEffect(() => {
+    const nextContainers = workloadContainerNames(definition.resource, object)
+    const nextContainer = nextContainers.includes(container) ? container : nextContainers[0] || ''
+    setContainer(nextContainer)
+    setImage(workloadContainerImage(definition.resource, object, nextContainer))
+    setReplicas(workloadReplicaCount(object))
+    setSchedule(workloadSchedule(object))
+    setReview(null)
+    setConfirmed(false)
+  }, [object])
+
+  /** Clears a review so the operator can change the requested action. */
+  function editAction() {
+    setReview(null)
+    setConfirmed(false)
+    setError('')
+  }
+
+  /** Changes the selected workload action and invalidates an older dry-run review. */
+  function changeAction(value: WorkloadAction) {
+    setAction(value)
+    setReview(null)
+    setConfirmed(false)
+    setError('')
+    setSuccess('')
+  }
+
+  /** Builds and validates the explicit payload sent to the workload action endpoint. */
+  function buildWorkloadRequest(dryRun: boolean): WorkloadActionRequest | null {
+    const expectedResourceVersion = metadataString(object, 'resourceVersion')
+    const request: WorkloadActionRequest = { action, dryRun, expectedResourceVersion }
+    if (action === 'scale') {
+      if (!Number.isInteger(replicas) || replicas < 0) {
+        setError('Replica count must be a whole number of zero or greater.')
+        return null
+      }
+      request.replicas = replicas
+    }
+    if (action === 'image') {
+      if (!container) {
+        setError('Choose a container before changing its image.')
+        return null
+      }
+      if (!image.trim()) {
+        setError('An image reference is required.')
+        return null
+      }
+      request.container = container
+      request.image = image.trim()
+    }
+    if (action === 'rollback' && revision.trim()) {
+      const parsedRevision = Number(revision)
+      if (!Number.isInteger(parsedRevision) || parsedRevision < 1) {
+        setError('Rollback revision must be a positive whole number, or blank for the previous revision.')
+        return null
+      }
+      request.revision = parsedRevision
+    }
+    if (action === 'schedule') {
+      if (!schedule.trim()) {
+        setError('A CronJob schedule is required.')
+        return null
+      }
+      request.schedule = schedule.trim()
+    }
+    return request
+  }
+
+  /** Runs the Kubernetes server-side dry-run used as the review gate. */
+  async function reviewAction() {
+    if (!writeEnabled) {
+      setError('Enable write mode before reviewing a workload action.')
+      return
+    }
+    const request = buildWorkloadRequest(true)
+    if (!request) return
+    setBusy('review')
+    setError('')
+    setSuccess('')
+    try {
+      const result = await applyWorkloadAction(context, definition, namespace, name, request)
+      setReview(result)
+      setConfirmed(false)
+    } catch (reviewError) {
+      setError((reviewError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /** Applies only the exact action and resource version that passed review. */
+  async function applyReviewedAction() {
+    if (!writeEnabled) {
+      setError('Enable write mode before applying a workload action.')
+      return
+    }
+    if (!review) {
+      setError('Run the server-side dry-run before applying this action.')
+      return
+    }
+    if (!confirmed) {
+      setError('Confirm that you reviewed the dry-run before applying this action.')
+      return
+    }
+    const request = buildWorkloadRequest(false)
+    if (!request) return
+    setBusy('apply')
+    setError('')
+    setSuccess('')
+    try {
+      const result = await applyWorkloadAction(context, definition, namespace, name, request)
+      const created = result.createdName ? ` / created ${result.createdName}` : ''
+      setSuccess(`${workloadActionLabel(action)} applied${created}.`)
+      setReview(null)
+      setConfirmed(false)
+      try {
+        await onRefresh()
+      } catch (refreshError) {
+        setError(`Action applied, but the workload refresh failed: ${(refreshError as Error).message}`)
+      }
+    } catch (applyError) {
+      setError((applyError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const disabled = !writeEnabled || Boolean(busy) || Boolean(review)
+  return <div className="workload-operation-panel">
+    <div className="workload-operation-header"><div className="logs-title"><RefreshCw size={16} /><strong>Workload operations</strong><span>{definition.kind} native actions</span></div><span className="workload-operation-scope">review then apply</span></div>
+    <div className="workload-operation-intro"><strong>Change the running workload without leaving its resource detail.</strong><span>Each action reads the current object, preserves its resource version, and passes through a Kubernetes server-side dry-run before the final write.</span></div>
+    {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to review and apply workload actions. Kubernetes RBAC still authorizes the final operation.</div>}
+    <form className="workload-operation-form" onSubmit={(event) => { event.preventDefault(); void reviewAction() }}>
+      <div className="workload-action-picker"><label className="workload-operation-field"><span>Action</span><select value={action} onChange={(event) => changeAction(event.target.value as WorkloadAction)} disabled={disabled}>{options.map((option) => <option key={option.action} value={option.action}>{option.label}</option>)}</select></label><div className="workload-action-detail">{selectedOption?.detail}</div></div>
+      {action === 'scale' && <label className="workload-operation-field"><span>Desired replicas</span><input type="number" min="0" step="1" value={replicas} onChange={(event) => setReplicas(Number(event.target.value))} disabled={disabled} /></label>}
+      {action === 'image' && <div className="workload-operation-grid"><label className="workload-operation-field"><span>Container</span><select value={container} onChange={(event) => { setContainer(event.target.value); setImage(workloadContainerImage(definition.resource, object, event.target.value)) }} disabled={disabled}><option value="">Choose container</option>{containers.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label className="workload-operation-field"><span>New image</span><input value={image} onChange={(event) => setImage(event.target.value)} disabled={disabled} placeholder="registry.example/app:tag" /></label></div>}
+      {action === 'rollback' && <label className="workload-operation-field"><span>Revision <em>blank = previous</em></span><input type="number" min="1" step="1" value={revision} onChange={(event) => setRevision(event.target.value)} disabled={disabled} placeholder="previous" /></label>}
+      {action === 'schedule' && <label className="workload-operation-field"><span>Cron schedule</span><input value={schedule} onChange={(event) => setSchedule(event.target.value)} disabled={disabled} placeholder="*/15 * * * *" /></label>}
+      <div className="workload-operation-actions"><span>{selectedOption?.detail}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review)}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review action'}</button></div>
+    </form>
+    {review && <div className="workload-review"><div className="workload-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{workloadActionLabel(action)} is ready</strong></div><p>Kubernetes accepted this exact resource-versioned operation for server-side dry-run. No cluster state has changed.</p><label className="workload-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the action and understand it changes workload state.</span></label><div className="workload-review-actions"><button type="button" className="secondary-button" onClick={editAction} disabled={Boolean(busy)}>Change action</button><button type="button" className="primary-button" onClick={() => void applyReviewedAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
+    {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
+    {success && <div className="operation-success"><Check size={15} />{success}</div>}
+    <div className="workload-operation-footer"><span><ShieldCheck size={14} /> Native dynamic update / subresource</span><span>RBAC denials, conflicts, and unsupported APIs stay visible.</span></div>
+  </div>
+}
+
+/** Returns the supported targeted action list for one native workload resource. */
+function workloadActionOptions(resource: string): WorkloadActionOption[] {
+  const options: Record<string, WorkloadActionOption[]> = {
+    deployments: [
+      { action: 'scale', label: 'Scale replicas', detail: 'Change the desired Deployment replica count through the native scale subresource.' },
+      { action: 'restart', label: 'Restart rollout', detail: 'Bump the standard pod-template restart annotation to start a new rollout.' },
+      { action: 'pause', label: 'Pause rollout', detail: 'Pause Deployment progression while preserving its desired state.' },
+      { action: 'resume', label: 'Resume rollout', detail: 'Resume a Deployment that is currently paused.' },
+      { action: 'rollback', label: 'Rollback revision', detail: 'Restore a Deployment pod template from an owned ReplicaSet revision.' },
+      { action: 'image', label: 'Change image', detail: 'Replace one regular container image in the Deployment pod template.' },
+    ],
+    statefulsets: [
+      { action: 'scale', label: 'Scale replicas', detail: 'Change the desired StatefulSet replica count through the native scale subresource.' },
+      { action: 'restart', label: 'Restart rollout', detail: 'Bump the standard pod-template restart annotation to replace StatefulSet Pods.' },
+      { action: 'image', label: 'Change image', detail: 'Replace one regular container image in the StatefulSet pod template.' },
+    ],
+    daemonsets: [
+      { action: 'restart', label: 'Restart rollout', detail: 'Bump the standard pod-template restart annotation to replace DaemonSet Pods.' },
+      { action: 'image', label: 'Change image', detail: 'Replace one regular container image in the DaemonSet pod template.' },
+    ],
+    jobs: [
+      { action: 'run-now', label: 'Run again now', detail: 'Create a fresh one-off Job from this Job template without reusing controller identity.' },
+    ],
+    cronjobs: [
+      { action: 'run-now', label: 'Run now', detail: 'Create a one-off Job from the current CronJob template immediately.' },
+      { action: 'pause', label: 'Pause schedule', detail: 'Suspend new CronJob schedules while existing Jobs continue independently.' },
+      { action: 'resume', label: 'Resume schedule', detail: 'Allow the CronJob controller to create Jobs on schedule again.' },
+      { action: 'schedule', label: 'Change schedule', detail: 'Update the CronJob schedule expression after Kubernetes validates it.' },
+      { action: 'image', label: 'Change image', detail: 'Replace one regular container image in future CronJob Jobs.' },
+    ],
+  }
+  return options[resource] || []
+}
+
+/** Returns true only for the built-in API resources with targeted workload forms. */
+function targetedWorkloadResource(definition: ResourceDefinition): boolean {
+  return definition.version === 'v1' && ((definition.group === 'apps' && ['deployments', 'statefulsets', 'daemonsets'].includes(definition.resource)) || (definition.group === 'batch' && ['jobs', 'cronjobs'].includes(definition.resource)))
+}
+
+/** Returns the user-facing name for one targeted workload action. */
+function workloadActionLabel(action: WorkloadAction): string {
+  const labels: Record<WorkloadAction, string> = {
+    scale: 'Scale',
+    restart: 'Restart',
+    pause: 'Pause',
+    resume: 'Resume',
+    rollback: 'Rollback',
+    image: 'Image change',
+    schedule: 'Schedule change',
+    'run-now': 'Run now',
+  }
+  return labels[action]
+}
+
+/** Returns regular container names from the selected workload pod template. */
+function workloadContainerNames(resource: string, object: ResourceObject): string[] {
+  const containers = nestedWorkloadValue(object, resource, ['containers'])
+  if (!Array.isArray(containers)) return []
+  return containers.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+    const name = (entry as Record<string, unknown>).name
+    return typeof name === 'string' && name ? [name] : []
+  })
+}
+
+/** Returns the selected regular container image from a workload pod template. */
+function workloadContainerImage(resource: string, object: ResourceObject, containerName: string): string {
+  const containers = nestedWorkloadValue(object, resource, ['containers'])
+  if (!Array.isArray(containers)) return ''
+  for (const entry of containers) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const candidate = entry as Record<string, unknown>
+    if (candidate.name === containerName && typeof candidate.image === 'string') return candidate.image
+  }
+  return ''
+}
+
+/** Returns the current desired replica count for a scalable workload. */
+function workloadReplicaCount(object: ResourceObject): number {
+  const replicas = nestedObjectValue(object, ['spec', 'replicas'])
+  return typeof replicas === 'number' && Number.isFinite(replicas) ? replicas : 1
+}
+
+/** Returns the current CronJob schedule expression. */
+function workloadSchedule(object: ResourceObject): string {
+  const schedule = nestedObjectValue(object, ['spec', 'schedule'])
+  return typeof schedule === 'string' ? schedule : ''
+}
+
+/** Reads a value from a workload template path while keeping generic objects safe. */
+function nestedWorkloadValue(object: ResourceObject, resource: string, suffix: string[]): unknown {
+  const path = resource === 'cronjobs' ? ['spec', 'jobTemplate', 'spec', 'template', 'spec', ...suffix] : ['spec', 'template', 'spec', ...suffix]
+  let value: unknown = object
+  for (const field of path) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+    value = (value as Record<string, unknown>)[field]
+  }
+  return value
+}
+
+/** Reads a direct field path from an unstructured resource object. */
+function nestedObjectValue(object: ResourceObject, path: string[]): unknown {
+  let value: unknown = object
+  for (const field of path) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+    value = (value as Record<string, unknown>)[field]
+  }
+  return value
 }
 
 /** Renders one related-resource target as a deep-link when it is verified and discovered. */
