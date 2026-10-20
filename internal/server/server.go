@@ -16,6 +16,7 @@ import (
 
 	"github.com/kube-haggis/kube-haggis/internal/audit"
 	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
@@ -28,6 +29,8 @@ type Server struct {
 	overview       func(context.Context, string) (kube.ClusterOverview, error)
 	related        relatedLoader
 	resourceSchema resourceSchemaLoader
+	resourceGet    resourceGetLoader
+	resourceApply  resourceApplyLoader
 	resourceDelete resourceDeleteLoader
 	workloadAction workloadActionLoader
 	nodeAction     nodeActionLoader
@@ -40,6 +43,12 @@ type relatedLoader func(context.Context, string, string, string, string, string,
 
 // resourceSchemaLoader describes the read-only CRD schema seam used by the HTTP handler.
 type resourceSchemaLoader func(context.Context, string, string, string, string) (kube.ResourceSchema, error)
+
+// resourceGetLoader describes the generic resource read seam used by HTTP handlers.
+type resourceGetLoader func(context.Context, string, string, string, string, string, string, bool) (*unstructured.Unstructured, error)
+
+// resourceApplyLoader describes the generic full-object update seam used by HTTP handlers.
+type resourceApplyLoader func(context.Context, string, string, string, string, string, bool, bool, []byte) (*unstructured.Unstructured, error)
 
 // resourceDeleteLoader describes the generic resource deletion seam used by HTTP handlers.
 type resourceDeleteLoader func(context.Context, string, string, string, string, string, string, bool, kube.ResourceDeleteOptions) error
@@ -386,7 +395,7 @@ func (s *Server) handleResource(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, fmt.Errorf("name is required"))
 			return
 		}
-		item, err := s.kube.GetResource(request.Context(), query.Get("context"), group, version, resource, namespace, name, namespaced)
+		item, err := s.getResource(request.Context(), query.Get("context"), group, version, resource, namespace, name, namespaced)
 		if err != nil {
 			writeError(writer, err)
 			return
@@ -402,8 +411,14 @@ func (s *Server) handleResource(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, err)
 			return
 		}
-		item, err := s.kube.ApplyResource(request.Context(), query.Get("context"), group, version, resource, namespace, namespaced, parseBool(query.Get("dryRun")), body)
+		item, err := s.applyResource(request.Context(), query.Get("context"), group, version, resource, namespace, namespaced, parseBool(query.Get("dryRun")), body)
 		if err != nil {
+			if isResourceVersionConflict(err) {
+				conflict := s.resourceConflictResponse(request.Context(), query.Get("context"), group, version, resource, namespace, name, namespaced, body)
+				s.recordMutation(request, "apply", group, version, resource, namespace, name, parseBool(query.Get("dryRun")), false, "resource update conflicted with a newer resource version")
+				writeJSON(writer, http.StatusConflict, conflict)
+				return
+			}
 			s.recordMutation(request, "apply", group, version, resource, namespace, name, parseBool(query.Get("dryRun")), false, err.Error())
 			writeError(writer, resourceMutationError(err))
 			return

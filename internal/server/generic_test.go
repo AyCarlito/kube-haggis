@@ -154,6 +154,20 @@ func TestGenericResourceHandlerRedactsRBACAndConflictErrors(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if test.name == "conflict" && request.Method == http.MethodGet {
+					writer.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(writer).Encode(&unstructured.Unstructured{Object: map[string]interface{}{
+						"apiVersion": "apps/v1",
+						"kind":       "Deployment",
+						"metadata": map[string]interface{}{
+							"name":            "api",
+							"namespace":       "default",
+							"resourceVersion": "8",
+						},
+						"spec": map[string]interface{}{"replicas": int64(3)},
+					}})
+					return
+				}
 				if request.Method != http.MethodPut || request.URL.Query().Get("dryRun") != "All" {
 					t.Errorf("generic mutation lost update or dry-run options: method=%s query=%s", request.Method, request.URL.RawQuery)
 				}

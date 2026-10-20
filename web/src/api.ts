@@ -8,6 +8,7 @@ import type {
   ResourceDeleteItem,
   ResourceDeleteResponse,
   BulkDeleteResponse,
+  ResourceConflictResponse,
   ResourceEventsResponse,
   ResourceListResponse,
   ResourceObject,
@@ -21,6 +22,20 @@ import type {
   WorkloadActionRequest,
   WorkloadActionResponse,
 } from './types'
+
+/** Represents a safe HTTP API failure with its status and structured payload. */
+export class ApiError extends Error {
+  readonly status: number
+  readonly payload: unknown
+
+  /** Creates an API error that preserves structured response data for safe workflows. */
+  constructor(message: string, status: number, payload: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.payload = payload
+  }
+}
 
 /** Describes the bounded server-side query controls for one resource page. */
 export interface ResourceListQuery {
@@ -41,9 +56,17 @@ export function apiUrl(path: string, params: Record<string, string | undefined> 
 /** Fetches JSON and turns non-successful responses into readable errors. */
 export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init)
-  const payload = (await response.json().catch(() => ({}))) as { error?: string }
-  if (!response.ok) throw new Error(payload.error || `Request failed with ${response.status}`)
+  const payload = (await response.json().catch(() => ({}))) as unknown
+  const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string' ? payload.error : `Request failed with ${response.status}`
+  if (!response.ok) throw new ApiError(message, response.status, payload)
   return payload as T
+}
+
+/** Extracts a dedicated resource-version conflict response without exposing arbitrary backend text. */
+export function resourceConflictFromError(error: unknown): ResourceConflictResponse | null {
+  if (!(error instanceof ApiError) || error.status !== 409 || !error.payload || typeof error.payload !== 'object') return null
+  const payload = error.payload as Partial<ResourceConflictResponse>
+  return payload.conflict === true && typeof payload.error === 'string' && payload.summary ? payload as ResourceConflictResponse : null
 }
 
 /** Loads the kubeconfig contexts exposed by the backend. */
@@ -152,6 +175,7 @@ export function applyResource(
   context: string,
   definition: ResourceDefinition,
   namespace: string,
+  name: string,
   body: string,
   dryRun: boolean,
 ): Promise<ResourceObject> {
@@ -162,6 +186,7 @@ export function applyResource(
       version: definition.version,
       resource: definition.resource,
       namespace: definition.namespaced ? namespace : '',
+      name: name === 'new' ? undefined : name,
       namespaced: String(definition.namespaced),
       dryRun: String(dryRun),
     }),

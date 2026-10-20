@@ -5,17 +5,212 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/kube-haggis/kube-haggis/internal/kube"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/yaml"
 )
 
 const (
 	maxDeleteCoordinateLength = 253
 	maxDeleteResourceVersion  = 256
 	maxDeleteConfirmation     = 32
+	resourceConflictMessage   = "resource update conflicted with a newer resource version; review the current cluster state before retrying"
 )
+
+// getResource invokes the configured generic read seam or the Kubernetes service.
+func (s *Server) getResource(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool) (*unstructured.Unstructured, error) {
+	if s.resourceGet != nil {
+		return s.resourceGet(ctx, contextName, group, version, resource, namespace, name, namespaced)
+	}
+	if s.kube == nil {
+		return nil, fmt.Errorf("Kubernetes service is unavailable")
+	}
+	return s.kube.GetResource(ctx, contextName, group, version, resource, namespace, name, namespaced)
+}
+
+// applyResource invokes the configured generic full-object update seam or the Kubernetes service.
+func (s *Server) applyResource(ctx context.Context, contextName, group, version, resource, namespace string, namespaced, dryRun bool, body []byte) (*unstructured.Unstructured, error) {
+	if s.resourceApply != nil {
+		return s.resourceApply(ctx, contextName, group, version, resource, namespace, namespaced, dryRun, body)
+	}
+	if s.kube == nil {
+		return nil, fmt.Errorf("Kubernetes service is unavailable")
+	}
+	return s.kube.ApplyResource(ctx, contextName, group, version, resource, namespace, namespaced, dryRun, body)
+}
+
+// isResourceVersionConflict identifies resource-version conflicts without relying on raw error text in responses.
+func isResourceVersionConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return apierrors.IsConflict(err) || strings.Contains(message, "resource version")
+}
+
+// resourceConflictResponse refreshes the current object and builds a safe bounded conflict payload.
+func (s *Server) resourceConflictResponse(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool, body []byte) kube.ResourceConflictResponse {
+	localObject := parseResourceDocument(body)
+	response := kube.ResourceConflictResponse{
+		Error:    resourceConflictMessage,
+		Conflict: true,
+		Summary: kube.ResourceConflictSummary{
+			LocalResourceVersion: resourceObjectString(localObject, "resourceVersion"),
+		},
+	}
+
+	currentName := strings.TrimSpace(name)
+	if currentName == "" {
+		currentName = resourceObjectString(localObject, "name")
+	}
+	currentNamespace := strings.TrimSpace(namespace)
+	if namespaced && (currentNamespace == "" || currentNamespace == "all") {
+		currentNamespace = resourceObjectString(localObject, "namespace")
+	}
+	if currentName == "" {
+		return response
+	}
+
+	current, err := s.getResource(ctx, contextName, group, version, resource, currentNamespace, currentName, namespaced)
+	if err != nil || current == nil {
+		return response
+	}
+
+	safeObject := safeResourceConflictObject(current, resource)
+	if len(safeObject) == 0 {
+		return response
+	}
+	response.CurrentAvailable = true
+	response.CurrentResourceVersion = current.GetResourceVersion()
+	response.CurrentObject = safeObject
+	response.Summary.CurrentResourceVersion = current.GetResourceVersion()
+	response.Summary.ChangedSections = resourceConflictChangedSections(localObject, safeObject, resource)
+	response.Summary.Truncated = len(response.Summary.ChangedSections) > kube.MaxResourceConflictSections
+	if response.Summary.Truncated {
+		response.Summary.ChangedSections = response.Summary.ChangedSections[:kube.MaxResourceConflictSections]
+	}
+	return response
+}
+
+// parseResourceDocument parses a YAML or JSON resource without retaining request text in a response.
+func parseResourceDocument(body []byte) map[string]interface{} {
+	var object map[string]interface{}
+	if err := yaml.Unmarshal(body, &object); err != nil {
+		return nil
+	}
+	return object
+}
+
+// resourceObjectString reads one safe metadata string from a parsed generic resource document.
+func resourceObjectString(object map[string]interface{}, field string) string {
+	if object == nil {
+		return ""
+	}
+	metadata, found, err := unstructured.NestedMap(object, "metadata")
+	if err != nil || !found {
+		return ""
+	}
+	value, found := metadata[field]
+	if !found {
+		return ""
+	}
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
+}
+
+// safeResourceConflictObject removes server-owned metadata and masks Secret values from a current object.
+func safeResourceConflictObject(current *unstructured.Unstructured, resource string) map[string]interface{} {
+	if current == nil {
+		return nil
+	}
+	return safeResourceConflictMap(current.Object, resource, current.GetKind())
+}
+
+// safeResourceConflictMap deep-copies a generic object before applying conflict-response redactions.
+func safeResourceConflictMap(object map[string]interface{}, resource, kind string) map[string]interface{} {
+	if object == nil {
+		return nil
+	}
+	copy := (&unstructured.Unstructured{Object: object}).DeepCopy().Object
+	unstructured.RemoveNestedField(copy, "metadata", "managedFields")
+	if strings.EqualFold(resource, "secrets") || strings.EqualFold(kind, "Secret") {
+		for _, field := range []string{"data", "stringData"} {
+			value, found := copy[field]
+			if !found {
+				continue
+			}
+			values, ok := value.(map[string]interface{})
+			if !ok {
+				copy[field] = "[redacted]"
+				continue
+			}
+			masked := make(map[string]interface{}, len(values))
+			for key := range values {
+				masked[key] = "[redacted]"
+			}
+			copy[field] = masked
+		}
+	}
+	return copy
+}
+
+// resourceConflictChangedSections compares only safe top-level sections and returns bounded names.
+func resourceConflictChangedSections(local, current map[string]interface{}, resource string) []string {
+	if local == nil || current == nil {
+		return nil
+	}
+	localSafe := safeResourceConflictMap(local, resource, "")
+	currentSafe := safeResourceConflictMap(current, resource, "")
+	keys := make(map[string]struct{}, len(localSafe)+len(currentSafe))
+	for key := range localSafe {
+		keys[key] = struct{}{}
+	}
+	for key := range currentSafe {
+		keys[key] = struct{}{}
+	}
+	ordered := make([]string, 0, len(keys))
+	for key := range keys {
+		ordered = append(ordered, key)
+	}
+	sort.Strings(ordered)
+	changed := make([]string, 0, len(ordered))
+	for _, key := range ordered {
+		left := conflictComparableSection(localSafe, key)
+		right := conflictComparableSection(currentSafe, key)
+		if !reflect.DeepEqual(left, right) {
+			changed = append(changed, key)
+		}
+	}
+	return changed
+}
+
+// conflictComparableSection ignores the expected resource-version-only difference in metadata summaries.
+func conflictComparableSection(object map[string]interface{}, key string) interface{} {
+	value, found := object[key]
+	if !found || key != "metadata" {
+		return value
+	}
+	metadata, ok := value.(map[string]interface{})
+	if !ok {
+		return value
+	}
+	copy := (&unstructured.Unstructured{Object: map[string]interface{}{"metadata": metadata}}).DeepCopy().Object["metadata"]
+	metadataCopy, ok := copy.(map[string]interface{})
+	if !ok {
+		return value
+	}
+	delete(metadataCopy, "resourceVersion")
+	delete(metadataCopy, "managedFields")
+	return metadataCopy
+}
 
 // deleteResource invokes the configured generic delete seam or the Kubernetes service.
 func (s *Server) deleteResource(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool, options kube.ResourceDeleteOptions) error {

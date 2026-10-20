@@ -11,6 +11,9 @@ import (
 
 	"github.com/kube-haggis/kube-haggis/internal/audit"
 	"github.com/kube-haggis/kube-haggis/internal/kube"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // TestHandleResourceDeleteRequiresConfirmation verifies final generic deletes cannot bypass review.
@@ -207,6 +210,97 @@ func TestValidateBulkDeleteRequestRejectsUnsafeSelections(t *testing.T) {
 			_, err := validateBulkDeleteRequest(test.request, test.ns, true)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("expected validation error containing %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+// TestHandleResourceConflictRefreshesCurrentObjectSafely verifies the dedicated conflict payload and redactions.
+func TestHandleResourceConflictRefreshesCurrentObjectSafely(t *testing.T) {
+	store, err := audit.Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("open audit store: %v", err)
+	}
+	defer store.Close()
+	getCalled := false
+	server := &Server{
+		audit: store,
+		resourceApply: func(context.Context, string, string, string, string, string, bool, bool, []byte) (*unstructured.Unstructured, error) {
+			return nil, apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, "credentials", errString("Secret value private-value conflicted with a newer resource version"))
+		},
+		resourceGet: func(_ context.Context, contextName, group, version, resource, namespace, name string, namespaced bool) (*unstructured.Unstructured, error) {
+			getCalled = true
+			if contextName != "field" || group != "" || version != "v1" || resource != "secrets" || namespace != "default" || name != "credentials" || !namespaced {
+				t.Fatalf("unexpected conflict refresh coordinates: %q %q %q %q %q %q %t", contextName, group, version, resource, namespace, name, namespaced)
+			}
+			return &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "Secret",
+				"metadata": map[string]interface{}{
+					"name":            "credentials",
+					"namespace":       "default",
+					"resourceVersion": "12",
+					"managedFields":   []interface{}{map[string]interface{}{"manager": "controller", "value": "managed-private-value"}},
+				},
+				"data":       map[string]interface{}{"password": "current-private-value"},
+				"stringData": map[string]interface{}{"token": "current-token-value"},
+			}}, nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodPatch, "/api/resource?context=field&group=&version=v1&resource=secrets&namespace=default&name=credentials&namespaced=true&dryRun=true", strings.NewReader("apiVersion: v1\nkind: Secret\nmetadata:\n  name: credentials\n  namespace: default\n  resourceVersion: \"7\"\ndata:\n  password: local-private-value\n"))
+	request.Header.Set("X-KubeHaggis-Write", "enabled")
+	response := httptest.NewRecorder()
+	server.handleResource(response, request)
+
+	var payload kube.ResourceConflictResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode conflict response: %v", err)
+	}
+	if response.Code != http.StatusConflict || !payload.Conflict || !payload.CurrentAvailable || payload.CurrentResourceVersion != "12" || !getCalled {
+		t.Fatalf("conflict response did not refresh current state: status=%d payload=%+v getCalled=%t", response.Code, payload, getCalled)
+	}
+	if strings.Contains(response.Body.String(), "private-value") || strings.Contains(response.Body.String(), "token-value") || strings.Contains(response.Body.String(), "managedFields") {
+		t.Fatalf("conflict response exposed sensitive or server-owned data: %s", response.Body.String())
+	}
+	metadata, ok := payload.CurrentObject["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("conflict response omitted current metadata: %+v", payload.CurrentObject)
+	}
+	if _, found := metadata["managedFields"]; found {
+		t.Fatal("conflict response retained managedFields")
+	}
+	data, ok := payload.CurrentObject["data"].(map[string]interface{})
+	if !ok || data["password"] != "[redacted]" {
+		t.Fatalf("conflict response did not redact Secret data: %+v", payload.CurrentObject["data"])
+	}
+	if payload.Summary.LocalResourceVersion != "7" || payload.Summary.CurrentResourceVersion != "12" {
+		t.Fatalf("conflict summary omitted resource versions: %+v", payload.Summary)
+	}
+	entries, err := store.List(context.Background(), 10)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("unexpected conflict audit entries: %v %+v", err, entries)
+	}
+	if entries[0].Success || strings.Contains(entries[0].Detail, "private-value") || strings.Contains(entries[0].Detail, "Secret") {
+		t.Fatalf("unsafe conflict audit entry: %+v", entries[0])
+	}
+}
+
+// TestIsResourceVersionConflictClassifiesOnlyConflictSignals verifies generic update conflict detection.
+func TestIsResourceVersionConflictClassifiesOnlyConflictSignals(t *testing.T) {
+	conflict := apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "api", errString("resourceVersion changed"))
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "kubernetes conflict", err: conflict, want: true},
+		{name: "resource version text", err: errString("resource version is stale"), want: true},
+		{name: "unrelated conflict text", err: errString("admission conflict"), want: false},
+		{name: "validation failure", err: errString("resource document is invalid"), want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isResourceVersionConflict(test.err); got != test.want {
+				t.Fatalf("isResourceVersionConflict(%v)=%t, want %t", test.err, got, test.want)
 			}
 		})
 	}

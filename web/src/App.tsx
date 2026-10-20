@@ -66,6 +66,7 @@ import {
   uploadPodFile,
   resourceEventsWatchUrl,
   reloadContexts as reloadKubeconfig,
+  resourceConflictFromError,
   terminalUrl,
   watchUrl,
 } from './api'
@@ -82,6 +83,7 @@ import type {
   ResourceDeleteItem,
   ResourceDeleteResponse,
   BulkDeleteResponse,
+  ResourceConflictResponse,
   ResourceListResponse,
   ResourceObject,
   ResourceSchemaField,
@@ -1451,6 +1453,9 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [reviewReady, setReviewReady] = useState(false)
+  const [conflict, setConflict] = useState<ResourceConflictResponse | null>(null)
+  const [conflictReviewed, setConflictReviewed] = useState(false)
+  const [draftKept, setDraftKept] = useState(false)
   const isSecret = definition.resource === 'secrets'
   const isNew = name === 'new'
   const schemaCandidate = !isSecret && isCustomResourceDefinition(definition)
@@ -1459,6 +1464,9 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
 
   useEffect(() => {
     let active = true
+    setConflict(null)
+    setConflictReviewed(false)
+    setDraftKept(false)
     setTab(isNew && schemaCandidate ? 'form' : 'overview')
     if (isNew) {
       const initial: ResourceObject = {
@@ -1529,12 +1537,17 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     }
     setSaving(true)
     try {
-      await applyResource(context, definition, namespace, yamlText, true)
-      setReviewReady(true)
-      setError('')
-    } catch (reviewError) {
-      setError((reviewError as Error).message)
-    } finally {
+       if (conflict) {
+         setError('Review the current cluster state and prepare the local draft before starting another review.')
+         setTab('yaml')
+         return
+       }
+       await applyResource(context, definition, namespace, name, yamlText, true)
+       setReviewReady(true)
+       setError('')
+     } catch (reviewError) {
+       if (!showResourceConflict(reviewError)) setError((reviewError as Error).message)
+     } finally {
       setSaving(false)
     }
   }
@@ -1543,7 +1556,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   async function saveChanges() {
     setSaving(true)
     try {
-      const applied = await applyResource(context, definition, namespace, yamlText, false)
+       const applied = await applyResource(context, definition, namespace, name, yamlText, false)
       const appliedName = isNew ? metadataString(applied, 'name') : name
       const appliedNamespace = definition.namespaced && namespace === 'all' ? metadataString(applied, 'namespace') : namespace
       let refreshed = applied
@@ -1563,12 +1576,79 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
       setReviewReady(false)
       setError(refreshError)
       setTab('overview')
-    } catch (saveError) {
-      setError((saveError as Error).message)
-    } finally {
-      setSaving(false)
-    }
-  }
+     } catch (saveError) {
+       if (!showResourceConflict(saveError)) setError((saveError as Error).message)
+     } finally {
+       setSaving(false)
+     }
+   }
+
+   /** Moves an update conflict into the dedicated review state while retaining the local YAML draft. */
+   function showResourceConflict(candidate: unknown): boolean {
+     const nextConflict = resourceConflictFromError(candidate)
+     if (!nextConflict) return false
+     setConflict(nextConflict)
+     setConflictReviewed(false)
+     setDraftKept(false)
+     setReviewReady(false)
+     setTab('yaml')
+     setError('')
+     return true
+   }
+
+   /** Keeps the conflict state visible while explicitly retaining the operator draft. */
+   function keepConflictDraft() {
+     setDraftKept(true)
+     setError('Local draft retained. Review the current cluster snapshot before preparing another review.')
+   }
+
+   /** Replaces the editor with the safe current snapshot after explicit operator choice. */
+   function reloadConflictObject() {
+     if (!conflict?.currentObject) return
+     const refreshed = sanitizeEditorObject(conflict.currentObject)
+     const text = stringify(isSecret ? redactSecret(refreshed) : refreshed)
+     setObject(conflict.currentObject)
+     setYamlText(text)
+     setOriginalYaml(text)
+     setReviewReady(false)
+     setConflict(null)
+     setConflictReviewed(false)
+     setDraftKept(false)
+     if (isSecret) setSecretsRevealed(false)
+     setError('Current cluster YAML loaded. Review any new edits before applying.')
+   }
+
+   /** Copies the local draft to a bounded browser download without sending it to the backend. */
+   function exportConflictDraft() {
+     const blob = new Blob([yamlText], { type: 'application/yaml' })
+     const url = URL.createObjectURL(blob)
+     const anchor = document.createElement('a')
+     anchor.href = url
+     anchor.download = `${safeDownloadName(name)}-draft.yaml`
+     anchor.click()
+     window.setTimeout(() => URL.revokeObjectURL(url), 0)
+   }
+
+   /** Carries only the reviewed current resource version into the local draft before a new dry-run. */
+   function prepareConflictRetry() {
+     if (!conflict?.currentResourceVersion || !conflictReviewed) return
+     const parsed = parseResourceObject(yamlText)
+     if (!parsed) {
+       setError('The local draft is not valid YAML. Fix it before preparing another review.')
+       return
+     }
+     const nextObject = sanitizeEditorObject(parsed)
+     const metadata = nextObject.metadata && typeof nextObject.metadata === 'object' && !Array.isArray(nextObject.metadata) ? nextObject.metadata as Record<string, unknown> : {}
+     metadata.resourceVersion = conflict.currentResourceVersion
+     nextObject.metadata = metadata
+     setObject(nextObject)
+     setYamlText(stringify(nextObject))
+     setReviewReady(false)
+     setConflict(null)
+     setConflictReviewed(false)
+     setDraftKept(false)
+     setError('Current resource version carried into the draft. Review changes again before applying.')
+   }
 
   /** Refreshes the complete Pod after an operational subresource changes it. */
   async function refreshObject() {
@@ -1599,6 +1679,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   if (error && !object) return <ConnectionState error={error} />
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
+  const conflictCurrentYaml = conflict?.currentObject ? boundedConflictText(stringify(isSecret ? redactSecret(sanitizeEditorObject(conflict.currentObject)) : sanitizeEditorObject(conflict.currentObject))) : ''
   const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
   const schemaTabs = schemaCandidate ? [baseDetailTabs[0], 'form', ...baseDetailTabs.slice(1)] : baseDetailTabs
   const detailTabs = (targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) && !isNew ? [schemaTabs[0], 'operations', ...schemaTabs.slice(1)] : schemaTabs
@@ -1606,16 +1687,17 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
 
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
-    <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
+     <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving || Boolean(conflict)} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
      {!isNew && <DeleteReviewPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} />}
      <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
-    {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
-       {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
+     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
+        {conflict && <ConflictResolutionPanel conflict={conflict} currentYaml={conflictCurrentYaml} isSecret={isSecret} draftKept={draftKept} reviewed={conflictReviewed} onReviewed={setConflictReviewed} onKeepDraft={keepConflictDraft} onReload={reloadConflictObject} onExport={exportConflictDraft} onPrepareRetry={prepareConflictRetry} />}
+        {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
          {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
          {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
          {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
-     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false); const parsed = parseResourceObject(event.target.value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
+      {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false); const parsed = parseResourceObject(event.target.value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
       {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
@@ -1624,6 +1706,24 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
       {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
       {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
   </div>
+}
+
+/** Renders the explicit current-state review and local-draft choices for a resource-version conflict. */
+function ConflictResolutionPanel({ conflict, currentYaml, isSecret, draftKept, reviewed, onReviewed, onKeepDraft, onReload, onExport, onPrepareRetry }: { conflict: ResourceConflictResponse; currentYaml: string; isSecret: boolean; draftKept: boolean; reviewed: boolean; onReviewed: (reviewed: boolean) => void; onKeepDraft: () => void; onReload: () => void; onExport: () => void; onPrepareRetry: () => void }) {
+  const currentReady = conflict.currentAvailable && Boolean(conflict.currentResourceVersion) && Boolean(currentYaml)
+  const changedSections = conflict.summary.changedSections || []
+  const localVersion = conflict.summary.localResourceVersion || 'not supplied'
+  const currentVersion = conflict.currentResourceVersion || 'unavailable'
+  return <section className="conflict-panel" role="alert">
+    <div className="conflict-heading"><div><span className="eyebrow"><span className="eyebrow-mark" /> Concurrency stop</span><h2>Cluster changed before this update</h2></div><span className="status-pill status-warning"><span /> No overwrite</span></div>
+    <p className="conflict-intro">Kubernetes rejected the stale resource version. Your local draft remains in the editor below. Review the safe current snapshot, then choose whether to reload it or carry the reviewed current version into this draft.</p>
+    <div className="conflict-version-grid"><div><span>Local draft version</span><code>{localVersion === 'not supplied' ? localVersion : `rv/${localVersion}`}</code></div><div><span>Current cluster version</span><code>{currentVersion === 'unavailable' ? currentVersion : `rv/${currentVersion}`}</code></div></div>
+    <div className="conflict-summary"><strong>Safe difference summary</strong><span>{changedSections.length ? changedSections.join(', ') : 'No safe top-level field differences were identified.'}{conflict.summary.truncated ? ' and more' : ''}</span></div>
+    {currentReady ? <div className="conflict-current"><div className="conflict-current-heading"><strong>Current cluster YAML</strong><span>read-only snapshot / bounded view</span></div><pre>{currentYaml}</pre></div> : <div className="conflict-current conflict-current-unavailable"><AlertTriangle size={16} /><div><strong>Current cluster snapshot unavailable</strong><span>Refresh the resource before retrying. The local draft is still preserved and can be exported.</span></div></div>}
+    {isSecret && <div className="conflict-secret-note"><LockKeyhole size={14} /><span>Secret data and stringData values stay redacted in this conflict workflow. Reloading the current Secret YAML is disabled so masked placeholders cannot be submitted as values.</span></div>}
+    <label className="conflict-review-check"><input type="checkbox" checked={reviewed} onChange={(event) => onReviewed(event.target.checked)} disabled={!currentReady} /><span>I reviewed the current cluster snapshot and understand the local draft may contain changes made after it.</span></label>
+    <div className="conflict-actions"><button type="button" className="secondary-button" onClick={onKeepDraft}><FileCode2 size={14} /> {draftKept ? 'Draft retained' : 'Keep local draft'}</button><button type="button" className="secondary-button" onClick={onExport}><Download size={14} /> Export local draft</button><button type="button" className="secondary-button" onClick={onReload} disabled={!currentReady || isSecret}><RefreshCw size={14} /> Reload current YAML</button><button type="button" className="primary-button" onClick={onPrepareRetry} disabled={!currentReady || !reviewed}><ShieldCheck size={14} /> Prepare draft for re-review</button></div>
+  </section>
 }
 
 /** Renders a structural CRD form while keeping YAML as the complete editing fallback. */
@@ -3543,6 +3643,19 @@ function redactSecret(object: ResourceObject): ResourceObject {
     copy[field] = Object.fromEntries(Object.keys(values as Record<string, unknown>).map((key) => [key, '[redacted]']))
   }
   return copy
+}
+
+/** Bounds a read-only conflict snapshot so a large generic resource does not dominate the editor. */
+function boundedConflictText(value: string): string {
+  const maximum = 12000
+  if (value.length <= maximum) return value
+  return `${value.slice(0, maximum)}\n# Snapshot truncated in the conflict review; reload remains explicit.`
+}
+
+/** Converts a resource name into a safe filename fragment for local draft export. */
+function safeDownloadName(value: string): string {
+  const name = value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-')
+  return name || 'resource'
 }
 
 /** Removes Kubernetes-managed metadata before an object enters the YAML editor. */

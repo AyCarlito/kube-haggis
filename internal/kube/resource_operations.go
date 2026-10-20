@@ -3,6 +3,9 @@ package kube
 // MaxBulkResourceDeletes bounds one generic bulk-delete review and mutation.
 const MaxBulkResourceDeletes = 100
 
+// MaxResourceConflictSections bounds the safe field-section summary returned for an update conflict.
+const MaxResourceConflictSections = 24
+
 // ResourceDeleteOptions describes the safe Kubernetes delete options exposed by the generic API.
 type ResourceDeleteOptions struct {
 	DryRun                  bool
@@ -45,4 +48,22 @@ type BulkDeleteResponse struct {
 	Failed    int                    `json:"failed"`
 	Status    string                 `json:"status"`
 	Items     []BulkDeleteItemResult `json:"items"`
+}
+
+// ResourceConflictSummary identifies changed top-level sections without returning field values.
+type ResourceConflictSummary struct {
+	LocalResourceVersion   string   `json:"localResourceVersion,omitempty"`
+	CurrentResourceVersion string   `json:"currentResourceVersion,omitempty"`
+	ChangedSections        []string `json:"changedSections,omitempty"`
+	Truncated              bool     `json:"truncated,omitempty"`
+}
+
+// ResourceConflictResponse describes a safe current-object snapshot after a generic update conflict.
+type ResourceConflictResponse struct {
+	Error                  string                  `json:"error"`
+	Conflict               bool                    `json:"conflict"`
+	CurrentAvailable       bool                    `json:"currentAvailable"`
+	CurrentResourceVersion string                  `json:"currentResourceVersion,omitempty"`
+	CurrentObject          map[string]interface{}  `json:"currentObject,omitempty"`
+	Summary                ResourceConflictSummary `json:"summary"`
 }

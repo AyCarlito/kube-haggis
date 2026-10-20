@@ -134,6 +134,24 @@ export interface ResourceDeleteResponse {
   status: string
 }
 
+/** Summarizes safe top-level sections that differed when a generic update conflicted. */
+export interface ResourceConflictSummary {
+  localResourceVersion?: string
+  currentResourceVersion?: string
+  changedSections: string[]
+  truncated: boolean
+}
+
+/** Contains the safe current snapshot returned for a generic resource-version conflict. */
+export interface ResourceConflictResponse {
+  error: string
+  conflict: boolean
+  currentAvailable: boolean
+  currentResourceVersion?: string
+  currentObject?: ResourceObject
+  summary: ResourceConflictSummary
+}
+
 /** Reports one generic bulk-delete result without returning resource bodies. */
 export interface BulkDeleteItemResult {
   name: string
