@@ -42,6 +42,7 @@ import {
   fetchResourceEvents,
   fetchResources,
   logsUrl,
+  portForwardUrl,
   resourceEventsWatchUrl,
   terminalUrl,
   watchUrl,
@@ -51,6 +52,7 @@ import type {
   ContextSummary,
   ContextsResponse,
   EventSummary,
+  PortForwardMessage,
   ResourceDefinition,
   ResourceListResponse,
   ResourceOwnerReference,
@@ -621,7 +623,7 @@ function ResourceDetailPage({ context, namespace, definition, name, definitions,
   if (error && !object) return <ConnectionState error={error} />
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
-  const detailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
+  const detailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
@@ -631,9 +633,10 @@ function ResourceDetailPage({ context, namespace, definition, name, definitions,
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
     {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
-    {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
-    {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
-    {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
+     {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
+     {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
+     {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
+     {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
     {tab === 'related' && <OwnerReferencesPanel object={object} definitions={definitions} namespace={resourceNamespace} onOpenResource={onOpenResource} />}
   </div>
 }
@@ -867,6 +870,134 @@ function PodTerminalPanel({ context, namespace, pod, object }: { context: string
   </div>
 }
 
+/** Describes a TCP port advertised by one Pod container. */
+type PodPortOption = {
+  container: string
+  port: number
+  name?: string
+  protocol: string
+}
+
+/** Renders a native Pod port-forward session with local endpoint controls. */
+function PodPortForwardPanel({ context, namespace, pod, object }: { context: string; namespace: string; pod: string; object: ResourceObject }) {
+  const [container, setContainer] = useState('')
+  const [targetPort, setTargetPort] = useState(0)
+  const [localPort, setLocalPort] = useState(0)
+  const [status, setStatus] = useState<'idle' | 'connecting' | 'connected' | 'closed'>('idle')
+  const [error, setError] = useState('')
+  const socketRef = useRef<WebSocket | null>(null)
+  const containers = podContainerNames(object)
+  const portOptions = podPortOptions(object)
+  const selectedPorts = portOptions.filter((option) => !container || option.container === container)
+
+  useEffect(() => {
+    const firstContainer = containers[0] || ''
+    const firstOption = portOptions.find((option) => option.container === firstContainer) || portOptions[0]
+    setContainer(firstContainer)
+    setTargetPort(firstOption?.port || 0)
+    setLocalPort(firstOption?.port || 0)
+    setError('')
+    setStatus('idle')
+  }, [object])
+
+  useEffect(() => {
+    return () => {
+      socketRef.current?.close()
+      socketRef.current = null
+    }
+  }, [context, namespace, pod])
+
+  /** Opens a binary WebSocket backed by a Kubernetes Pod port-forward. */
+  function connect() {
+    if (!namespace || namespace === 'all') {
+      setError('A Pod namespace is required to start port forwarding.')
+      return
+    }
+    if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+      setError('Target port must be between 1 and 65535.')
+      return
+    }
+    if (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535) {
+      setError('Local port must be between 1 and 65535.')
+      return
+    }
+
+    socketRef.current?.close()
+    setError('')
+    setStatus('connecting')
+    const socket = new WebSocket(portForwardUrl(context, namespace, pod, targetPort, localPort))
+    socketRef.current = socket
+    socket.onmessage = (event) => {
+      if (socketRef.current !== socket) return
+      if (typeof event.data !== 'string') return
+      let message: PortForwardMessage
+      try {
+        message = JSON.parse(event.data) as PortForwardMessage
+      } catch {
+        setError('The port-forward returned an invalid control message.')
+        return
+      }
+      if (message.type === 'ready') {
+        setStatus('connected')
+        return
+      }
+      if (message.type === 'error') {
+        setError(message.message || 'The port-forward session failed.')
+        setStatus('closed')
+        socket.close()
+        return
+      }
+      if (message.type === 'closed') setStatus('closed')
+    }
+    socket.onerror = () => {
+      if (socketRef.current === socket) setError((current) => current || 'The port-forward connection failed.')
+    }
+    socket.onclose = () => {
+      if (socketRef.current !== socket) return
+      socketRef.current = null
+      setStatus('closed')
+    }
+  }
+
+  /** Closes the browser and Kubernetes port-forward session. */
+  function disconnect() {
+    socketRef.current?.close()
+    socketRef.current = null
+    setStatus('closed')
+  }
+
+  /** Selects the first known TCP port when the container changes. */
+  function changeContainer(value: string) {
+    setContainer(value)
+    const firstPort = portOptions.find((option) => option.container === value)
+    if (firstPort) {
+      setTargetPort(firstPort.port)
+      if (!localPort) setLocalPort(firstPort.port)
+    }
+  }
+
+  const active = status === 'connecting' || status === 'connected'
+  const statusLabel = status === 'connected' ? 'Forwarding' : status === 'connecting' ? 'Connecting' : status === 'closed' ? 'Disconnected' : 'Not started'
+  return <div className="port-forward-panel">
+    <div className="port-forward-header">
+      <div className="logs-title"><Network size={16} /><strong>Pod port forward</strong><span className={`terminal-session-status terminal-session-status-${status}`}><span />{statusLabel}</span></div>
+      <span className="port-forward-scope">read-only / Pod subresource</span>
+    </div>
+    <div className="port-forward-controls">
+      <label className="port-forward-field"><span>Container</span><select value={container} onChange={(event) => changeContainer(event.target.value)} disabled={active}><option value="">Pod network</option>{containers.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+      <label className="port-forward-field"><span>Target port</span><input list="pod-port-forward-options" type="number" min="1" max="65535" value={targetPort || ''} onChange={(event) => setTargetPort(Number(event.target.value))} disabled={active} placeholder="8080" /><datalist id="pod-port-forward-options">{selectedPorts.map((option) => <option key={`${option.container}-${option.port}-${option.name || ''}`} value={option.port}>{`${option.container}${option.name ? ` / ${option.name}` : ''} (${option.protocol})`}</option>)}</datalist></label>
+      <label className="port-forward-field"><span>Local port</span><input type="number" min="1" max="65535" value={localPort || ''} onChange={(event) => setLocalPort(Number(event.target.value))} disabled={active} placeholder="8080" /></label>
+      {active ? <button className="secondary-button port-forward-action" onClick={disconnect}>Stop forward</button> : <button className="secondary-button port-forward-action" onClick={connect}>{status === 'closed' ? 'Restart forward' : 'Start forward'}</button>}
+    </div>
+    <div className="port-forward-note"><span>Known TCP container ports are suggested, but any numeric Pod target is valid.</span>{localPort > 0 && <code>127.0.0.1:{localPort}</code>}</div>
+    {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
+    <div className={`port-forward-status port-forward-status-${status}`}>
+      <div><span className="port-forward-status-mark"><span /></span><div><strong>{status === 'connected' ? `Local :${localPort} is forwarding to Pod :${targetPort}` : status === 'connecting' ? 'Negotiating the native Kubernetes session' : status === 'closed' ? 'Forwarding session stopped' : 'No local session running'}</strong><span>{status === 'connected' ? 'Use the loopback endpoint from a local client.' : 'Kubernetes RBAC authorizes the port-forward request.'}</span></div></div>
+    </div>
+    <div className="port-forward-footer"><span><Network size={14} /> TCP / Kubernetes portforward subresource</span><span>{status === 'connected' ? 'Stop the session to release the local port.' : 'Start a session to bind the local endpoint.'}</span></div>
+  </div>
+}
+
 /** Returns the container names available in a generic Pod object. */
 function podContainerNames(object: ResourceObject): string[] {
   const spec = object.spec
@@ -882,6 +1013,34 @@ function podContainerNames(object: ResourceObject): string[] {
     }
   }
   return names
+}
+
+/** Returns the TCP ports advertised by containers in a generic Pod object. */
+function podPortOptions(object: ResourceObject): PodPortOption[] {
+  const spec = object.spec
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return []
+  const options: PodPortOption[] = []
+  for (const field of ['containers', 'initContainers', 'ephemeralContainers']) {
+    const entries = (spec as Record<string, unknown>)[field]
+    if (!Array.isArray(entries)) continue
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+      const containerObject = entry as Record<string, unknown>
+      const container = typeof containerObject.name === 'string' ? containerObject.name : ''
+      const ports = containerObject.ports
+      if (!container || !Array.isArray(ports)) continue
+      for (const rawPort of ports) {
+        if (!rawPort || typeof rawPort !== 'object' || Array.isArray(rawPort)) continue
+        const portObject = rawPort as Record<string, unknown>
+        const port = portObject.containerPort
+        const protocol = typeof portObject.protocol === 'string' ? portObject.protocol.toUpperCase() : 'TCP'
+        if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535 || protocol !== 'TCP') continue
+        const name = typeof portObject.name === 'string' && portObject.name ? portObject.name : undefined
+        if (!options.some((option) => option.container === container && option.port === port && option.name === name)) options.push({ container, port, name, protocol })
+      }
+    }
+  }
+  return options
 }
 
 /** Sends the current terminal element dimensions to Kubernetes. */

@@ -32,6 +32,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Redacted SQLite mutation history for apply and delete outcomes.
 - Native Pod log streaming with follow, previous-container, tail, and container controls.
 - Native interactive Pod `exec` and `attach` sessions available in read-only mode with TTY input, resize handling, container selection, and Kubernetes RBAC authorization.
+- Native Pod port-forward sessions with loopback binding, target/local port controls, session lifecycle, and Kubernetes RBAC authorization.
 - Local-only visual identity using the provided `haggis.svg` asset.
 
 ### Partially Implemented
@@ -46,7 +47,6 @@ The repository currently contains the first usable vertical slice. The backend a
 
 ### Remaining First-Release Work
 
-- Native port-forward sessions.
 - Ephemeral debug containers and file copy operations.
 - Metrics API collection and CPU/memory charts.
 - Related-resource relationship views beyond standard `metadata.ownerReferences`.
@@ -97,6 +97,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Start in read-only mode.
 - Maintain write mode independently per cluster context and reset it on context switch unless explicitly enabled again.
 - Allow interactive Pod `exec` and `attach` sessions in read-only mode; Kubernetes RBAC remains the authorization authority for those sessions.
+- Allow Pod port-forward sessions in read-only mode; bind local endpoints to loopback and rely on Kubernetes RBAC for authorization.
 - Require a diff and server-side dry-run before applying edits where supported.
 - Use client-side apply/full-object updates for writes, with Kubernetes resource-version conflicts surfaced to the user.
 - Require stronger confirmation for deletes, evictions, drains, namespace changes, and other destructive operations.

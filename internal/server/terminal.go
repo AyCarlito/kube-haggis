@@ -174,18 +174,23 @@ func terminalCommand(value string) []string {
 
 // validateTerminalOrigin accepts browser origins served from the local machine.
 func validateTerminalOrigin(request *http.Request) error {
+	return validateLocalOrigin(request, "terminal")
+}
+
+// validateLocalOrigin accepts a browser origin served from the local machine.
+func validateLocalOrigin(request *http.Request, session string) error {
 	origin := request.Header.Get("Origin")
 	if origin == "" {
 		return nil
 	}
 	parsed, err := url.Parse(origin)
 	if err != nil {
-		return fmt.Errorf("invalid terminal origin")
+		return fmt.Errorf("invalid %s origin", session)
 	}
 	switch parsed.Hostname() {
 	case "localhost", "127.0.0.1", "::1":
 		return nil
 	default:
-		return fmt.Errorf("terminal origin must be local")
+		return fmt.Errorf("%s origin must be local", session)
 	}
 }

@@ -142,6 +142,14 @@ export interface TerminalMessage {
   cols?: number
 }
 
+/** Represents the text control messages exchanged around a binary port-forward stream. */
+export interface PortForwardMessage {
+  type: 'ready' | 'error' | 'closed'
+  message?: string
+  targetPort?: number
+  localPort?: number
+}
+
 /** Represents the browser route used by the single-page application. */
 export interface RouteState {
   path: string

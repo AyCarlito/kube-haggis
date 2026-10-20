@@ -148,6 +148,13 @@ export function terminalUrl(context: string, namespace: string, pod: string, con
   return `${protocol}//${window.location.host}/api/terminal?${params.toString()}`
 }
 
+/** Builds the browser WebSocket URL for a native Pod port-forward session. */
+export function portForwardUrl(context: string, namespace: string, pod: string, targetPort: number, localPort: number): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const params = new URLSearchParams({ context, namespace, pod, targetPort: String(targetPort), localPort: String(localPort) })
+  return `${protocol}//${window.location.host}/api/port-forward?${params.toString()}`
+}
+
 /** Loads Events associated with one resource UID. */
 export function fetchResourceEvents(context: string, namespace: string, uid: string): Promise<ResourceEventsResponse> {
   return fetchJson<ResourceEventsResponse>(apiUrl('/api/events', { context, namespace, uid }))
