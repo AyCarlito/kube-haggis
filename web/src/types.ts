@@ -20,6 +20,27 @@ export interface ContextsResponse {
   reloadError?: string
 }
 
+/** Describes one redacted local mutation outcome returned by the audit API. */
+export interface AuditEntry {
+  id: number
+  createdAt: string
+  context: string
+  operation: string
+  group: string
+  version: string
+  resource: string
+  namespace?: string
+  name?: string
+  dryRun: boolean
+  success: boolean
+  detail?: string
+}
+
+/** Contains the bounded newest slice of local mutation history. */
+export interface AuditResponse {
+  items: AuditEntry[]
+}
+
 /** Identifies the safe state of the backend kubeconfig source snapshot. */
 export type KubeconfigSourceState = 'ready' | 'changed' | 'error'
 
@@ -478,6 +499,7 @@ export interface PortForwardMessage {
 /** Represents the browser route used by the single-page application. */
 export interface RouteState {
   path: string
+  view?: 'history'
   resource?: string
   name?: string
   namespace?: string

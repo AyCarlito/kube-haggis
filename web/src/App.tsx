@@ -14,6 +14,7 @@ import {
   FileCode2,
   Gauge,
   HardDrive,
+  History,
   Layers3,
   ListFilter,
   LoaderCircle,
@@ -44,6 +45,7 @@ import {
   applyWorkloadAction,
   deleteResource,
   deleteResources,
+  fetchAudit,
   fetchContexts,
   fetchDiscovery,
   fetchOverview,
@@ -64,6 +66,8 @@ import {
   watchUrl,
 } from './api'
 import type {
+  AuditEntry,
+  AuditResponse,
   ClusterOverview,
   ContextSummary,
   ContextsResponse,
@@ -126,6 +130,7 @@ const navGroups = [
       { label: 'Pods', resource: 'pods', icon: CircleDot },
       { label: 'Nodes', resource: 'nodes', icon: Server },
       { label: 'Events', resource: 'events', icon: Activity },
+      { label: 'Mutation history', path: '/history', icon: History },
     ],
   },
   {
@@ -292,6 +297,8 @@ export default function App() {
   const validResourceName = route.name && route.name !== 'undefined' && route.name !== 'null' ? route.name : undefined
   const content = !contexts || (contexts.contexts.length > 0 && !selectedContext) ? (
     <LoadingState label="Reading local kubeconfig" />
+  ) : route.view === 'history' ? (
+    <MutationHistoryPage contexts={contexts} selectedContext={selectedContext} activeContext={activeContext} revision={contextRevision} />
   ) : contexts.error || contexts.contexts.length === 0 ? (
     <SetupState error={contexts.error} />
   ) : validResourceName && activeDefinition ? (
@@ -338,8 +345,8 @@ export default function App() {
               <span className="nav-label">{group.label}</span>
               {group.items.map((item) => {
                 const Icon = item.icon
-                const isActive = item.resource ? route.resource === item.resource : !route.resource
-                const destination = item.resource ? `/resources/${item.resource}` : '/'
+                const isActive = 'path' in item ? route.path === item.path : item.resource ? route.resource === item.resource : !route.resource && !route.view
+                const destination = 'path' in item && item.path ? item.path : item.resource ? `/resources/${item.resource}` : '/'
                 return (
                   <a
                     className={`nav-item ${isActive ? 'nav-item-active' : ''}`}
@@ -370,7 +377,7 @@ export default function App() {
           <div className="crumbs">
             <span className="crumb-muted">KubeHaggis</span>
             <span className="crumb-slash">/</span>
-            <span>{route.resource ? titleCase(route.resource) : 'Cluster overview'}</span>
+            <span>{route.view === 'history' ? 'Mutation history' : route.resource ? titleCase(route.resource) : 'Cluster overview'}</span>
           </div>
           <div className="topbar-tools">
             <ContextPicker contexts={contexts?.contexts ?? []} value={selectedContext} onChange={changeContext} />
@@ -763,6 +770,202 @@ function LoadingState({ label }: { label: string }) {
 /** Renders an empty state with a concise next action. */
 function EmptyState({ title, detail }: { title: string; detail: string }) {
   return <div className="state-page"><div className="state-card"><span className="state-icon"><Box size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> Quiet field</span><h1>{title}</h1><p>{detail}</p></div></div>
+}
+
+/** Renders the read-only local mutation ledger with bounded search and outcome filters. */
+function MutationHistoryPage({ contexts, selectedContext, activeContext, revision }: { contexts: ContextsResponse; selectedContext: string; activeContext?: ContextSummary; revision: number }) {
+  const [response, setResponse] = useState<AuditResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'success' | 'failed'>('all')
+  const [executionFilter, setExecutionFilter] = useState<'all' | 'dry-run' | 'applied'>('all')
+  const [contextFilter, setContextFilter] = useState('all')
+  const [resourceFilter, setResourceFilter] = useState('all')
+  const [dateFilter, setDateFilter] = useState<'all' | 'today' | '7d' | '30d'>('all')
+  const [refreshNonce, setRefreshNonce] = useState(0)
+
+  useEffect(() => {
+    let active = true
+    const load = () => {
+      setLoading(true)
+      fetchAudit()
+        .then((data) => {
+          if (!active) return
+          setResponse(data)
+          setError(false)
+        })
+        .catch(() => active && setError(true))
+        .finally(() => active && setLoading(false))
+    }
+    load()
+    const interval = window.setInterval(load, 30000)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+    }
+  }, [revision, refreshNonce])
+
+  const entries = response?.items ?? []
+  const contextOptions = Array.from(new Set([...contexts.contexts.map((item) => item.name), ...entries.map((entry) => entry.context).filter(Boolean)])).sort()
+  const resourceOptions = Array.from(new Map(entries.map((entry) => [auditResourceKey(entry), auditResourceLabel(entry)])).entries()).sort((left, right) => left[1].localeCompare(right[1]))
+  const disconnected = contexts.contexts.length === 0 || !activeContext
+  const disconnectedContext = selectedContext || 'Cluster context'
+  const contextOptionKey = contextOptions.join('\u0000')
+  const normalizedSearch = search.trim().toLowerCase()
+  const filteredEntries = entries.filter((entry) => {
+    if (statusFilter === 'success' && !entry.success) return false
+    if (statusFilter === 'failed' && entry.success) return false
+    if (executionFilter === 'dry-run' && !entry.dryRun) return false
+    if (executionFilter === 'applied' && entry.dryRun) return false
+    if (contextFilter !== 'all' && entry.context !== contextFilter) return false
+    if (resourceFilter !== 'all' && auditResourceKey(entry) !== resourceFilter) return false
+    if (!auditDateMatches(entry.createdAt, dateFilter)) return false
+    return !normalizedSearch || auditSearchText(entry).includes(normalizedSearch)
+  })
+  const successfulCount = entries.filter((entry) => entry.success).length
+  const failedCount = entries.length - successfulCount
+  const dryRunCount = entries.filter((entry) => entry.dryRun).length
+  const hasFilters = Boolean(normalizedSearch) || statusFilter !== 'all' || executionFilter !== 'all' || contextFilter !== 'all' || resourceFilter !== 'all' || dateFilter !== 'all'
+
+  useEffect(() => {
+    if (contextFilter !== 'all' && !contextOptions.includes(contextFilter)) setContextFilter('all')
+  }, [contextFilter, contextOptionKey])
+
+  /** Clears every local history filter without changing the active cluster context. */
+  function clearHistoryFilters() {
+    setSearch('')
+    setStatusFilter('all')
+    setExecutionFilter('all')
+    setContextFilter('all')
+    setResourceFilter('all')
+    setDateFilter('all')
+  }
+
+  if (loading && !response) return <LoadingState label="Reading local mutation history" />
+  if (error && !response) return <HistoryUnavailableState onRetry={() => setRefreshNonce((value) => value + 1)} />
+
+  return (
+    <div className="history-page">
+      <section className="history-intro">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-mark" /> Local ledger / read-only</div>
+          <h1>Mutation history</h1>
+          <p className="intro-copy">A redacted record of reviewed and submitted Kubernetes mutations from this local KubeHaggis session. Request bodies, Secret values, credentials, and backend error text stay out of the ledger view.</p>
+        </div>
+        <div className="history-stamp">
+          <span className="stamp-label">History source</span>
+          <code>SQLite / redacted</code>
+          <span className="stamp-status"><span className="signal-dot signal-dot-good" /> Read-only</span>
+        </div>
+      </section>
+
+      {disconnected && <div className="history-disconnected" role="status"><span className="history-disconnected-mark"><AlertTriangle size={15} /></span><div><strong>{disconnectedContext} unavailable</strong><span>Local history remains readable. New Kubernetes mutations will stay unavailable until a context reconnects.</span></div></div>}
+
+      <section className="history-summary-grid">
+        <div className="history-summary-card"><span>Loaded records</span><strong>{entries.length}</strong><code>newest 500 from local DB</code></div>
+        <div className="history-summary-card history-summary-good"><span>Accepted</span><strong>{successfulCount}</strong><code>dry-run or applied</code></div>
+        <div className="history-summary-card history-summary-warning"><span>Not accepted</span><strong>{failedCount}</strong><code>safe outcome only</code></div>
+        <div className="history-summary-card history-summary-neutral"><span>Dry-run reviews</span><strong>{dryRunCount}</strong><code>no cluster change</code></div>
+      </section>
+
+      <section className="history-ledger panel">
+        <div className="history-ledger-heading">
+          <div><span className="panel-eyebrow">Redacted event ledger</span><h2>Recent outcomes</h2></div>
+          <span className={`panel-action ${error ? 'panel-action-warning' : 'panel-action-good'}`}><span />{error ? 'Showing last snapshot' : loading ? 'Refreshing' : 'Local store online'}</span>
+        </div>
+        <div className="history-filter-bar">
+          <label className="history-search"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search target, operation, context" /><kbd>/</kbd></label>
+          <label className="history-filter"><span>Outcome</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as 'all' | 'success' | 'failed')}><option value="all">All outcomes</option><option value="success">Accepted</option><option value="failed">Not accepted</option></select></label>
+          <label className="history-filter"><span>Mode</span><select value={executionFilter} onChange={(event) => setExecutionFilter(event.target.value as 'all' | 'dry-run' | 'applied')}><option value="all">All modes</option><option value="dry-run">Dry-run review</option><option value="applied">Applied request</option></select></label>
+          <label className="history-filter"><span>Context</span><select value={contextFilter} onChange={(event) => setContextFilter(event.target.value)}><option value="all">All contexts</option>{contextOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
+          <label className="history-filter"><span>Resource</span><select value={resourceFilter} onChange={(event) => setResourceFilter(event.target.value)}><option value="all">All resources</option>{resourceOptions.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+          <label className="history-filter"><span>Date</span><select value={dateFilter} onChange={(event) => setDateFilter(event.target.value as 'all' | 'today' | '7d' | '30d')}><option value="all">Any time</option><option value="today">Today</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option></select></label>
+          <button className="icon-button history-refresh" onClick={() => setRefreshNonce((value) => value + 1)} disabled={loading} aria-label="Refresh mutation history" title="Refresh mutation history">{loading ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}</button>
+        </div>
+        {error && response && <div className="history-refresh-warning" role="status"><AlertTriangle size={14} /> Refresh failed. Showing the last safely loaded snapshot.</div>}
+        {!filteredEntries.length ? <div className="history-empty"><Box size={22} /><strong>{entries.length ? 'No matching outcomes' : 'No mutation outcomes yet'}</strong><span>{entries.length ? 'Change the filters or clear the search to widen the ledger.' : 'Reviewed applies, deletes, and native operations will appear here.'}</span>{hasFilters && <button type="button" className="text-button" onClick={clearHistoryFilters}>Clear filters</button>}</div> : (
+          <div className="history-table-wrap">
+            <table className="history-table"><thead><tr><th>When</th><th>Outcome</th><th>Operation</th><th>Target</th><th>Context</th><th>API scope</th></tr></thead><tbody>
+              {filteredEntries.map((entry) => <MutationHistoryRow key={entry.id} entry={entry} />)}
+            </tbody></table>
+          </div>
+        )}
+        <div className="history-ledger-footer"><span>Showing {filteredEntries.length} of {entries.length} loaded records</span><span><LockKeyhole size={13} /> Bodies and sensitive values are never displayed</span></div>
+      </section>
+    </div>
+  )
+}
+
+/** Renders the explicit disconnected state for an unavailable local audit store. */
+function HistoryUnavailableState({ onRetry }: { onRetry: () => void }) {
+  return <div className="state-page"><div className="state-card"><span className="state-icon state-icon-warning"><Database size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> Local ledger disconnected</span><h1>Mutation history is offline.</h1><p>The local SQLite audit store could not be read. No operation details are shown while the history source is disconnected.</p><button className="secondary-button" onClick={onRetry}><RefreshCw size={15} /> Try again</button></div></div>
+}
+
+/** Renders one safe, dense row in the local mutation ledger. */
+function MutationHistoryRow({ entry }: { entry: AuditEntry }) {
+  return <tr><td><time className="history-time" dateTime={entry.createdAt} title={formatAuditTimestamp(entry.createdAt)}><strong>{relativeTime(entry.createdAt)}</strong><span>{formatAuditTimestamp(entry.createdAt)}</span></time></td><td><span className={`status-pill status-${auditOutcomeTone(entry)}`}><span />{auditOutcomeLabel(entry)}</span><small className="history-outcome-note">{auditOutcomeNote(entry)}</small></td><td><strong className="history-operation">{titleCase(entry.operation || 'mutation')}</strong><code>{entry.dryRun ? 'server dry-run' : 'write request'}</code></td><td><strong className="history-target">{auditTargetLabel(entry)}</strong><code>{auditResourceLabel(entry)}</code></td><td><code className="history-context">{entry.context || 'unknown context'}</code></td><td><span className="history-scope-mode">{entry.dryRun ? 'review' : 'mutation'}</span><code>{entry.group ? `${entry.group}/${entry.version}` : entry.version}</code></td></tr>
+}
+
+/** Returns a stable resource key used by the history resource filter. */
+function auditResourceKey(entry: AuditEntry): string {
+  return `${entry.group}\u0000${entry.version}\u0000${entry.resource}`
+}
+
+/** Formats one audit resource as a safe API-version and resource label. */
+function auditResourceLabel(entry: AuditEntry): string {
+  const apiVersion = entry.group ? `${entry.group}/${entry.version}` : entry.version
+  return `${apiVersion || 'unknown API'} / ${titleCase(entry.resource || 'resource')}`
+}
+
+/** Formats a redacted audit target without exposing request content. */
+function auditTargetLabel(entry: AuditEntry): string {
+  const target = entry.name || titleCase(entry.resource || 'resource')
+  return entry.namespace ? `${entry.namespace}/${target}` : target
+}
+
+/** Builds searchable text from safe audit coordinates only. */
+function auditSearchText(entry: AuditEntry): string {
+  return [entry.context, entry.operation, entry.group, entry.version, entry.resource, entry.namespace, entry.name].filter(Boolean).join(' ').toLowerCase()
+}
+
+/** Applies a bounded date-window filter to an audit timestamp. */
+function auditDateMatches(value: string, filter: 'all' | 'today' | '7d' | '30d'): boolean {
+  if (filter === 'all') return true
+  const timestamp = new Date(value).getTime()
+  if (!Number.isFinite(timestamp)) return false
+  const now = new Date()
+  if (filter === 'today') {
+    now.setHours(0, 0, 0, 0)
+    return timestamp >= now.getTime()
+  }
+  const days = filter === '7d' ? 7 : 30
+  return timestamp >= Date.now() - days * 24 * 60 * 60 * 1000
+}
+
+/** Formats an audit timestamp for the operator's local timezone. */
+function formatAuditTimestamp(value: string): string {
+  const timestamp = new Date(value)
+  if (!Number.isFinite(timestamp.getTime())) return 'Unknown time'
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(timestamp)
+}
+
+/** Returns the visual tone for one redacted mutation outcome. */
+function auditOutcomeTone(entry: AuditEntry): 'good' | 'neutral' | 'warning' {
+  if (!entry.success) return 'warning'
+  return entry.dryRun ? 'neutral' : 'good'
+}
+
+/** Returns the safe short outcome label shown in the history table. */
+function auditOutcomeLabel(entry: AuditEntry): string {
+  if (!entry.success) return 'Not accepted'
+  return entry.dryRun ? 'Dry-run passed' : 'Applied'
+}
+
+/** Returns a safe explanation that never includes backend error text. */
+function auditOutcomeNote(entry: AuditEntry): string {
+  if (!entry.success) return 'No success recorded'
+  return entry.dryRun ? 'No cluster change' : 'Mutation accepted'
 }
 
 /** Renders the generic live-updating resource table. */
@@ -2997,6 +3200,7 @@ function NamespacePicker({ context, value, revision, onChange }: { context: stri
 /** Reads the current browser URL into the KubeHaggis route model. */
 function readRoute(): RouteState {
   const parts = window.location.pathname.split('/').filter(Boolean)
+  if (parts[0] === 'history') return { path: '/history', view: 'history' }
   if (parts[0] !== 'resources' || !parts[1]) return { path: '/' }
   return { path: window.location.pathname, resource: decodeURIComponent(parts[1]), name: parts[2] ? decodeURIComponent(parts[2]) : undefined, namespace: new URLSearchParams(window.location.search).get('namespace') || undefined }
 }

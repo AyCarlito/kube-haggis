@@ -1,4 +1,5 @@
 import type {
+  AuditResponse,
   ClusterOverview,
   ContextsResponse,
   EphemeralContainerRequest,
@@ -47,6 +48,11 @@ export function fetchContexts(): Promise<ContextsResponse> {
 /** Forces the backend to reload kubeconfig sources without exposing their contents. */
 export function reloadContexts(): Promise<ContextsResponse> {
   return fetchJson<ContextsResponse>('/api/contexts/reload', { method: 'POST' })
+}
+
+/** Loads the newest bounded slice of redacted local mutation history. */
+export function fetchAudit(limit = 500): Promise<AuditResponse> {
+  return fetchJson<AuditResponse>(apiUrl('/api/audit', { limit: String(limit) }))
 }
 
 /** Loads the cluster overview for a kubeconfig context. */

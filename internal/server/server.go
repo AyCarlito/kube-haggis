@@ -126,12 +126,31 @@ func contextSnapshotPayload(snapshot kube.ContextSnapshot) map[string]interface{
 
 // handleAudit returns the newest redacted local mutation entries.
 func (s *Server) handleAudit(writer http.ResponseWriter, request *http.Request) {
-	entries, err := s.audit.List(request.Context(), parseLimit(request.URL.Query().Get("limit"), 100, 500))
-	if err != nil {
-		writeError(writer, err)
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]interface{}{"items": entries})
+	if s.audit == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "local mutation history is unavailable"})
+		return
+	}
+	entries, err := s.audit.List(request.Context(), parseLimit(request.URL.Query().Get("limit"), 100, 500))
+	if err != nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "local mutation history could not be read"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]interface{}{"items": redactedAuditEntries(entries)})
+}
+
+// redactedAuditEntries removes persisted detail text that may predate current audit safeguards.
+func redactedAuditEntries(entries []audit.Entry) []audit.Entry {
+	redacted := make([]audit.Entry, len(entries))
+	copy(redacted, entries)
+	for index := range redacted {
+		redacted[index].Detail = redactMutationDetail(redacted[index].DryRun, redacted[index].Success, redacted[index].Detail)
+	}
+	return redacted
 }
 
 // handleOverview returns the aggregate model for one cluster context.
@@ -471,9 +490,32 @@ func (s *Server) recordMutation(request *http.Request, operation, group, version
 		Name:      name,
 		DryRun:    dryRun,
 		Success:   success,
-		Detail:    detail,
+		Detail:    redactMutationDetail(dryRun, success, detail),
 	}); err != nil && s.logger != nil {
 		s.logger.Warn("could not record mutation", "error", err)
+	}
+}
+
+// redactMutationDetail converts mutation details into safe, bounded outcome text.
+func redactMutationDetail(dryRun, success bool, detail string) string {
+	if success {
+		if dryRun {
+			return "server-side dry-run passed"
+		}
+		return "mutation applied"
+	}
+	message := strings.ToLower(detail)
+	switch {
+	case strings.Contains(message, "rbac") || strings.Contains(message, "forbidden") || strings.Contains(message, "unauthorized"):
+		return "operation denied by Kubernetes RBAC"
+	case strings.Contains(message, "conflict") || strings.Contains(message, "resource version"):
+		return "operation conflicted with a newer resource version"
+	case strings.Contains(message, "unsupported") || strings.Contains(message, "not supported"):
+		return "operation is unsupported by the Kubernetes API"
+	case strings.Contains(message, "validation") || strings.Contains(message, "required") || strings.Contains(message, "invalid"):
+		return "operation request validation failed"
+	default:
+		return "operation failed"
 	}
 }
 
