@@ -3,12 +3,14 @@ import {
   AlertTriangle,
   ArrowUpRight,
   Box,
+  Bug,
   Check,
   ChevronDown,
   CircleDot,
   Clock3,
   Command,
   Database,
+  Download,
   FileCode2,
   Gauge,
   HardDrive,
@@ -25,6 +27,7 @@ import {
   Settings2,
   ShieldCheck,
   TerminalSquare,
+  Upload,
   X,
   Zap,
 } from 'lucide-react'
@@ -41,8 +44,11 @@ import {
   fetchResource,
   fetchResourceEvents,
   fetchResources,
+  downloadPodFile,
+  launchEphemeralContainer,
   logsUrl,
   portForwardUrl,
+  uploadPodFile,
   resourceEventsWatchUrl,
   terminalUrl,
   watchUrl,
@@ -51,6 +57,7 @@ import type {
   ClusterOverview,
   ContextSummary,
   ContextsResponse,
+  EphemeralContainerRequest,
   EventSummary,
   PortForwardMessage,
   ResourceDefinition,
@@ -620,10 +627,21 @@ function ResourceDetailPage({ context, namespace, definition, name, definitions,
     }
   }
 
+  /** Refreshes the complete Pod after an operational subresource changes it. */
+  async function refreshObject() {
+    const refreshed = await fetchResource(context, definition, namespace, name)
+    const editorObject = sanitizeEditorObject(refreshed)
+    const text = stringify(isSecret ? redactSecret(editorObject) : editorObject)
+    setObject(refreshed)
+    setYamlText(text)
+    setOriginalYaml(text)
+    setError('')
+  }
+
   if (error && !object) return <ConnectionState error={error} />
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
-  const detailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
+  const detailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
@@ -633,10 +651,12 @@ function ResourceDetailPage({ context, namespace, definition, name, definitions,
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
     {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
-     {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
-     {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
-     {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
-     {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
+      {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
+      {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
+      {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
+      {tab === 'debug' && definition.resource === 'pods' && !isNew && <PodDebugPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+      {tab === 'files' && definition.resource === 'pods' && !isNew && <PodFileCopyPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
+      {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
     {tab === 'related' && <OwnerReferencesPanel object={object} definitions={definitions} namespace={resourceNamespace} onOpenResource={onOpenResource} />}
   </div>
 }
@@ -672,6 +692,163 @@ function OwnerReferencesPanel({ object, definitions, namespace, onOpenResource }
           : <div className="relationship-row" key={`${owner.apiVersion}/${owner.kind}/${owner.name}/${owner.uid || index}`}>{row}</div>
       })}
     </div>
+  </div>
+}
+
+/** Renders the focused ephemeral debug-container launcher for a Pod. */
+function PodDebugPanel({ context, namespace, pod, object, writeEnabled, onRefresh }: { context: string; namespace: string; pod: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+  const [name, setName] = useState('debugger')
+  const [image, setImage] = useState('busybox:1.36')
+  const [command, setCommand] = useState('/bin/sh')
+  const [target, setTarget] = useState('')
+  const [launching, setLaunching] = useState(false)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const targets = podTargetContainerNames(object)
+
+  useEffect(() => {
+    if (target && !targets.includes(target)) setTarget('')
+  }, [object])
+
+  /** Sends the configured debug-container fields to Kubernetes. */
+  async function launch() {
+    if (!writeEnabled) {
+      setError('Enable write mode before launching an ephemeral debug container.')
+      return
+    }
+    const commandArgs = command.split('\n').map((argument) => argument.trim()).filter(Boolean)
+    if (!name.trim()) {
+      setError('A debug container name is required.')
+      return
+    }
+    if (!image.trim()) {
+      setError('A debug container image is required.')
+      return
+    }
+    setLaunching(true)
+    setError('')
+    setSuccess('')
+    try {
+      const request: EphemeralContainerRequest = { name: name.trim(), image: image.trim(), command: commandArgs, targetContainerName: target }
+      await launchEphemeralContainer(context, namespace, pod, request)
+      setSuccess(`Ephemeral container ${request.name} was sent to Kubernetes.`)
+      try {
+        await onRefresh()
+      } catch (refreshError) {
+        setError(`Debug container launched, but the Pod refresh failed: ${(refreshError as Error).message}`)
+      }
+    } catch (launchError) {
+      setError((launchError as Error).message)
+    } finally {
+      setLaunching(false)
+    }
+  }
+
+  return <div className="pod-operation-panel">
+    <div className="pod-operation-header"><div className="logs-title"><Bug size={16} /><strong>Ephemeral debug container</strong><span>pods/ephemeralcontainers</span></div><span className="pod-operation-scope">write operation</span></div>
+    <div className="pod-operation-intro"><strong>Attach a temporary troubleshooting container.</strong><span>Kubernetes adds this container to the existing Pod. It is not part of the workload template and cannot be restarted or removed through this workflow.</span></div>
+    {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to launch a debug container. Kubernetes RBAC still authorizes the subresource.</div>}
+    <form className="pod-operation-form" onSubmit={(event) => { event.preventDefault(); void launch() }}>
+      <div className="pod-operation-grid">
+        <label className="pod-operation-field"><span>Name</span><input value={name} onChange={(event) => setName(event.target.value)} disabled={!writeEnabled || launching} placeholder="debugger" /></label>
+        <label className="pod-operation-field"><span>Image</span><input value={image} onChange={(event) => setImage(event.target.value)} disabled={!writeEnabled || launching} placeholder="busybox:1.36" /></label>
+        <label className="pod-operation-field"><span>Target container <em>optional</em></span><select value={target} onChange={(event) => setTarget(event.target.value)} disabled={!writeEnabled || launching}><option value="">Pod namespaces only</option>{targets.map((container) => <option key={container} value={container}>{container}</option>)}</select></label>
+        <label className="pod-operation-field pod-operation-field-wide"><span>Command <em>one argument per line</em></span><textarea value={command} onChange={(event) => setCommand(event.target.value)} disabled={!writeEnabled || launching} rows={3} placeholder="/bin/sh" spellCheck={false} /></label>
+      </div>
+      <div className="pod-operation-actions"><span>Image pull and runtime support are controlled by the cluster.</span><button type="submit" className="primary-button" disabled={!writeEnabled || launching}>{launching ? <LoaderCircle size={15} className="spin" /> : <Bug size={15} />} {launching ? 'Launching' : 'Launch debug container'}</button></div>
+    </form>
+    {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
+    {success && <div className="operation-success"><Check size={15} />{success}</div>}
+    <div className="pod-operation-footer"><span><Bug size={14} /> Native typed Kubernetes update</span><span>Unsupported subresources and RBAC denials are reported by the API.</span></div>
+  </div>
+}
+
+/** Renders read-only Pod downloads and write-mode container uploads. */
+function PodFileCopyPanel({ context, namespace, pod, object, writeEnabled }: { context: string; namespace: string; pod: string; object: ResourceObject; writeEnabled: boolean }) {
+  const [container, setContainer] = useState('')
+  const [downloadPath, setDownloadPath] = useState('/tmp/example.txt')
+  const [uploadPath, setUploadPath] = useState('/tmp/example.txt')
+  const [file, setFile] = useState<File | null>(null)
+  const [busy, setBusy] = useState<'download' | 'upload' | ''>('')
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const containers = podContainerNames(object)
+
+  useEffect(() => {
+    if (container && !containers.includes(container)) setContainer('')
+  }, [object])
+
+  /** Downloads a regular container file through the native exec bridge. */
+  async function download() {
+    if (!downloadPath.trim()) {
+      setError('A remote path is required for download.')
+      return
+    }
+    setBusy('download')
+    setError('')
+    setSuccess('')
+    try {
+      const blob = await downloadPodFile(context, namespace, pod, container, downloadPath.trim())
+      const objectUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = remoteFileName(downloadPath)
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+      setSuccess(`Downloaded ${remoteFileName(downloadPath)} from the container.`)
+    } catch (downloadError) {
+      setError((downloadError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /** Uploads a selected browser file to the exact remote path in write mode. */
+  async function upload() {
+    if (!writeEnabled) {
+      setError('Enable write mode before uploading a file into a container.')
+      return
+    }
+    if (!file) {
+      setError('Choose a local file before uploading.')
+      return
+    }
+    if (!uploadPath.trim()) {
+      setError('A remote destination path is required for upload.')
+      return
+    }
+    setBusy('upload')
+    setError('')
+    setSuccess('')
+    try {
+      await uploadPodFile(context, namespace, pod, container, uploadPath.trim(), file)
+      setSuccess(`Uploaded ${file.name} to the container.`)
+    } catch (uploadError) {
+      setError((uploadError as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /** Updates the local file and suggests a safe temporary destination. */
+  function selectFile(selected: File | undefined) {
+    setFile(selected || null)
+    if (selected && (!uploadPath.trim() || uploadPath === '/tmp/example.txt')) setUploadPath(`/tmp/${selected.name}`)
+  }
+
+  return <div className="pod-operation-panel">
+    <div className="pod-operation-header"><div className="logs-title"><Download size={16} /><strong>Container file transfer</strong><span>native pods/exec stream</span></div><span className="pod-operation-scope">download read-only / upload write</span></div>
+    <div className="pod-operation-intro"><strong>Move one regular file at a time.</strong><span>Downloads read container data and are available in read-only mode. Uploads change the container filesystem and require write mode. Both actions still require Kubernetes <code>pods/exec</code> permission.</span></div>
+    <div className="pod-operation-shared"><label className="pod-operation-field"><span>Container</span><select value={container} onChange={(event) => setContainer(event.target.value)} disabled={Boolean(busy)}><option value="">Default container</option>{containers.map((name) => <option key={name} value={name}>{name}</option>)}</select></label></div>
+    <div className="copy-operation-grid">
+      <section className="copy-operation-card"><div className="copy-operation-heading"><span className="copy-operation-icon"><Download size={16} /></span><div><strong>Download from container</strong><span>Read-only native exec</span></div></div><label className="pod-operation-field"><span>Absolute remote path</span><input value={downloadPath} onChange={(event) => setDownloadPath(event.target.value)} disabled={Boolean(busy)} placeholder="/var/log/app.log" /></label><button type="button" className="secondary-button" onClick={() => void download()} disabled={Boolean(busy)}>{busy === 'download' ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />} {busy === 'download' ? 'Downloading' : 'Download file'}</button></section>
+      <section className="copy-operation-card"><div className="copy-operation-heading"><span className="copy-operation-icon copy-operation-icon-upload"><Upload size={16} /></span><div><strong>Upload into container</strong><span>{writeEnabled ? 'Write mode enabled' : 'Enable write mode first'}</span></div></div><label className="pod-operation-field"><span>Local file</span><input type="file" onChange={(event) => selectFile(event.target.files?.[0])} disabled={!writeEnabled || Boolean(busy)} /></label><label className="pod-operation-field"><span>Absolute remote destination</span><input value={uploadPath} onChange={(event) => setUploadPath(event.target.value)} disabled={!writeEnabled || Boolean(busy)} placeholder="/tmp/config.txt" /></label><button type="button" className="primary-button" onClick={() => void upload()} disabled={!writeEnabled || Boolean(busy)}>{busy === 'upload' ? <LoaderCircle size={15} className="spin" /> : <Upload size={15} />} {busy === 'upload' ? 'Uploading' : 'Upload file'}</button></section>
+    </div>
+    {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
+    {success && <div className="operation-success"><Check size={15} />{success}</div>}
+    <div className="pod-operation-footer"><span><Download size={14} /> Files are streamed through the local server</span><span>Container images must provide tar for copy operations.</span></div>
   </div>
 }
 
@@ -1000,10 +1177,20 @@ function PodPortForwardPanel({ context, namespace, pod, object }: { context: str
 
 /** Returns the container names available in a generic Pod object. */
 function podContainerNames(object: ResourceObject): string[] {
+  return podContainerNamesFromFields(object, ['containers', 'initContainers', 'ephemeralContainers'])
+}
+
+/** Returns regular Pod containers that Kubernetes can target with a debug container. */
+function podTargetContainerNames(object: ResourceObject): string[] {
+  return podContainerNamesFromFields(object, ['containers'])
+}
+
+/** Reads unique container names from selected PodSpec container arrays. */
+function podContainerNamesFromFields(object: ResourceObject, fields: string[]): string[] {
   const spec = object.spec
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return []
   const names: string[] = []
-  for (const field of ['containers', 'initContainers', 'ephemeralContainers']) {
+  for (const field of fields) {
     const entries = (spec as Record<string, unknown>)[field]
     if (!Array.isArray(entries)) continue
     for (const entry of entries) {
@@ -1013,6 +1200,12 @@ function podContainerNames(object: ResourceObject): string[] {
     }
   }
   return names
+}
+
+/** Returns a safe browser filename from an absolute remote file path. */
+function remoteFileName(value: string): string {
+  const name = value.trim().split('/').filter(Boolean).pop()
+  return name || 'download'
 }
 
 /** Returns the TCP ports advertised by containers in a generic Pod object. */

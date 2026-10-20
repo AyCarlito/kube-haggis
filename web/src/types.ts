@@ -123,6 +123,21 @@ export interface ClusterOverview {
 /** Represents an unstructured Kubernetes resource object. */
 export type ResourceObject = Record<string, unknown>
 
+/** Contains the supported fields for one ephemeral debug-container launch. */
+export interface EphemeralContainerRequest {
+  name: string
+  image: string
+  command: string[]
+  targetContainerName: string
+}
+
+/** Contains the minimal acknowledgement returned after a Pod operation. */
+export interface PodOperationResponse {
+  status: string
+  pod: string
+  container?: string
+}
+
 /** Describes the standard Kubernetes owner reference attached to a resource. */
 export interface ResourceOwnerReference {
   apiVersion: string

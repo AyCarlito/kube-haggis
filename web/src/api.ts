@@ -1,6 +1,8 @@
 import type {
   ClusterOverview,
   ContextsResponse,
+  EphemeralContainerRequest,
+  PodOperationResponse,
   ResourceDefinition,
   ResourceEventsResponse,
   ResourceListResponse,
@@ -137,6 +139,49 @@ export function logsUrl(context: string, namespace: string, pod: string, contain
     previous: String(previous),
     tailLines: String(tailLines),
   })
+}
+
+/** Launches an ephemeral debug container through the native Pod subresource. */
+export function launchEphemeralContainer(context: string, namespace: string, pod: string, request: EphemeralContainerRequest): Promise<PodOperationResponse> {
+  return fetchJson<PodOperationResponse>(
+    apiUrl('/api/pod/debug', { context, namespace, pod }),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      body: JSON.stringify(request),
+    },
+  )
+}
+
+/** Builds the native Pod file-download URL; downloads do not require application write mode. */
+export function podCopyDownloadUrl(context: string, namespace: string, pod: string, container: string, remotePath: string): string {
+  return apiUrl('/api/pod/copy', { context, namespace, pod, container, path: remotePath })
+}
+
+/** Downloads one container file through the local native Kubernetes bridge. */
+export async function downloadPodFile(context: string, namespace: string, pod: string, container: string, remotePath: string): Promise<Blob> {
+  const response = await fetch(podCopyDownloadUrl(context, namespace, pod, container, remotePath))
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string }
+    throw new Error(payload.error || `File download failed with ${response.status}`)
+  }
+  return response.blob()
+}
+
+/** Uploads one browser-selected local file through the native Pod exec stream. */
+export function uploadPodFile(context: string, namespace: string, pod: string, container: string, remotePath: string, file: File): Promise<PodOperationResponse> {
+  const form = new FormData()
+  form.set('container', container)
+  form.set('path', remotePath)
+  form.set('file', file, file.name)
+  return fetchJson<PodOperationResponse>(
+    apiUrl('/api/pod/copy', { context, namespace, pod }),
+    {
+      method: 'POST',
+      headers: { 'X-KubeHaggis-Write': 'enabled' },
+      body: form,
+    },
+  )
 }
 
 /** Builds the browser WebSocket URL for a native Pod terminal session. */

@@ -44,6 +44,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/events/watch", s.handleEventWatch)
 	mux.HandleFunc("/api/logs", s.handleLogs)
+	mux.HandleFunc("/api/pod/debug", s.handleEphemeralContainer)
+	mux.HandleFunc("/api/pod/copy", s.handlePodCopy)
 	mux.Handle("/api/terminal", s.terminalHandler())
 	mux.Handle("/api/port-forward", s.portForwardHandler())
 	mux.HandleFunc("/api/resource", s.handleResource)
@@ -424,7 +426,13 @@ func writeJSON(writer http.ResponseWriter, status int, value interface{}) {
 // writeError converts a backend error into a consistent API error response.
 func writeError(writer http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
-	if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "not found") {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "write mode") || strings.Contains(message, "denied by kubernetes rbac") || strings.Contains(message, "forbidden") || strings.Contains(message, "unauthorized"):
+		status = http.StatusForbidden
+	case strings.Contains(message, "not supported by this kubernetes api server"):
+		status = http.StatusNotImplemented
+	case strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
 		status = http.StatusBadRequest
 	}
 	writeJSON(writer, status, map[string]string{"error": err.Error()})
