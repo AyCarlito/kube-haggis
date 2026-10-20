@@ -41,6 +41,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/discovery", s.handleDiscovery)
 	mux.HandleFunc("/api/resources", s.handleResources)
 	mux.HandleFunc("/api/watch", s.handleWatch)
+	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/events/watch", s.handleEventWatch)
 	mux.HandleFunc("/api/logs", s.handleLogs)
 	mux.HandleFunc("/api/resource", s.handleResource)
 	mux.HandleFunc("/", s.handleFrontend)
@@ -145,6 +147,57 @@ func (s *Server) handleWatch(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	_, _ = writer.Write([]byte(": KubeHaggis watch connected\n\n"))
+	flusher.Flush()
+
+	for {
+		select {
+		case <-request.Context().Done():
+			return
+		case event, open := <-watcher.ResultChan():
+			if !open {
+				return
+			}
+			payload := map[string]interface{}{"type": eventType(event.Type), "object": event.Object}
+			encoded, encodeErr := json.Marshal(payload)
+			if encodeErr != nil {
+				continue
+			}
+			_, _ = writer.Write([]byte("data: " + string(encoded) + "\n\n"))
+			flusher.Flush()
+		}
+	}
+}
+
+// handleEvents returns Events associated with one resource UID.
+func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	events, resourceVersion, err := s.kube.EventsForResource(request.Context(), query.Get("context"), query.Get("namespace"), query.Get("uid"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]interface{}{"items": events, "resourceVersion": resourceVersion})
+}
+
+// handleEventWatch streams Events associated with one resource UID.
+func (s *Server) handleEventWatch(writer http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	watcher, err := s.kube.WatchEventsForResource(request.Context(), query.Get("context"), query.Get("namespace"), query.Get("uid"), query.Get("resourceVersion"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	defer watcher.Stop()
+
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.Header().Set("Cache-Control", "no-cache")
+	writer.Header().Set("Connection", "keep-alive")
+	flusher, ok := writer.(http.Flusher)
+	if !ok {
+		writeError(writer, fmt.Errorf("streaming is not supported by this server"))
+		return
+	}
+	_, _ = writer.Write([]byte(": KubeHaggis Event watch connected\n\n"))
 	flusher.Flush()
 
 	for {
