@@ -23,9 +23,51 @@ export interface ResourceDefinition {
   resource: string
   kind: string
   namespaced: boolean
+  customResource?: boolean
   verbs: string[]
   shortNames?: string[]
   categories?: string[]
+}
+
+/** Identifies why a schema form is available or why YAML remains the fallback. */
+export type ResourceSchemaState = 'available' | 'unsupported' | 'missing' | 'non-structural' | 'permission-denied' | 'error'
+
+/** Describes one normalized structural OpenAPI field used by the browser form. */
+export interface ResourceSchemaField {
+  name?: string
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'array'
+  title?: string
+  description?: string
+  format?: string
+  required?: boolean
+  readOnly?: boolean
+  enum?: unknown[]
+  default?: unknown
+  properties?: ResourceSchemaField[]
+  items?: ResourceSchemaField
+  additionalProperties?: ResourceSchemaField
+  minimum?: number
+  exclusiveMinimum?: boolean
+  maximum?: number
+  exclusiveMaximum?: boolean
+  multipleOf?: number
+  minLength?: number
+  maxLength?: number
+  pattern?: string
+  minItems?: number
+  maxItems?: number
+  uniqueItems?: boolean
+}
+
+/** Contains the read-only structural CRD schema and explicit YAML fallback state. */
+export interface ResourceSchemaResponse {
+  state: ResourceSchemaState
+  message?: string
+  group: string
+  version: string
+  resource: string
+  kind?: string
+  schema?: ResourceSchemaField
 }
 
 /** Contains common resource fields used by the generic resource table. */

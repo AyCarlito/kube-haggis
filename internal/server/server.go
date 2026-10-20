@@ -27,6 +27,7 @@ type Server struct {
 	audit          *audit.Store
 	overview       func(context.Context, string) (kube.ClusterOverview, error)
 	related        relatedLoader
+	resourceSchema resourceSchemaLoader
 	resourceDelete resourceDeleteLoader
 	workloadAction workloadActionLoader
 	nodeAction     nodeActionLoader
@@ -36,6 +37,9 @@ type Server struct {
 
 // relatedLoader describes the read-only relationship aggregation seam used by the HTTP handler.
 type relatedLoader func(context.Context, string, string, string, string, string, string, bool) (kube.RelatedResourceList, error)
+
+// resourceSchemaLoader describes the read-only CRD schema seam used by the HTTP handler.
+type resourceSchemaLoader func(context.Context, string, string, string, string) (kube.ResourceSchema, error)
 
 // resourceDeleteLoader describes the generic resource deletion seam used by HTTP handlers.
 type resourceDeleteLoader func(context.Context, string, string, string, string, string, string, bool, kube.ResourceDeleteOptions) error
@@ -53,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/audit", s.handleAudit)
 	mux.HandleFunc("/api/overview", s.handleOverview)
 	mux.HandleFunc("/api/discovery", s.handleDiscovery)
+	mux.HandleFunc("/api/schema", s.handleSchema)
 	mux.HandleFunc("/api/resources", s.handleResources)
 	mux.HandleFunc("/api/resources/delete", s.handleBulkResourceDelete)
 	mux.HandleFunc("/api/related", s.handleRelated)
@@ -122,6 +127,21 @@ func (s *Server) handleDiscovery(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]interface{}{"items": definitions})
+}
+
+// handleSchema returns a read-only structural CRD schema or an explicit YAML fallback state.
+func (s *Server) handleSchema(writer http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	loadSchema := s.resourceSchema
+	if loadSchema == nil {
+		loadSchema = s.kube.ResourceSchema
+	}
+	resourceSchema, err := loadSchema(request.Context(), query.Get("context"), query.Get("group"), query.Get("version"), query.Get("resource"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, resourceSchema)
 }
 
 // handleResources returns a paginated generic resource collection.

@@ -40,6 +40,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Native Node cordon, uncordon, drain, and taint workflows with eviction-only drain safety review and explicit confirmation.
 - PVC resize and VolumeSnapshot workflows with StorageClass/API capability states, dry-run review, and explicit confirmation.
 - High-friction single and bulk delete workflows with resource-version preconditions, server-side dry-run review, exact confirmations, per-item results, and redacted audit outcomes.
+- Schema-generated forms for supported structural CRDs with bounded validation and YAML fallback for unsupported schemas.
 - Local-only visual identity using the provided `haggis.svg` asset.
 
 ### Partially Implemented
@@ -47,13 +48,12 @@ The repository currently contains the first usable vertical slice. The backend a
 - Resource tables have search, namespace, label selector, and live updates, but status filters, sorting, configurable columns, and continuation-token pagination are still incomplete.
 - Resource detail pages have overview, YAML, live Events, and discovery-driven related-resource relationship views.
 - Event detail pages omit the Events tab because Events are not expected to have child Events.
-- CRDs support discovery, generic CRUD, and YAML editing. Schema-generated CRD forms are not implemented yet.
+- CRDs support discovery, generic CRUD, schema-generated forms for supported structural schemas, and YAML editing as the complete fallback.
 - Client-side apply currently uses full-object Kubernetes updates rather than a three-way `kubectl apply` merge. Resource-version conflicts reach the UI as errors, but there is no dedicated conflict-resolution workflow yet.
 - Mutation history is persisted and exposed by the backend API, but it does not yet have a dedicated history view in the UI.
 
 ### Remaining First-Release Work
 
-- Schema-generated forms for structural CRDs.
 - Kubeconfig reload controls and file-change handling.
 - UI for local mutation history.
 - Fake-cluster and handler tests covering discovery, watches, mutations, and permission failures.

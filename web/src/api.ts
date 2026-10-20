@@ -10,6 +10,7 @@ import type {
   ResourceEventsResponse,
   ResourceListResponse,
   ResourceObject,
+  ResourceSchemaResponse,
   RelatedResourcesResponse,
   NodeActionRequest,
   NodeActionResponse,
@@ -52,6 +53,18 @@ export function fetchOverview(context: string): Promise<ClusterOverview> {
 export async function fetchDiscovery(context: string): Promise<ResourceDefinition[]> {
   const response = await fetchJson<{ items: ResourceDefinition[] }>(apiUrl('/api/discovery', { context }))
   return response.items
+}
+
+/** Loads a structural CRD schema without exposing kubeconfig credentials to the browser. */
+export function fetchResourceSchema(context: string, definition: ResourceDefinition): Promise<ResourceSchemaResponse> {
+  return fetchJson<ResourceSchemaResponse>(
+    apiUrl('/api/schema', {
+      context,
+      group: definition.group,
+      version: definition.version,
+      resource: definition.resource,
+    }),
+  )
 }
 
 /** Loads one generic Kubernetes resource collection. */

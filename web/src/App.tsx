@@ -36,7 +36,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { stringify } from 'yaml'
+import { parse, stringify } from 'yaml'
 import {
   applyResource,
   applyNodeAction,
@@ -49,6 +49,7 @@ import {
   fetchOverview,
   fetchPVCOperations,
   fetchResource,
+  fetchResourceSchema,
   fetchResourceEvents,
   fetchRelated,
   fetchResources,
@@ -74,6 +75,8 @@ import type {
   BulkDeleteResponse,
   ResourceListResponse,
   ResourceObject,
+  ResourceSchemaField,
+  ResourceSchemaResponse,
   ResourceSummary,
   RelatedAggregateState,
   RelatedResource,
@@ -909,10 +912,13 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   const [reviewReady, setReviewReady] = useState(false)
   const isSecret = definition.resource === 'secrets'
   const isNew = name === 'new'
+  const schemaCandidate = !isSecret && isCustomResourceDefinition(definition)
+  const [resourceSchema, setResourceSchema] = useState<ResourceSchemaResponse | null>(null)
+  const [schemaLoading, setSchemaLoading] = useState(false)
 
   useEffect(() => {
     let active = true
-    setTab('overview')
+    setTab(isNew && schemaCandidate ? 'form' : 'overview')
     if (isNew) {
       const initial: ResourceObject = {
         apiVersion: definition.group ? `${definition.group}/${definition.version}` : definition.version,
@@ -943,8 +949,43 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     }
   }, [context, definition, namespace, name, isNew, isSecret])
 
+  useEffect(() => {
+    if (!schemaCandidate) {
+      setResourceSchema(null)
+      setSchemaLoading(false)
+      return
+    }
+    let active = true
+    setResourceSchema(null)
+    setSchemaLoading(true)
+    fetchResourceSchema(context, definition)
+      .then((response) => active && setResourceSchema(response))
+      .catch((schemaError: Error) => active && setResourceSchema({
+        state: 'error',
+        message: schemaError.message,
+        group: definition.group,
+        version: definition.version,
+        resource: definition.resource,
+        kind: definition.kind,
+      }))
+      .finally(() => active && setSchemaLoading(false))
+    return () => {
+      active = false
+    }
+  }, [context, definition, schemaCandidate])
+
   /** Runs Kubernetes dry-run validation for the edited resource document. */
   async function reviewChanges() {
+    if (resourceSchema?.state === 'available' && resourceSchema.schema) {
+      const validationErrors = validateSchemaDocument(resourceSchema.schema, object || {})
+      if (isNew && !metadataString(object || {}, 'name')) validationErrors.unshift('metadata.name is required for form-created resources; use YAML for generateName.')
+      if (isNew && definition.namespaced && namespace === 'all' && !metadataString(object || {}, 'namespace')) validationErrors.unshift('metadata.namespace is required when creating a namespaced resource from All namespaces.')
+      if (validationErrors.length) {
+        setTab('form')
+        setError(`Form validation: ${validationErrors.slice(0, 4).join(' ')}`)
+        return
+      }
+    }
     setSaving(true)
     try {
       await applyResource(context, definition, namespace, yamlText, true)
@@ -973,7 +1014,8 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
           refreshError = `Resource applied, but refresh failed: ${(caughtError as Error).message}`
         }
       }
-      const text = stringify(sanitizeEditorObject(refreshed))
+      const safeRefreshed = sanitizeEditorObject(refreshed)
+      const text = stringify(isSecret ? redactSecret(safeRefreshed) : safeRefreshed)
       setObject(refreshed)
       setYamlText(text)
       setOriginalYaml(text)
@@ -998,24 +1040,41 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     setError('')
   }
 
+  /** Replaces the generic YAML editor document with one changed through the schema form. */
+  function updateFormObject(nextObject: ResourceObject) {
+    const safeObject = sanitizeEditorObject(nextObject)
+    setObject(safeObject)
+    setYamlText(stringify(safeObject))
+    setReviewReady(false)
+    setError('')
+  }
+
+  /** Syncs the in-memory object when an operator switches from valid YAML to the schema form. */
+  function syncObjectFromYaml() {
+    const parsed = parseResourceObject(yamlText)
+    if (parsed) setObject(sanitizeEditorObject(parsed))
+  }
+
   if (error && !object) return <ConnectionState error={error} />
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
   const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
-  const detailTabs = (targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) && !isNew ? [...baseDetailTabs.slice(0, 1), 'operations', ...baseDetailTabs.slice(1)] : baseDetailTabs
+  const schemaTabs = schemaCandidate ? [baseDetailTabs[0], 'form', ...baseDetailTabs.slice(1)] : baseDetailTabs
+  const detailTabs = (targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) && !isNew ? [schemaTabs[0], 'operations', ...schemaTabs.slice(1)] : schemaTabs
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
     <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
      {!isNew && <DeleteReviewPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} />}
-     <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => setTab(item)}>{item === 'yaml' ? 'YAML editor' : titleCase(item)}</button>)}</div>
+     <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
        {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
-        {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
-        {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
-        {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
-    {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
+         {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+         {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+         {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+     {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
+     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false); const parsed = parseResourceObject(event.target.value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
       {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
@@ -1024,6 +1083,289 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
       {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
       {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
   </div>
+}
+
+/** Renders a structural CRD form while keeping YAML as the complete editing fallback. */
+function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespace, writeEnabled, reviewReady, onChange, onOpenYaml }: { response: ResourceSchemaResponse | null; loading: boolean; object: ResourceObject; isNew: boolean; namespaced: boolean; namespace: string; writeEnabled: boolean; reviewReady: boolean; onChange: (object: ResourceObject) => void; onOpenYaml: () => void }) {
+  if (loading && !response) {
+    return <div className="schema-form-panel"><div className="schema-form-loading"><LoaderCircle size={18} className="spin" /> Reading structural OpenAPI v3 schema</div></div>
+  }
+  if (!response || response.state !== 'available' || !response.schema) {
+    return <div className="schema-form-panel"><div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>Schema form unavailable</strong><span>YAML remains complete</span></div><span className="schema-state-chip schema-state-warning">{schemaStateLabel(response?.state)}</span></div><div className="schema-form-fallback"><AlertTriangle size={18} /><div><strong>{schemaStateTitle(response?.state)}</strong><span>{response?.message || 'The cluster did not provide a usable structural schema for this custom resource.'}</span></div></div><div className="schema-form-footer"><span>Generic CRUD and deep links remain available.</span><button type="button" className="secondary-button" onClick={onOpenYaml}><FileCode2 size={14} /> Open YAML editor</button></div></div>
+  }
+
+  const validationErrors = validateSchemaDocument(response.schema, object)
+  const metadata = object.metadata && typeof object.metadata === 'object' && !Array.isArray(object.metadata) ? object.metadata as Record<string, unknown> : {}
+  const metadataName = typeof metadata.name === 'string' ? metadata.name : ''
+  const metadataNamespace = typeof metadata.namespace === 'string' ? metadata.namespace : namespace === 'all' ? '' : namespace
+  const updatePath = (path: string[], value: unknown) => onChange(updateSchemaObject(object, path, value))
+  return <div className="schema-form-panel">
+    <div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>{isNew ? 'Create from schema' : 'Edit from schema'}</strong><span>structural OpenAPI v3</span></div><div className="schema-form-header-meta">{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}<span className="schema-state-chip schema-state-good">Form ready</span></div></div>
+    <div className="schema-form-intro"><strong>Fields are generated from the cluster CRD.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span></div>
+    {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to edit this form. Review still performs the existing Kubernetes server-side dry-run.</div>}
+    <form className="schema-form" onSubmit={(event) => event.preventDefault()}>
+      <fieldset className="schema-object schema-metadata" disabled={!writeEnabled}>
+        <legend>Metadata</legend>
+        <div className="schema-field-grid">
+          <label className="schema-field"><span>Name <em>{isNew ? 'required for form create' : 'identity'}</em></span><input value={metadataName} onChange={(event) => updatePath(['metadata', 'name'], event.target.value || undefined)} readOnly={!isNew} required={isNew} /></label>
+          {namespaced && <label className="schema-field"><span>Namespace {isNew && namespace === 'all' && <b>required</b>}</span><input value={metadataNamespace} onChange={(event) => updatePath(['metadata', 'namespace'], event.target.value || undefined)} readOnly={!isNew} required={isNew && namespace === 'all'} /></label>}
+        </div>
+      </fieldset>
+      <SchemaFieldEditor field={response.schema} value={object} path={[]} writeEnabled={writeEnabled} onChange={updatePath} />
+    </form>
+    {validationErrors.length > 0 && <div className="schema-validation"><AlertTriangle size={15} /><div><strong>Form needs attention</strong><span>{validationErrors.slice(0, 4).join(' ')}</span></div></div>}
+    <div className="schema-form-footer"><span><ShieldCheck size={14} /> Full-object update / resource-version concurrency</span><button type="button" className="secondary-button" onClick={onOpenYaml}><FileCode2 size={14} /> Use YAML fallback</button></div>
+  </div>
+}
+
+/** Renders one typed schema field and its nested object, array, or map controls. */
+function SchemaFieldEditor({ field, value, path, writeEnabled, onChange }: { field: ResourceSchemaField; value: unknown; path: string[]; writeEnabled: boolean; onChange: (path: string[], value: unknown) => void }) {
+  const label = field.title || field.name || (path.length ? 'Value' : 'Spec')
+  const present = value !== undefined
+  const displayValue = value === undefined ? field.default : value
+  const clear = () => onChange(path, undefined)
+  if (field.type === 'object') {
+    if (!present && field.default === undefined && !field.required && path.length > 0) {
+      return <div className="schema-field-add"><div><strong>{label}</strong>{field.description && <span>{field.description}</span>}</div><button type="button" className="secondary-button" disabled={!writeEnabled || field.readOnly} onClick={() => onChange(path, createSchemaValue(field))}>Add section</button></div>
+    }
+    const objectValue = displayValue && typeof displayValue === 'object' && !Array.isArray(displayValue) ? displayValue as Record<string, unknown> : {}
+    return <fieldset className={`schema-object ${path.length ? '' : 'schema-object-root'}`}>
+      {path.length > 0 && <legend><span>{label}</span>{field.required && <b>required</b>}{field.readOnly && <em>read-only</em>}{present && !field.required && <button type="button" className="schema-clear" onClick={clear} disabled={!writeEnabled || field.readOnly}>Clear</button>}</legend>}
+      {field.description && <p className="schema-description">{field.description}</p>}
+      {field.properties?.map((property) => <SchemaFieldEditor key={property.name} field={property} value={readSchemaPath(objectValue, [property.name || ''])} path={[...path, property.name || '']} writeEnabled={writeEnabled && !field.readOnly} onChange={onChange} />)}
+      {field.additionalProperties && <SchemaMapEditor field={field.additionalProperties} value={displayValue} path={path} reservedKeys={(field.properties || []).map((property) => property.name || '')} writeEnabled={writeEnabled && !field.readOnly} onChange={onChange} />}
+      {!field.properties?.length && !field.additionalProperties && <span className="schema-empty">No editable properties are declared.</span>}
+    </fieldset>
+  }
+  if (field.type === 'array') {
+    return <SchemaArrayEditor field={field} value={displayValue} path={path} label={label} present={present} writeEnabled={writeEnabled} onChange={onChange} />
+  }
+
+  const enumValues = field.enum || []
+  const valueKey = displayValue === undefined ? '' : schemaValueKey(displayValue)
+  const stringValue = typeof displayValue === 'string' ? displayValue : displayValue === undefined || displayValue === null ? '' : String(displayValue)
+  return <label className={`schema-field schema-field-${field.type}`}>
+    <span>{label} {field.required && <b>required</b>}{field.readOnly && <em>read-only</em>}{present && !field.required && <button type="button" className="schema-clear" onClick={(event) => { event.preventDefault(); clear() }} disabled={!writeEnabled || field.readOnly}>Clear</button>}</span>
+    {field.description && <small>{field.description}</small>}
+    {enumValues.length > 0 ? <select value={valueKey} onChange={(event) => onChange(path, event.target.value ? parseSchemaValue(event.target.value) : undefined)} disabled={!writeEnabled || field.readOnly} required={field.required}><option value="">{field.required ? 'Choose a value' : 'Not set'}</option>{enumValues.map((item) => <option key={schemaValueKey(item)} value={schemaValueKey(item)}>{String(item)}</option>)}</select> : field.type === 'boolean' ? <input type="checkbox" checked={displayValue === true} onChange={(event) => onChange(path, event.target.checked)} disabled={!writeEnabled || field.readOnly} /> : <input type={field.type === 'number' || field.type === 'integer' ? 'number' : 'text'} value={stringValue} onChange={(event) => onChange(path, parseSchemaInput(field, event.target.value))} disabled={!writeEnabled || field.readOnly} required={field.required} min={field.minimum} max={field.maximum} minLength={field.minLength} maxLength={field.maxLength} pattern={field.pattern} step={field.type === 'integer' ? 1 : field.multipleOf || 'any'} inputMode={field.type === 'number' || field.type === 'integer' ? 'decimal' : undefined} />}
+    {field.format && <i className="schema-format">format / {field.format}</i>}
+  </label>
+}
+
+/** Renders array items with bounded add and remove controls. */
+function SchemaArrayEditor({ field, value, path, label, present, writeEnabled, onChange }: { field: ResourceSchemaField; value: unknown; path: string[]; label: string; present: boolean; writeEnabled: boolean; onChange: (path: string[], value: unknown) => void }) {
+  const items = Array.isArray(value) ? value : []
+  const clear = () => onChange(path, undefined)
+  return <fieldset className="schema-array"><legend><span>{label}</span>{field.required && <b>required</b>}{field.readOnly && <em>read-only</em>}{present && !field.required && <button type="button" className="schema-clear" onClick={clear} disabled={!writeEnabled || field.readOnly}>Clear</button>}</legend>{field.description && <p className="schema-description">{field.description}</p>}<div className="schema-array-items">{items.map((item, index) => <div className="schema-array-item" key={`${path.join('.')}-${index}`}><div className="schema-array-item-heading"><span>Item {index + 1}</span><button type="button" className="schema-clear" onClick={() => onChange(path, items.filter((_, itemIndex) => itemIndex !== index))} disabled={!writeEnabled || field.readOnly}>Remove</button></div>{field.items ? <SchemaFieldEditor field={field.items} value={item} path={[...path, String(index)]} writeEnabled={writeEnabled && !field.readOnly} onChange={onChange} /> : <span className="schema-empty">This array has no item schema. Use YAML.</span>}</div>)}</div><button type="button" className="secondary-button schema-add-button" onClick={() => onChange(path, [...items, createSchemaValue(field.items)])} disabled={!writeEnabled || field.readOnly || !field.items}>Add item</button></fieldset>
+}
+
+/** Renders typed additionalProperties maps as editable key/value rows. */
+function SchemaMapEditor({ field, value, path, reservedKeys, writeEnabled, onChange }: { field: ResourceSchemaField; value: unknown; path: string[]; reservedKeys: string[]; writeEnabled: boolean; onChange: (path: string[], value: unknown) => void }) {
+  const map = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  const entries = Object.entries(map).filter(([key]) => !reservedKeys.includes(key))
+  const addEntry = () => {
+    let key = 'new-key'
+    let suffix = 1
+    while (Object.prototype.hasOwnProperty.call(map, key)) key = `new-key-${suffix++}`
+    onChange(path, { ...map, [key]: createSchemaValue(field) })
+  }
+  return <div className="schema-map"><div className="schema-map-heading"><span>Map entries</span><em>values / {field.type}</em></div>{entries.map(([key, item]) => <div className="schema-map-row" key={key}><input value={key} onChange={(event) => { const nextKey = event.target.value; if (!safeSchemaObjectKey(nextKey) || nextKey === key) return; const next = { ...map }; delete next[key]; next[nextKey] = item; onChange(path, next) }} disabled={!writeEnabled} aria-label="Map key" /><div className="schema-map-value"><SchemaFieldEditor field={field} value={item} path={[...path, key]} writeEnabled={writeEnabled} onChange={onChange} /></div><button type="button" className="schema-clear" onClick={() => { const next = { ...map }; delete next[key]; onChange(path, next) }} disabled={!writeEnabled}>Remove</button></div>)}<button type="button" className="secondary-button schema-add-button" onClick={addEntry} disabled={!writeEnabled}>Add map entry</button></div>
+}
+
+/** Returns a readable label for an explicit schema response state. */
+function schemaStateLabel(state?: ResourceSchemaResponse['state']): string {
+  if (state === 'permission-denied') return 'RBAC denied'
+  if (state === 'non-structural') return 'Non-structural'
+  if (state === 'unsupported') return 'Unsupported'
+  if (state === 'missing') return 'Schema missing'
+  if (state === 'error') return 'Read failed'
+  return state === 'available' ? 'Available' : 'Reading'
+}
+
+/** Returns a direct explanation for one schema fallback state. */
+function schemaStateTitle(state?: ResourceSchemaResponse['state']): string {
+  if (state === 'permission-denied') return 'CRD schema access is denied'
+  if (state === 'non-structural') return 'This CRD is not structural'
+  if (state === 'unsupported') return 'This schema needs YAML'
+  if (state === 'missing') return 'No matching CRD schema'
+  if (state === 'error') return 'CRD schema could not be read'
+  return 'Schema form is loading'
+}
+
+/** Returns a safe immutable update of one resource object path. */
+function updateSchemaObject(object: ResourceObject, path: string[], value: unknown): ResourceObject {
+  const copy = JSON.parse(JSON.stringify(object)) as ResourceObject
+  if (!path.length) return value && typeof value === 'object' && !Array.isArray(value) ? value as ResourceObject : copy
+  if (path.some((segment) => !safeSchemaObjectKey(segment))) return copy
+  let cursor: unknown = copy
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const segment = path[index]
+    const nextSegment = path[index + 1]
+    if (Array.isArray(cursor)) {
+      const itemIndex = Number(segment)
+      if (!Number.isInteger(itemIndex) || itemIndex < 0) return copy
+      if (cursor[itemIndex] === undefined) cursor[itemIndex] = /^\d+$/.test(nextSegment) ? [] : {}
+      cursor = cursor[itemIndex]
+      continue
+    }
+    if (!cursor || typeof cursor !== 'object') return copy
+    const record = cursor as Record<string, unknown>
+    if (record[segment] === undefined) record[segment] = /^\d+$/.test(nextSegment) ? [] : {}
+    cursor = record[segment]
+  }
+  const last = path[path.length - 1]
+  if (Array.isArray(cursor)) {
+    const itemIndex = Number(last)
+    if (!Number.isInteger(itemIndex) || itemIndex < 0) return copy
+    if (value === undefined) cursor.splice(itemIndex, 1)
+    else cursor[itemIndex] = value
+  } else if (cursor && typeof cursor === 'object') {
+    if (value === undefined) delete (cursor as Record<string, unknown>)[last]
+    else (cursor as Record<string, unknown>)[last] = value
+  }
+  return copy
+}
+
+/** Reads a safe nested value from an object or array path. */
+function readSchemaPath(object: unknown, path: string[]): unknown {
+  let value = object
+  for (const segment of path) {
+    if (!safeSchemaObjectKey(segment) || value === null || typeof value !== 'object') return undefined
+    if (Array.isArray(value)) {
+      const index = Number(segment)
+      if (!Number.isInteger(index) || index < 0) return undefined
+      value = value[index]
+    } else {
+      value = (value as Record<string, unknown>)[segment]
+    }
+  }
+  return value
+}
+
+/** Creates an initial value for a schema field when an operator adds it. */
+function createSchemaValue(field?: ResourceSchemaField): unknown {
+  if (!field) return ''
+  if (field.default !== undefined) return JSON.parse(JSON.stringify(field.default))
+  switch (field.type) {
+    case 'object':
+      return {}
+    case 'array':
+      return []
+    case 'boolean':
+      return false
+    case 'integer':
+    case 'number':
+      return 0
+    default:
+      return ''
+  }
+}
+
+/** Converts one primitive input string into the JSON value described by a field. */
+function parseSchemaInput(field: ResourceSchemaField, value: string): unknown {
+  if (value === '') return undefined
+  if (field.type === 'integer' || field.type === 'number') return Number(value)
+  return value
+}
+
+/** Encodes one enum or select value without losing booleans and numbers. */
+function schemaValueKey(value: unknown): string {
+  return JSON.stringify(value) ?? ''
+}
+
+/** Parses one schema select value that was encoded as JSON. */
+function parseSchemaValue(value: string): unknown {
+  try {
+    return JSON.parse(value)
+  } catch {
+    return value
+  }
+}
+
+/** Rejects object keys that could mutate browser prototypes during form edits. */
+function safeSchemaObjectKey(value: string): boolean {
+  return value !== '__proto__' && value !== 'prototype' && value !== 'constructor' && value.length > 0 && !/[\u0000\r\n]/.test(value)
+}
+
+/** Validates the schema-visible portion of one resource before Kubernetes dry-run. */
+function validateSchemaDocument(field: ResourceSchemaField, object: ResourceObject): string[] {
+  return validateSchemaValue(field, object, '$')
+}
+
+/** Recursively validates supported schema values and reports actionable paths. */
+function validateSchemaValue(field: ResourceSchemaField, value: unknown, path: string): string[] {
+  if (value === undefined) return field.default !== undefined || !field.required ? [] : [`${path} is required.`]
+  const errors: string[] = []
+  if (field.enum?.length && !field.enum.some((candidate) => schemaValuesEqual(candidate, value))) errors.push(`${path} must match one of the listed enum values.`)
+  switch (field.type) {
+    case 'string':
+      if (typeof value !== 'string') errors.push(`${path} must be a string.`)
+      else {
+        if (field.minLength !== undefined && value.length < field.minLength) errors.push(`${path} must contain at least ${field.minLength} characters.`)
+        if (field.maxLength !== undefined && value.length > field.maxLength) errors.push(`${path} must contain at most ${field.maxLength} characters.`)
+        if (field.pattern) {
+          try {
+            if (!new RegExp(field.pattern).test(value)) errors.push(`${path} does not match the required pattern.`)
+          } catch {
+            errors.push(`${path} uses an invalid validation pattern.`)
+          }
+        }
+      }
+      break
+    case 'integer':
+    case 'number': {
+      if (typeof value !== 'number' || !Number.isFinite(value) || (field.type === 'integer' && !Number.isInteger(value))) {
+        errors.push(`${path} must be a ${field.type}.`)
+        break
+      }
+      if (field.minimum !== undefined && (field.exclusiveMinimum ? value <= field.minimum : value < field.minimum)) errors.push(`${path} is below the minimum.`)
+      if (field.maximum !== undefined && (field.exclusiveMaximum ? value >= field.maximum : value > field.maximum)) errors.push(`${path} is above the maximum.`)
+      if (field.multipleOf !== undefined && Math.abs(value / field.multipleOf - Math.round(value / field.multipleOf)) > 1e-9) errors.push(`${path} must be a multiple of ${field.multipleOf}.`)
+      break
+    }
+    case 'boolean':
+      if (typeof value !== 'boolean') errors.push(`${path} must be a boolean.`)
+      break
+    case 'object': {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        errors.push(`${path} must be an object.`)
+        break
+      }
+      const record = value as Record<string, unknown>
+      for (const property of field.properties || []) errors.push(...validateSchemaValue(property, record[property.name || ''], `${path}.${property.name || 'field'}`))
+      if (field.additionalProperties) {
+        const declared = new Set((field.properties || []).map((property) => property.name || ''))
+        for (const [key, item] of Object.entries(record)) if (!declared.has(key)) errors.push(...validateSchemaValue(field.additionalProperties, item, `${path}.${key}`))
+      }
+      break
+    }
+    case 'array':
+      if (!Array.isArray(value)) {
+        errors.push(`${path} must be an array.`)
+        break
+      }
+      if (field.minItems !== undefined && value.length < field.minItems) errors.push(`${path} must contain at least ${field.minItems} item${field.minItems === 1 ? '' : 's'}.`)
+      if (field.maxItems !== undefined && value.length > field.maxItems) errors.push(`${path} must contain at most ${field.maxItems} items.`)
+      if (field.uniqueItems && new Set(value.map((item) => JSON.stringify(item))).size !== value.length) errors.push(`${path} must contain unique items.`)
+      if (field.items) value.forEach((item, index) => errors.push(...validateSchemaValue(field.items!, item, `${path}[${index}]`)))
+      break
+  }
+  return errors
+}
+
+/** Compares JSON-compatible schema values for enum and uniqueness validation. */
+function schemaValuesEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/** Parses a YAML editor document only when it is a plain resource object. */
+function parseResourceObject(value: string): ResourceObject | null {
+  try {
+    const parsed = parse(value) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as ResourceObject : null
+  } catch {
+    return null
+  }
 }
 
 /** Renders a version-aware dry-run and exact-name confirmation flow for one delete. */
@@ -2572,6 +2914,13 @@ function metadataString(object: ResourceObject, field: string): string {
 /** Resolves a resource slug against discovered definitions and common fallbacks. */
 function resolveDefinition(resource: string, definitions: ResourceDefinition[]): ResourceDefinition {
   return definitions.find((item) => item.resource === resource) ?? commonDefinitions.find((item) => item.resource === resource) ?? { group: '', version: 'v1', resource, kind: titleCase(resource), namespaced: true, verbs: [] }
+}
+
+/** Identifies custom-resource candidates without probing built-in API groups for CRD schemas. */
+function isCustomResourceDefinition(definition: ResourceDefinition): boolean {
+  if (definition.customResource) return true
+  if (!definition.group) return false
+  return !['admissionregistration.k8s.io', 'apiextensions.k8s.io', 'authentication.k8s.io', 'authorization.k8s.io', 'autoscaling', 'batch', 'certificates.k8s.io', 'coordination.k8s.io', 'discovery.k8s.io', 'events.k8s.io', 'extensions', 'flowcontrol.apiserver.k8s.io', 'gateway.networking.k8s.io', 'metrics.k8s.io', 'networking.k8s.io', 'node.k8s.io', 'policy', 'rbac.authorization.k8s.io', 'resource.k8s.io', 'scheduling.k8s.io', 'snapshot.storage.k8s.io', 'storage.k8s.io'].includes(definition.group)
 }
 
 /** Returns the browser storage key used for one context namespace selection. */

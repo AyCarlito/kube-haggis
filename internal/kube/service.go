@@ -54,14 +54,15 @@ type ContextSummary struct {
 
 // ResourceDefinition describes a discovered Kubernetes resource kind.
 type ResourceDefinition struct {
-	Group      string   `json:"group"`
-	Version    string   `json:"version"`
-	Resource   string   `json:"resource"`
-	Kind       string   `json:"kind"`
-	Namespaced bool     `json:"namespaced"`
-	Verbs      []string `json:"verbs"`
-	ShortNames []string `json:"shortNames,omitempty"`
-	Categories []string `json:"categories,omitempty"`
+	Group          string   `json:"group"`
+	Version        string   `json:"version"`
+	Resource       string   `json:"resource"`
+	Kind           string   `json:"kind"`
+	Namespaced     bool     `json:"namespaced"`
+	CustomResource bool     `json:"customResource"`
+	Verbs          []string `json:"verbs"`
+	ShortNames     []string `json:"shortNames,omitempty"`
+	Categories     []string `json:"categories,omitempty"`
 }
 
 // ResourceSummary contains the common fields shown in resource tables.
@@ -225,11 +226,12 @@ func (s *Service) Contexts() ([]ContextSummary, string, error) {
 
 // Discovery returns the preferred resource definitions advertised by a cluster.
 func (s *Service) Discovery(ctx context.Context, contextName string) ([]ResourceDefinition, error) {
-	_, discoveryClient, _, err := s.clients(contextName)
+	dynamicClient, discoveryClient, _, err := s.clients(contextName)
 	if err != nil {
 		return nil, err
 	}
 	definitions, discoveryErr := discoverDefinitions(discoveryClient)
+	markCustomResourceDefinitions(ctx, dynamicClient, definitions)
 	if discoveryErr != nil && len(definitions) == 0 {
 		return nil, discoveryErr
 	}
