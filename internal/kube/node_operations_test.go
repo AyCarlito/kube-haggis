@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
@@ -89,6 +90,22 @@ func TestPerformNodeActionRejectsStaleVersion(t *testing.T) {
 	}
 	if updates != 0 {
 		t.Fatalf("stale Node action attempted an update: %d", updates)
+	}
+}
+
+// TestPerformNodeActionReportsRBACDeniedUpdate verifies typed Node update failures remain actionable.
+func TestPerformNodeActionReportsRBACDeniedUpdate(t *testing.T) {
+	client := k8sfake.NewSimpleClientset(testNode("worker-a", "7"))
+	client.PrependReactor("update", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "nodes"}, "worker-a", nil)
+	})
+
+	_, err := performNodeAction(context.Background(), client, "worker-a", NodeActionRequest{
+		Action:                  "cordon",
+		ExpectedResourceVersion: "7",
+	})
+	if err == nil || !strings.Contains(err.Error(), "RBAC") {
+		t.Fatalf("expected RBAC Node update denial, got %v", err)
 	}
 }
 

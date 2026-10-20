@@ -390,3 +390,27 @@ func TestDeleteResourceRequiresNamespace(t *testing.T) {
 		t.Fatalf("namespace validation should happen before Kubernetes calls: %v", client.Actions())
 	}
 }
+
+// TestDeleteResourcePropagatesPermissionAndConflictFailures verifies Kubernetes mutation errors remain classifiable.
+func TestDeleteResourcePropagatesPermissionAndConflictFailures(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want func(error) bool
+	}{
+		{name: "forbidden", err: apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "api", nil), want: apierrors.IsForbidden},
+		{name: "conflict", err: apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "api", errors.New("newer resource version")), want: apierrors.IsConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := fake.NewSimpleDynamicClient(runtime.NewScheme())
+			client.PrependReactor("delete", "deployments", func(clienttesting.Action) (bool, runtime.Object, error) {
+				return true, nil, test.err
+			})
+
+			err := deleteResource(context.Background(), client, schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, "default", "api", true, ResourceDeleteOptions{ExpectedResourceVersion: "7"})
+			if err == nil || !test.want(err) {
+				t.Fatalf("expected %s failure, got %v", test.name, err)
+			}
+		})
+	}
+}

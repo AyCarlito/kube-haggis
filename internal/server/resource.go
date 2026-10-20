@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kube-haggis/kube-haggis/internal/kube"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 const (
@@ -230,5 +231,24 @@ func deleteAuditDetail(err error) string {
 		return "delete request validation failed"
 	default:
 		return "delete failed"
+	}
+}
+
+// resourceMutationError converts generic apply failures into safe, actionable API errors.
+func resourceMutationError(err error) error {
+	message := strings.ToLower(err.Error())
+	switch {
+	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err), strings.Contains(message, "rbac"), strings.Contains(message, "forbidden"), strings.Contains(message, "unauthorized"):
+		return fmt.Errorf("resource mutation was denied by Kubernetes RBAC")
+	case apierrors.IsConflict(err), strings.Contains(message, "conflict"), strings.Contains(message, "resource version"):
+		return fmt.Errorf("resource mutation conflicted with a newer resource version; refresh before retrying")
+	case apierrors.IsMethodNotSupported(err), strings.Contains(message, "not supported"):
+		return fmt.Errorf("resource mutation is not supported by this Kubernetes API server")
+	case apierrors.IsNotFound(err), strings.Contains(message, "not found"):
+		return fmt.Errorf("resource was not found; refresh before retrying")
+	case strings.Contains(message, "decode "), strings.Contains(message, "parse "), strings.Contains(message, "invalid"), strings.Contains(message, "required"):
+		return fmt.Errorf("resource mutation request is invalid")
+	default:
+		return fmt.Errorf("resource mutation failed; refresh and try again")
 	}
 }

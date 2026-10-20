@@ -404,7 +404,7 @@ func (s *Server) handleResource(writer http.ResponseWriter, request *http.Reques
 		item, err := s.kube.ApplyResource(request.Context(), query.Get("context"), group, version, resource, namespace, namespaced, parseBool(query.Get("dryRun")), body)
 		if err != nil {
 			s.recordMutation(request, "apply", group, version, resource, namespace, name, parseBool(query.Get("dryRun")), false, err.Error())
-			writeError(writer, err)
+			writeError(writer, resourceMutationError(err))
 			return
 		}
 		s.recordMutation(request, "apply", group, version, resource, namespace, item.GetName(), parseBool(query.Get("dryRun")), true, "")

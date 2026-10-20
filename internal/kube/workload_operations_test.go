@@ -170,6 +170,22 @@ func TestPerformWorkloadActionRejectsStaleResourceVersion(t *testing.T) {
 	}
 }
 
+// TestPerformWorkloadActionReportsRBACDeniedUpdate verifies denied native updates are actionable.
+func TestPerformWorkloadActionReportsRBACDeniedUpdate(t *testing.T) {
+	client := newWorkloadDynamicClient(workloadDeployment("api", "7", "3", "app:v1"))
+	client.PrependReactor("update", "deployments", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "api", nil)
+	})
+
+	_, err := performWorkloadAction(context.Background(), client, "apps", "v1", "deployments", "default", "api", WorkloadActionRequest{
+		Action:                  "restart",
+		ExpectedResourceVersion: "7",
+	})
+	if err == nil || !strings.Contains(err.Error(), "RBAC") {
+		t.Fatalf("expected RBAC update denial, got %v", err)
+	}
+}
+
 // TestPerformWorkloadActionRollsBackToOwnedReplicaSet verifies revision selection and template restoration.
 func TestPerformWorkloadActionRollsBackToOwnedReplicaSet(t *testing.T) {
 	deployment := workloadDeployment("api", "7", "3", "app:v3")
