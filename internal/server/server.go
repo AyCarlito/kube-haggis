@@ -209,6 +209,7 @@ func (s *Server) handleResources(writer http.ResponseWriter, request *http.Reque
 		namespaced,
 		limit,
 		query.Get("labelSelector"),
+		query.Get("continue"),
 	)
 	if err != nil {
 		writeError(writer, err)

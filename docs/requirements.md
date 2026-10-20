@@ -21,6 +21,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Discovery-driven built-in resource and CRD browsing through Kubernetes dynamic clients.
 - Generic resource list, detail, create, update, delete, and watch API paths.
 - Resource list search, namespace scope, label selector, and live-watch refresh behavior.
+- Resource list status filters, page-local sorting, configurable summary columns, bounded page sizes, and opaque continuation-token pagination.
 - Generic YAML editor and create workflow.
 - Client-side full-object updates with resource-version handling and Kubernetes dry-run review.
 - Refresh the complete resource from Kubernetes after a successful YAML apply before updating the editor state.
@@ -48,7 +49,6 @@ The repository currently contains the first usable vertical slice. The backend a
 
 ### Partially Implemented
 
-- Resource tables have search, namespace, label selector, and live updates, but status filters, sorting, configurable columns, and continuation-token pagination are still incomplete.
 - Resource detail pages have overview, YAML, live Events, and discovery-driven related-resource relationship views.
 - Event detail pages omit the Events tab because Events are not expected to have child Events.
 - CRDs support discovery, generic CRUD, schema-generated forms for supported structural schemas, and YAML editing as the complete fallback.

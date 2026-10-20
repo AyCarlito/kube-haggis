@@ -462,3 +462,40 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
 .history-ledger-footer span { display: flex; align-items: center; gap: 6px; }
 @media (max-width: 1080px) { .history-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.history-filter-bar { grid-template-columns: repeat(3, minmax(0, 1fr)); }.history-search { grid-column: 1 / -1; }.history-refresh { justify-self: end; } }
 @media (max-width: 760px) { .history-intro { display: block; }.history-stamp { margin-top: 27px; }.history-disconnected { margin-top: 20px; }.history-summary-grid { gap: 8px; margin-top: 20px; }.history-summary-card { min-height: 105px; padding: 13px; }.history-summary-card strong { margin-top: 15px; font-size: 22px; }.history-ledger-heading { padding: 18px 18px 0; }.history-filter-bar { grid-template-columns: 1fr; margin: 20px 18px 12px; }.history-search { grid-column: auto; }.history-refresh { justify-self: end; }.history-refresh-warning { margin-right: 18px; margin-left: 18px; }.history-table th, .history-table td { padding-right: 13px; padding-left: 13px; }.history-ledger-footer { align-items: flex-start; flex-direction: column; padding-right: 18px; padding-left: 18px; }.history-empty { min-height: 220px; } }
+
+.table-toolbar { align-items: flex-end; flex-wrap: wrap; }
+.resource-control { display: flex; flex: 0 0 122px; flex-direction: column; gap: 4px; height: 37px; color: var(--muted-dark); font: 8px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase; }
+.resource-control span { display: flex; align-items: baseline; justify-content: space-between; gap: 7px; }
+.resource-control em { color: var(--muted-dark); font-size: 7px; font-style: normal; letter-spacing: 0; text-transform: none; }
+.resource-control select, .pagination-controls select { width: 100%; height: 27px; padding: 0 7px; border: 1px solid var(--line); border-radius: 4px; outline: 0; background: var(--panel-raised); color: var(--paper); color-scheme: dark; font: 9px var(--mono); text-transform: none; }
+.sort-direction { flex: 0 0 34px; border-color: var(--line); }
+.column-menu { position: relative; flex: 0 0 auto; }
+.column-button { display: inline-flex; align-items: center; gap: 6px; height: 37px; margin: 0; padding: 0 10px; color: var(--muted); font: 9px var(--mono); white-space: nowrap; }
+.column-button span { color: var(--copper-bright); }
+.column-menu-panel { position: absolute; top: calc(100% + 7px); right: 0; z-index: 5; display: grid; gap: 8px; width: 205px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-raised); box-shadow: 0 14px 32px rgba(0,0,0,.35); }
+.column-menu-panel strong { color: var(--paper); font: 10px var(--mono); text-transform: uppercase; }
+.column-menu-panel label { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 10px var(--mono); }
+.column-menu-panel label input { margin: 0; accent-color: var(--copper); }
+.column-menu-panel label em { margin-left: auto; color: var(--muted-dark); font-size: 8px; font-style: normal; }
+.column-menu-panel small { padding-top: 3px; border-top: 1px dashed var(--line); color: var(--muted-dark); font: 8px/1.45 var(--mono); }
+.table-view-note { display: flex; align-items: center; gap: 8px; margin-top: 9px; color: var(--muted-dark); font: 9px/1.5 var(--mono); }
+.table-view-note span { flex: 0 0 auto; padding: 4px 6px; border: 1px solid rgba(135,174,182,.2); border-radius: 3px; color: var(--blue); background: rgba(135,174,182,.06); text-transform: uppercase; }
+.resource-pagination { align-items: center; flex-wrap: wrap; }
+.pagination-controls { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+.pagination-controls label { display: flex; align-items: center; gap: 6px; color: var(--muted-dark); font: 9px var(--mono); }
+.pagination-controls select { width: 58px; height: 29px; }
+.pagination-controls .secondary-button { display: inline-flex; align-items: center; gap: 4px; height: 29px; margin: 0; padding: 0 8px; font-size: 9px; white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .resource-control { flex: 1 1 calc(50% - 4px); min-width: 0; }
+  .sort-direction { margin-left: auto; }
+  .column-menu { flex: 1 1 auto; }
+  .column-button { width: 100%; justify-content: center; }
+  .column-menu-panel { right: 0; left: auto; }
+  .table-view-note { align-items: flex-start; }
+  .resource-pagination { align-items: flex-start; flex-direction: column; }
+  .pagination-controls { align-items: stretch; flex-wrap: wrap; width: 100%; margin-left: 0; }
+  .pagination-controls label { flex: 1 1 75px; }
+  .pagination-controls .secondary-button { flex: 1 1 100px; justify-content: center; }
+  .resource-pagination > span:last-child { align-items: flex-start; }
+}

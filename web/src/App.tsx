@@ -1,11 +1,15 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   ArrowUpRight,
   Box,
   Bug,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleDot,
   Clock3,
   Command,
@@ -121,6 +125,46 @@ const commonDefinitions: ResourceDefinition[] = [
   { group: '', version: 'v1', resource: 'namespaces', kind: 'Namespace', namespaced: false, verbs: [] },
   { group: '', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, verbs: [] },
 ]
+
+/** Identifies the safe summary columns available in every generic resource table. */
+type ResourceColumnKey = 'name' | 'namespace' | 'status' | 'ready' | 'age' | 'labels' | 'resourceVersion'
+
+/** Identifies the generic summary field used for local page sorting. */
+type ResourceSortKey = 'name' | 'namespace' | 'status' | 'ready' | 'age'
+
+/** Identifies the direction used by a local resource-page sort. */
+type ResourceSortDirection = 'asc' | 'desc'
+
+/** Describes one configurable generic resource table column. */
+interface ResourceColumnDefinition {
+  key: ResourceColumnKey
+  label: string
+  required?: boolean
+}
+
+/** Tracks the opaque continuation tokens already visited for one list query. */
+interface ResourcePaginationState {
+  queryKey: string
+  pageIndex: number
+  tokens: string[]
+}
+
+/** Defines the stable generic columns offered by the resource table. */
+const resourceColumnDefinitions: ResourceColumnDefinition[] = [
+  { key: 'name', label: 'Name', required: true },
+  { key: 'namespace', label: 'Namespace' },
+  { key: 'status', label: 'Status' },
+  { key: 'ready', label: 'Ready' },
+  { key: 'age', label: 'Age' },
+  { key: 'labels', label: 'Labels' },
+  { key: 'resourceVersion', label: 'Resource version' },
+]
+
+/** Defines the useful default summary columns for a dense operator table. */
+const defaultResourceColumns: ResourceColumnKey[] = ['name', 'namespace', 'status', 'ready', 'age', 'labels']
+
+/** Defines the bounded page sizes sent to Kubernetes for continuation-token pagination. */
+const resourcePageSizes = [25, 50, 100]
 
 const navGroups = [
   {
@@ -975,6 +1019,13 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [labelSelector, setLabelSelector] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [sortKey, setSortKey] = useState<ResourceSortKey>('name')
+  const [sortDirection, setSortDirection] = useState<ResourceSortDirection>('asc')
+  const [visibleColumns, setVisibleColumns] = useState<ResourceColumnKey[]>(defaultResourceColumns)
+  const [columnsOpen, setColumnsOpen] = useState(false)
+  const [pageSize, setPageSize] = useState(100)
+  const [pagination, setPagination] = useState<ResourcePaginationState>({ queryKey: '', pageIndex: 0, tokens: [''] })
   const [watching, setWatching] = useState(false)
   const [refreshNonce, setRefreshNonce] = useState(0)
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
@@ -985,21 +1036,39 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   const [bulkConfirmation, setBulkConfirmation] = useState('')
   const [bulkBusy, setBulkBusy] = useState<'review' | 'apply' | ''>('')
   const [bulkError, setBulkError] = useState('')
+  const listQueryKey = resourceListQueryKey(context, definition, namespace, labelSelector, pageSize)
+  const paginationMatchesQuery = pagination.queryKey === listQueryKey
+  const pageIndex = paginationMatchesQuery ? pagination.pageIndex : 0
+  const continueToken = paginationMatchesQuery ? pagination.tokens[pageIndex] || '' : ''
 
   useEffect(() => {
-    let active = true
-    let stream: EventSource | undefined
+    setPagination({ queryKey: listQueryKey, pageIndex: 0, tokens: [''] })
+    setResponse(null)
+    setSelectedKeys([])
     setBulkReview(null)
     setBulkReviewSelection([])
     setBulkConfirmed(false)
     setBulkConfirmation('')
+    setBulkResults(null)
+    setBulkError('')
+  }, [listQueryKey])
+
+  useEffect(() => {
+    let active = true
+    let stream: EventSource | undefined
     const load = () => {
       setLoading(true)
-      fetchResources(context, definition, namespace, labelSelector)
+      fetchResources(context, definition, namespace, labelSelector, { limit: pageSize, continueToken })
         .then((data) => {
           if (!active) return
           setResponse(data)
           setSelectedKeys((current) => current.filter((key) => data.items.some((item) => resourceItemKey(item) === key)))
+          setPagination((current) => {
+            if (current.queryKey !== listQueryKey || current.pageIndex !== pageIndex) return current
+            const tokens = current.tokens.slice(0, pageIndex + 1)
+            if (data.continue) tokens.push(data.continue)
+            return { ...current, tokens }
+          })
           setError('')
           if (!stream && data.resourceVersion) {
             stream = new EventSource(watchUrl(context, definition, namespace, data.resourceVersion))
@@ -1017,13 +1086,91 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
       stream?.close()
       setWatching(false)
     }
-  }, [context, definition, namespace, labelSelector, refreshNonce])
+  }, [context, definition, namespace, labelSelector, pageSize, continueToken, pageIndex, listQueryKey, refreshNonce])
 
   if (!context) return <SetupState />
-  const filtered = response?.items.filter((item) => item.name.toLowerCase().includes(search.toLowerCase())) ?? []
+  const statusOptions = Array.from(new Set(response?.items.map(resourceStatusLabel) ?? [])).sort((left, right) => left.localeCompare(right))
+  if (statusFilter !== 'all' && !statusOptions.includes(statusFilter)) statusOptions.unshift(statusFilter)
+  const filtered = sortResourceItems(
+    response?.items.filter((item) => (typeof item.name === 'string' ? item.name : '').toLowerCase().includes(search.trim().toLowerCase()) && resourceStatusMatches(item, statusFilter)) ?? [],
+    sortKey,
+    sortDirection,
+  )
   const selected = response?.items.filter((item) => selectedKeys.includes(resourceItemKey(item))) ?? []
   const allFilteredSelected = filtered.length > 0 && filtered.every((item) => selectedKeys.includes(resourceItemKey(item)))
   const selectionLocked = Boolean(bulkReview) || Boolean(bulkBusy)
+  const visibleColumnDefinitions = resourceColumnDefinitions.filter((column) => visibleColumns.includes(column.key))
+  const tableColumnCount = visibleColumnDefinitions.length + 2
+
+  /** Clears page-local selection and starts the first continuation page when needed. */
+  function resetLocalView() {
+    setSelectedKeys([])
+    clearBulkReview()
+    setBulkResults(null)
+    setError('')
+    if (pageIndex === 0) return
+    setResponse(null)
+    setPagination({ queryKey: listQueryKey, pageIndex: 0, tokens: [''] })
+  }
+
+  /** Changes a local status filter without presenting it as a Kubernetes query. */
+  function changeStatusFilter(value: string) {
+    setStatusFilter(value)
+    resetLocalView()
+  }
+
+  /** Changes the local sort key and returns to the first visible page. */
+  function changeSortKey(value: ResourceSortKey) {
+    setSortKey(value)
+    resetLocalView()
+  }
+
+  /** Toggles the direction of the local page sort. */
+  function toggleSortDirection() {
+    setSortDirection((current) => current === 'asc' ? 'desc' : 'asc')
+    resetLocalView()
+  }
+
+  /** Changes one optional summary column while keeping Name permanently visible. */
+  function toggleColumn(column: ResourceColumnDefinition, checked: boolean) {
+    if (column.required) return
+    setVisibleColumns((current) => {
+      const next = new Set(current)
+      if (checked) next.add(column.key)
+      else next.delete(column.key)
+      return resourceColumnDefinitions.filter((candidate) => next.has(candidate.key)).map((candidate) => candidate.key)
+    })
+  }
+
+  /** Advances to the next page using only the opaque token returned by Kubernetes. */
+  function nextPage() {
+    if (!response?.continue || loading) return
+    const token = response.continue
+    setSelectedKeys([])
+    clearBulkReview()
+    setBulkResults(null)
+    setResponse(null)
+    setPagination((current) => {
+      const currentIndex = current.queryKey === listQueryKey ? current.pageIndex : 0
+      const tokens = current.queryKey === listQueryKey ? current.tokens.slice(0, currentIndex + 1) : ['']
+      tokens.push(token)
+      return { queryKey: listQueryKey, pageIndex: currentIndex + 1, tokens }
+    })
+  }
+
+  /** Returns to a previously fetched continuation page without guessing a token. */
+  function previousPage() {
+    if (pageIndex === 0 || loading) return
+    setSelectedKeys([])
+    clearBulkReview()
+    setBulkResults(null)
+    setResponse(null)
+    setPagination((current) => ({
+      queryKey: listQueryKey,
+      pageIndex: Math.max(0, current.queryKey === listQueryKey ? current.pageIndex - 1 : 0),
+      tokens: current.queryKey === listQueryKey ? current.tokens : [''],
+    }))
+  }
 
   /** Clears a bulk review and any stale result when the selection changes. */
   function clearBulkReview() {
@@ -1139,14 +1286,22 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
     <div className="resource-page">
       <section className="resource-intro">
         <div><div className="eyebrow"><span className="eyebrow-mark" /> Resource collection</div><h1>{titleCase(definition.resource)}</h1><p>{definition.namespaced ? 'Namespaced resource' : 'Cluster-scoped resource'} / {namespace === 'all' || !definition.namespaced ? 'all namespaces' : namespace}</p></div>
-        <div className="resource-intro-meta"><span className={watching ? 'live-chip' : 'quiet-chip'}><span />{watching ? 'Live watch' : 'Refresh fallback'}</span><span>{response?.items.length ?? 0} objects</span></div>
+        <div className="resource-intro-meta"><span className={watching ? 'live-chip' : 'quiet-chip'}><span />{watching ? 'Live watch' : 'Refresh fallback'}</span><span>Page {pageIndex + 1} / {response?.items.length ?? 0} objects</span></div>
       </section>
       <div className="table-toolbar">
-        <label className="search-field"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${definition.resource}`} /><kbd>/</kbd></label>
+        <label className="search-field"><Search size={16} /><input value={search} onChange={(event) => { setSearch(event.target.value); resetLocalView() }} placeholder={`Search ${definition.resource}`} /><kbd>/</kbd></label>
         <label className="filter-field"><ListFilter size={15} /><input value={labelSelector} onChange={(event) => setLabelSelector(event.target.value)} placeholder="label selector" /></label>
+        <label className="resource-control"><span>Status <em>local page</em></span><select value={statusFilter} onChange={(event) => changeStatusFilter(event.target.value)}><option value="all">All statuses</option>{statusOptions.map((status) => <option value={status} key={status}>{status}</option>)}</select></label>
+        <label className="resource-control"><span>Sort <em>local page</em></span><select value={sortKey} onChange={(event) => changeSortKey(event.target.value as ResourceSortKey)}><option value="name">Name</option><option value="namespace">Namespace</option><option value="status">Status</option><option value="ready">Ready</option><option value="age">Age</option></select></label>
+        <button type="button" className="icon-button sort-direction" onClick={toggleSortDirection} aria-label={`Sort ${sortDirection === 'asc' ? 'descending' : 'ascending'}`} title={`Sort ${sortDirection === 'asc' ? 'descending' : 'ascending'}`}>{sortDirection === 'asc' ? <ArrowUp size={15} /> : <ArrowDown size={15} />}</button>
+        <div className="column-menu">
+          <button type="button" className="secondary-button column-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Settings2 size={14} /> Columns <span>{visibleColumnDefinitions.length}/{resourceColumnDefinitions.length}</span></button>
+          {columnsOpen && <div className="column-menu-panel"><strong>Visible columns</strong>{resourceColumnDefinitions.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} disabled={column.required} onChange={(event) => toggleColumn(column, event.target.checked)} /><span>{column.label}</span>{column.required && <em>required</em>}</label>)}<small>Columns change this browser view only.</small></div>}
+        </div>
         <button className="icon-button toolbar-action" onClick={() => setRefreshNonce((value) => value + 1)} aria-label="Refresh resources"><RefreshCw size={16} /></button>
         <button className="primary-button" disabled={!writeEnabled} onClick={onCreate} title={writeEnabled ? `Create a ${definition.kind}` : 'Enable write mode to create resources'}><span>+</span> New {definition.kind}</button>
       </div>
+      <div className="table-view-note"><span>Local page view</span> Search, status, and sorting inspect only the loaded Kubernetes page. Label selector is sent to Kubernetes; columns stay in this browser.</div>
       <div className="selection-toolbar">
         <span><strong>{selected.length}</strong> selected / {definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster scope' : namespace}</span>
         <div><button type="button" className="secondary-button danger-button" disabled={!writeEnabled || !selected.length || selectionLocked} onClick={() => void reviewBulkDelete()}><Trash2 size={14} /> Review delete{selected.length ? ` (${selected.length})` : ''}</button>{selected.length > 0 && <button type="button" className="text-button" disabled={selectionLocked} onClick={() => { setSelectedKeys([]); clearBulkReview(); setBulkResults(null) }}>Clear selection</button>}</div>
@@ -1156,22 +1311,112 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
       {bulkReview && <BulkDeleteReviewPanel definition={definition} namespace={namespace} items={selected} review={bulkReview} confirmed={bulkConfirmed} confirmation={bulkConfirmation} busy={bulkBusy} onConfirmed={setBulkConfirmed} onConfirmation={setBulkConfirmation} onCancel={clearBulkReview} onApply={() => void applyReviewedBulkDelete()} />}
       {bulkResults && <BulkDeleteResults definition={definition} result={bulkResults} />}
       <div className="resource-table-wrap">
-        <table className="resource-table"><thead><tr><th><input className="table-checkbox" type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || selectionLocked} aria-label="Select all visible resources" onChange={(event) => toggleFilteredSelection(event.target.checked)} /></th><th>Name</th><th>Namespace</th><th>Status</th><th>Ready</th><th>Age</th><th>Labels</th><th /></tr></thead><tbody>
-          {loading && !response ? <tr><td colSpan={8}><div className="table-loading"><LoaderCircle size={18} className="spin" /> Reading API objects</div></td></tr> : null}
-          {!loading && !filtered.length ? <tr><td colSpan={8}><div className="table-empty"><Box size={20} /><strong>No matching objects</strong><span>Try a different search or label selector.</span></div></td></tr> : null}
-          {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
+        <table className="resource-table"><thead><tr><th><input className="table-checkbox" type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || selectionLocked} aria-label="Select all visible resources" onChange={(event) => toggleFilteredSelection(event.target.checked)} /></th>{visibleColumnDefinitions.map((column) => <th key={column.key}>{column.label}</th>)}<th aria-label="Actions" /></tr></thead><tbody>
+          {loading && !response ? <tr><td colSpan={tableColumnCount}><div className="table-loading"><LoaderCircle size={18} className="spin" /> Reading API objects</div></td></tr> : null}
+          {!loading && !filtered.length ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><Box size={20} /><strong>No matching objects</strong><span>Try a different local filter or label selector.</span></div></td></tr> : null}
+          {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} columns={visibleColumnDefinitions.map((column) => column.key)} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
         </tbody></table>
       </div>
-      <div className="table-footer"><span>Showing {filtered.length} of {response?.items.length ?? 0}</span><span><span className="table-footer-dot" /> updates arrive through the Kubernetes watch</span></div>
+      <div className="table-footer resource-pagination"><span>Showing {filtered.length} of {response?.items.length ?? 0} on page {pageIndex + 1}{response?.continue ? ' / more available' : ''}</span><div className="pagination-controls"><label>Rows <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{resourcePageSizes.map((size) => <option value={size} key={size}>{size}</option>)}</select></label><button type="button" className="secondary-button" onClick={previousPage} disabled={pageIndex === 0 || loading}><ChevronLeft size={14} /> Previous</button><button type="button" className="secondary-button" onClick={nextPage} disabled={!response?.continue || loading}>Next <ChevronRight size={14} /></button></div><span><span className="table-footer-dot" /> {watching ? 'updates arrive through the Kubernetes watch' : 'refresh to check for updates'}</span></div>
     </div>
   )
 }
 
 /** Renders one row in the generic resource table. */
-function ResourceRow({ item, selected, selectionDisabled, onToggle, onOpen }: { item: ResourceSummary; selected: boolean; selectionDisabled: boolean; onToggle: (item: ResourceSummary, checked: boolean) => void; onOpen: (name: string, namespace?: string) => void }) {
-  const statusTone = item.status.toLowerCase() === 'true' || item.status.toLowerCase() === 'running' || item.status.toLowerCase() === 'active' ? 'good' : item.status.toLowerCase() === 'failed' || item.status.toLowerCase() === 'false' ? 'warning' : 'neutral'
-  const labels = Object.entries(item.labels ?? {}).slice(0, 2)
-  return <tr className={selected ? 'resource-row-selected' : ''} onClick={() => onOpen(item.name, item.namespace)}><td><input className="table-checkbox" type="checkbox" checked={selected} disabled={selectionDisabled} aria-label={`Select ${item.name}`} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggle(item, event.target.checked)} /></td><td><button className="resource-name" onClick={(event) => { event.stopPropagation(); onOpen(item.name, item.namespace) }}>{item.name}</button><span className="resource-uid">{item.uid.slice(0, 12)}</span></td><td><span className="namespace-cell">{item.namespace || 'cluster'}</span></td><td><span className={`status-pill status-${statusTone}`}><span />{item.status}</span></td><td><code className="ready-cell">{item.ready || '—'}</code></td><td><span className="age-cell">{relativeTime(item.createdAt)}</span></td><td><div className="label-stack">{labels.map(([key, value]) => <span key={key}>{key}={value}</span>)}{Object.keys(item.labels ?? {}).length > 2 && <span>+{Object.keys(item.labels ?? {}).length - 2}</span>}</div></td><td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
+function ResourceRow({ item, columns, selected, selectionDisabled, onToggle, onOpen }: { item: ResourceSummary; columns: ResourceColumnKey[]; selected: boolean; selectionDisabled: boolean; onToggle: (item: ResourceSummary, checked: boolean) => void; onOpen: (name: string, namespace?: string) => void }) {
+  return <tr className={selected ? 'resource-row-selected' : ''} onClick={() => onOpen(item.name, item.namespace)}><td><input className="table-checkbox" type="checkbox" checked={selected} disabled={selectionDisabled} aria-label={`Select ${item.name}`} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggle(item, event.target.checked)} /></td>{columns.map((column) => <td key={column}>{renderResourceCell(column, item, onOpen)}</td>)}<td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
+}
+
+/** Builds the server query identity used to invalidate stale continuation tokens. */
+function resourceListQueryKey(context: string, definition: ResourceDefinition, namespace: string, labelSelector: string, pageSize: number): string {
+  return [context, definition.group, definition.version, definition.resource, definition.namespaced ? 'namespaced' : 'cluster', namespace, labelSelector, pageSize].join('\u001f')
+}
+
+/** Returns a safe display value for generic status data, including incomplete CRD summaries. */
+function resourceStatusLabel(item: ResourceSummary): string {
+  const status = typeof item.status === 'string' ? item.status.trim() : ''
+  return status || 'Unknown'
+}
+
+/** Matches a local status filter without assuming a fixed set of Kubernetes status values. */
+function resourceStatusMatches(item: ResourceSummary, filter: string): boolean {
+  return filter === 'all' || resourceStatusLabel(item).toLowerCase() === filter.toLowerCase()
+}
+
+/** Returns the visual tone for a generic status while preserving unknown values as neutral. */
+function resourceStatusTone(status: string): 'good' | 'neutral' | 'warning' {
+  const normalized = status.toLowerCase()
+  if (['true', 'running', 'active', 'succeeded', 'bound', 'ready'].includes(normalized)) return 'good'
+  if (['false', 'failed', 'lost'].includes(normalized)) return 'warning'
+  return 'neutral'
+}
+
+/** Returns the text used when locally sorting a generic summary field. */
+function resourceSortText(item: ResourceSummary, key: ResourceSortKey): string {
+  switch (key) {
+    case 'namespace':
+      return item.namespace || ''
+    case 'status':
+      return resourceStatusLabel(item)
+    case 'ready':
+      return item.ready || ''
+    case 'age':
+      return item.createdAt || ''
+    default:
+      return item.name || ''
+  }
+}
+
+/** Compares two generic summaries using only fields guaranteed by the list response. */
+function compareResourceItems(left: ResourceSummary, right: ResourceSummary, key: ResourceSortKey): number {
+  if (key === 'age') {
+    const leftTime = Date.parse(left.createdAt)
+    const rightTime = Date.parse(right.createdAt)
+    const leftKnown = Number.isFinite(leftTime)
+    const rightKnown = Number.isFinite(rightTime)
+    if (!leftKnown && rightKnown) return 1
+    if (leftKnown && !rightKnown) return -1
+    if (leftKnown && rightKnown && leftTime !== rightTime) return leftTime - rightTime
+  } else {
+    const comparison = resourceSortText(left, key).localeCompare(resourceSortText(right, key), undefined, { numeric: true, sensitivity: 'base' })
+    if (comparison !== 0) return comparison
+  }
+  const nameComparison = (typeof left.name === 'string' ? left.name : '').localeCompare(typeof right.name === 'string' ? right.name : '', undefined, { numeric: true, sensitivity: 'base' })
+  if (nameComparison !== 0) return nameComparison
+  return (left.namespace || '').localeCompare(right.namespace || '', undefined, { numeric: true, sensitivity: 'base' })
+}
+
+/** Sorts only the currently loaded Kubernetes page and never claims server-side ordering. */
+function sortResourceItems(items: ResourceSummary[], key: ResourceSortKey, direction: ResourceSortDirection): ResourceSummary[] {
+  return [...items].sort((left, right) => {
+    const comparison = compareResourceItems(left, right, key)
+    return direction === 'asc' ? comparison : -comparison
+  })
+}
+
+/** Renders one configurable generic summary cell with safe fallbacks for missing fields. */
+function renderResourceCell(column: ResourceColumnKey, item: ResourceSummary, onOpen: (name: string, namespace?: string) => void): ReactNode {
+  switch (column) {
+    case 'name':
+      return <><button className="resource-name" onClick={(event) => { event.stopPropagation(); onOpen(item.name, item.namespace) }}>{item.name || 'Unnamed'}</button><span className="resource-uid">{typeof item.uid === 'string' && item.uid ? item.uid.slice(0, 12) : 'no uid'}</span></>
+    case 'namespace':
+      return <span className="namespace-cell">{item.namespace || 'cluster'}</span>
+    case 'status': {
+      const status = resourceStatusLabel(item)
+      return <span className={`status-pill status-${resourceStatusTone(status)}`}><span />{status}</span>
+    }
+    case 'ready':
+      return <code className="ready-cell">{item.ready || '—'}</code>
+    case 'age':
+      return <span className="age-cell">{relativeTime(item.createdAt)}</span>
+    case 'labels': {
+      const entries = Object.entries(item.labels ?? {}).slice(0, 2)
+      const labelCount = Object.keys(item.labels ?? {}).length
+      return <div className="label-stack">{entries.map(([key, value]) => <span key={key}>{key}={value}</span>)}{labelCount > 2 && <span>+{labelCount - 2}</span>}{labelCount === 0 && <span>—</span>}</div>
+    }
+    case 'resourceVersion':
+      return <code className="ready-cell">{item.resourceVersion ? `rv/${item.resourceVersion}` : '—'}</code>
+  }
 }
 
 /** Renders the high-friction dry-run and confirmation review for a bulk delete. */

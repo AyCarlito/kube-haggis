@@ -390,14 +390,14 @@ func (s *Service) Overview(ctx context.Context, contextName string) (ClusterOver
 	}, nil
 }
 
-// ListResources lists any discovered resource using a group-version-resource reference.
-func (s *Service) ListResources(ctx context.Context, contextName, group, version, resource, namespace string, namespaced bool, limit int, labelSelector string) (ResourceList, error) {
+// ListResources lists any discovered resource using a group-version-resource reference and an optional continuation token.
+func (s *Service) ListResources(ctx context.Context, contextName, group, version, resource, namespace string, namespaced bool, limit int, labelSelector, continueToken string) (ResourceList, error) {
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return ResourceList{}, err
 	}
 	gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
-	options := metav1.ListOptions{LabelSelector: labelSelector}
+	options := metav1.ListOptions{LabelSelector: labelSelector, Continue: continueToken}
 	if limit > 0 {
 		options.Limit = int64(limit)
 	}

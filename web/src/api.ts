@@ -22,6 +22,12 @@ import type {
   WorkloadActionResponse,
 } from './types'
 
+/** Describes the bounded server-side query controls for one resource page. */
+export interface ResourceListQuery {
+  limit?: number
+  continueToken?: string
+}
+
 /** Builds a backend API URL with encoded query parameters. */
 export function apiUrl(path: string, params: Record<string, string | undefined> = {}): string {
   const search = new URLSearchParams()
@@ -84,6 +90,7 @@ export function fetchResources(
   definition: ResourceDefinition,
   namespace: string,
   labelSelector = '',
+  query: ResourceListQuery = {},
 ): Promise<ResourceListResponse> {
   return fetchJson<ResourceListResponse>(
     apiUrl('/api/resources', {
@@ -94,7 +101,8 @@ export function fetchResources(
       namespace: definition.namespaced ? namespace : '',
       namespaced: String(definition.namespaced),
       labelSelector,
-      limit: '100',
+      limit: String(query.limit ?? 100),
+      continue: query.continueToken,
     }),
   )
 }

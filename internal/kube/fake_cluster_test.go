@@ -50,7 +50,6 @@ func TestServiceUsesFakeClusterForDiscoveryWatchListAndApply(t *testing.T) {
 			}
 			return
 		}
-
 		if request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/default/configmaps" {
 			if err := json.NewDecoder(request.Body).Decode(&appliedObject); err != nil {
 				t.Errorf("decode fake apply request: %v", err)
@@ -93,6 +92,9 @@ func TestServiceUsesFakeClusterForDiscoveryWatchListAndApply(t *testing.T) {
 				"metadata":   map[string]interface{}{"resourceVersion": "19"},
 			}, Items: []unstructured.Unstructured{}})
 		case "/apis/apps/v1/namespaces/default/deployments":
+			if request.URL.Query().Get("continue") != "next-page" || request.URL.Query().Get("labelSelector") != "app=api" || request.URL.Query().Get("limit") != "3" {
+				t.Errorf("list query lost pagination or label selector: %s", request.URL.RawQuery)
+			}
 			writeJSON(&unstructured.UnstructuredList{
 				Object: map[string]interface{}{
 					"apiVersion": "apps/v1",
@@ -135,7 +137,7 @@ func TestServiceUsesFakeClusterForDiscoveryWatchListAndApply(t *testing.T) {
 		t.Fatalf("deployment discovery metadata was not returned: %+v", deploymentDefinition)
 	}
 
-	resources, err := service.ListResources(context.Background(), "test", "apps", "v1", "deployments", "default", true, 3, "app=api")
+	resources, err := service.ListResources(context.Background(), "test", "apps", "v1", "deployments", "default", true, 3, "app=api", "next-page")
 	if err != nil {
 		t.Fatalf("fake-cluster list failed: %v", err)
 	}

@@ -109,7 +109,7 @@ func TestListResourceUsesNamespaceAndListRestrictions(t *testing.T) {
 		"metadata":   map[string]interface{}{"name": "api", "namespace": "default", "labels": map[string]interface{}{"app": "api"}},
 	}})
 
-	items, err := listResource(context.Background(), client, schema.GroupVersionResource{Version: "v1", Resource: "pods"}, "default", true, metav1.ListOptions{Limit: 4, LabelSelector: "app=api"})
+	items, err := listResource(context.Background(), client, schema.GroupVersionResource{Version: "v1", Resource: "pods"}, "default", true, metav1.ListOptions{Limit: 4, Continue: "next-page", LabelSelector: "app=api"})
 	if err != nil {
 		t.Fatalf("list namespaced resource: %v", err)
 	}

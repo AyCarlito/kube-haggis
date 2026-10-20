@@ -32,6 +32,7 @@ func writeServerAPIKubeconfig(t *testing.T, serverURL string) string {
 
 // TestGenericDiscoveryAndWatchHandlersUseFakeCluster verifies isolated HTTP handlers against a local Kubernetes API.
 func TestGenericDiscoveryAndWatchHandlersUseFakeCluster(t *testing.T) {
+	listQuery := ""
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writeJSON := func(value interface{}) {
 			writer.Header().Set("Content-Type", "application/json")
@@ -45,6 +46,29 @@ func TestGenericDiscoveryAndWatchHandlersUseFakeCluster(t *testing.T) {
 			if flusher, ok := writer.(http.Flusher); ok {
 				flusher.Flush()
 			}
+			return
+		}
+		if request.URL.Path == "/api/v1/namespaces/default/pods" {
+			listQuery = request.URL.RawQuery
+			writeJSON(&unstructured.UnstructuredList{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "PodList",
+					"metadata":   map[string]interface{}{"resourceVersion": "12", "continue": "next-page"},
+				},
+				Items: []unstructured.Unstructured{{Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name":              "api",
+						"namespace":         "default",
+						"uid":               "pod-uid",
+						"resourceVersion":   "11",
+						"creationTimestamp": "2026-10-20T10:00:00Z",
+					},
+					"status": map[string]interface{}{"phase": "Running"},
+				}}},
+			})
 			return
 		}
 		switch request.URL.Path {
@@ -95,6 +119,19 @@ func TestGenericDiscoveryAndWatchHandlersUseFakeCluster(t *testing.T) {
 	}
 	if !foundPod {
 		t.Fatalf("discovery handler omitted fake Pod definition: %+v", discoveryPayload.Items)
+	}
+
+	listResponse := httptest.NewRecorder()
+	handler.ServeHTTP(listResponse, httptest.NewRequest(http.MethodGet, "/api/resources?context=test&group=&version=v1&resource=pods&namespace=default&namespaced=true&limit=25&continue=opaque-token&labelSelector=app%3Dapi", nil))
+	var listPayload kube.ResourceList
+	if err := json.NewDecoder(listResponse.Body).Decode(&listPayload); err != nil {
+		t.Fatalf("decode resource list handler response: %v", err)
+	}
+	if listResponse.Code != http.StatusOK || listPayload.Continue != "next-page" || listPayload.ResourceVersion != "12" || len(listPayload.Items) != 1 || listPayload.Items[0].Status != "Running" {
+		t.Fatalf("resource list handler returned unexpected page: status=%d payload=%+v", listResponse.Code, listPayload)
+	}
+	if !strings.Contains(listQuery, "continue=opaque-token") || !strings.Contains(listQuery, "limit=25") || !strings.Contains(listQuery, "labelSelector=app%3Dapi") {
+		t.Fatalf("resource list handler did not preserve query controls: %s", listQuery)
 	}
 
 	watchResponse := httptest.NewRecorder()
