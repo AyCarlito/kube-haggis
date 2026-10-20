@@ -2,6 +2,7 @@ import type {
   ClusterOverview,
   ContextsResponse,
   ResourceDefinition,
+  ResourceEventsResponse,
   ResourceListResponse,
   ResourceObject,
 } from './types'
@@ -136,4 +137,14 @@ export function logsUrl(context: string, namespace: string, pod: string, contain
     previous: String(previous),
     tailLines: String(tailLines),
   })
+}
+
+/** Loads Events associated with one resource UID. */
+export function fetchResourceEvents(context: string, namespace: string, uid: string): Promise<ResourceEventsResponse> {
+  return fetchJson<ResourceEventsResponse>(apiUrl('/api/events', { context, namespace, uid }))
+}
+
+/** Builds the server-sent events URL for resource-scoped Events. */
+export function resourceEventsWatchUrl(context: string, namespace: string, uid: string, resourceVersion: string): string {
+  return apiUrl('/api/events/watch', { context, namespace, uid, resourceVersion })
 }

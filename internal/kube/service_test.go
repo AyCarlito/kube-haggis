@@ -72,12 +72,12 @@ func TestBuildPodOverview(t *testing.T) {
 func TestBuildWarningEvents(t *testing.T) {
 	items := []unstructured.Unstructured{
 		{Object: map[string]interface{}{
-			"metadata": map[string]interface{}{"namespace": "default"},
+			"metadata": map[string]interface{}{"name": "backoff-event", "namespace": "default"},
 			"type":     "Normal",
 			"reason":   "Scheduled",
 		}},
 		{Object: map[string]interface{}{
-			"metadata":       map[string]interface{}{"namespace": "default"},
+			"metadata":       map[string]interface{}{"name": "backoff-event", "namespace": "default"},
 			"type":           "Warning",
 			"reason":         "BackOff",
 			"message":        "container restart back-off",
@@ -89,5 +89,36 @@ func TestBuildWarningEvents(t *testing.T) {
 	warnings := buildWarningEvents(items)
 	if len(warnings) != 1 || warnings[0].Reason != "BackOff" || warnings[0].Object != "Pod/api-0" {
 		t.Fatalf("unexpected warnings: %+v", warnings)
+	}
+}
+
+// TestBuildEventSummaries verifies native Event fields used by resource detail pages.
+func TestBuildEventSummaries(t *testing.T) {
+	items := []unstructured.Unstructured{
+		{Object: map[string]interface{}{
+			"metadata":       map[string]interface{}{"name": "backoff-event", "namespace": "default"},
+			"type":           "Warning",
+			"reason":         "BackOff",
+			"message":        "container restart back-off",
+			"count":          int64(3),
+			"firstTimestamp": "2026-10-20T10:00:00Z",
+			"lastTimestamp":  "2026-10-20T10:05:00Z",
+			"involvedObject": map[string]interface{}{"kind": "Pod", "name": "api-0"},
+		}},
+		{Object: map[string]interface{}{
+			"type":           "Normal",
+			"reason":         "Pulled",
+			"message":        "image pulled",
+			"involvedObject": map[string]interface{}{"kind": "Pod", "name": "api-0"},
+		}},
+	}
+
+	events := buildEventSummaries(items, false)
+	if len(events) != 2 || events[0].Name != "backoff-event" || events[0].Count != 3 || events[0].Object != "Pod/api-0" || events[0].LastSeen.IsZero() {
+		t.Fatalf("unexpected event summaries: %+v", events)
+	}
+	warnings := buildEventSummaries(items, true)
+	if len(warnings) != 1 || warnings[0].Type != "Warning" {
+		t.Fatalf("unexpected warning summaries: %+v", warnings)
 	}
 }

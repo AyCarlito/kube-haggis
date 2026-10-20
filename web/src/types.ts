@@ -93,9 +93,18 @@ export interface EventSummary {
   type: string
   reason: string
   message: string
+  name: string
   namespace?: string
   object: string
+  count: number
+  firstSeen: string
   lastSeen: string
+}
+
+/** Contains Events associated with one Kubernetes resource. */
+export interface ResourceEventsResponse {
+  items: EventSummary[]
+  resourceVersion: string
 }
 
 /** Contains the aggregate data used by the cluster landing page. */

@@ -23,6 +23,8 @@ The repository currently contains the first usable vertical slice. The backend a
 - Resource list search, namespace scope, label selector, and live-watch refresh behavior.
 - Generic YAML editor and create workflow.
 - Client-side full-object updates with resource-version handling and Kubernetes dry-run review.
+- Refresh the complete resource from Kubernetes after a successful YAML apply before updating the editor state.
+- Resource-scoped Events with live watches and navigation into generic Event details.
 - Per-context read-only/write-mode UI and backend write-mode guard.
 - Secret value masking with explicit reveal.
 - Removal of `metadata.managedFields` from the YAML editor and write payloads.
@@ -33,7 +35,8 @@ The repository currently contains the first usable vertical slice. The backend a
 ### Partially Implemented
 
 - Resource tables have search, namespace, label selector, and live updates, but status filters, sorting, configurable columns, and continuation-token pagination are still incomplete.
-- Resource detail pages have overview and YAML tabs. Events and related-resource tabs are currently explanatory placeholders.
+- Resource detail pages have overview and YAML tabs. Resource-scoped Events are live, while related-resource tabs are still explanatory placeholders.
+- Event detail pages omit the Events tab because Events are not expected to have child Events.
 - CRDs support discovery, generic CRUD, and YAML editing. Schema-generated CRD forms are not implemented yet.
 - Client-side apply currently uses full-object Kubernetes updates rather than a three-way `kubectl apply` merge. Resource-version conflicts reach the UI as errors, but there is no dedicated conflict-resolution workflow yet.
 - The overview detects whether `metrics.k8s.io` is available, but it does not yet fetch or chart live usage.

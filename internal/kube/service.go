@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
@@ -112,8 +113,11 @@ type EventSummary struct {
 	Type      string    `json:"type"`
 	Reason    string    `json:"reason"`
 	Message   string    `json:"message"`
+	Name      string    `json:"name"`
 	Namespace string    `json:"namespace,omitempty"`
 	Object    string    `json:"object"`
+	Count     int64     `json:"count"`
+	FirstSeen time.Time `json:"firstSeen"`
 	LastSeen  time.Time `json:"lastSeen"`
 }
 
@@ -431,6 +435,36 @@ func (s *Service) PodLogs(ctx context.Context, contextName, namespace, pod, cont
 	return stream, nil
 }
 
+// EventsForResource returns Events whose involvedObject UID matches a resource.
+func (s *Service) EventsForResource(ctx context.Context, contextName, namespace, uid string) ([]EventSummary, string, error) {
+	if strings.TrimSpace(uid) == "" {
+		return nil, "", fmt.Errorf("resource UID is required to list Events")
+	}
+	dynamicClient, _, _, err := s.clients(contextName)
+	if err != nil {
+		return nil, "", err
+	}
+	items, err := listResource(ctx, dynamicClient, coreGVR("events"), namespace, strings.TrimSpace(namespace) != "", eventOptions(uid))
+	if err != nil {
+		return nil, "", err
+	}
+	return buildEventSummaries(items.Items, false), items.GetResourceVersion(), nil
+}
+
+// WatchEventsForResource opens an Event watch scoped to a resource UID.
+func (s *Service) WatchEventsForResource(ctx context.Context, contextName, namespace, uid, resourceVersion string) (watch.Interface, error) {
+	if strings.TrimSpace(uid) == "" {
+		return nil, fmt.Errorf("resource UID is required to watch Events")
+	}
+	dynamicClient, _, _, err := s.clients(contextName)
+	if err != nil {
+		return nil, err
+	}
+	options := eventOptions(uid)
+	options.ResourceVersion = resourceVersion
+	return watchResource(ctx, dynamicClient, coreGVR("events"), namespace, strings.TrimSpace(namespace) != "", options)
+}
+
 // loadConfig loads the merged kubeconfig from the configured loading rules.
 func (s *Service) loadConfig() (*clientcmdapi.Config, error) {
 	config, err := s.rules.Load()
@@ -735,36 +769,69 @@ func buildStorageOverview(items []unstructured.Unstructured) StorageOverview {
 
 // buildWarningEvents selects and sorts recent warning Events.
 func buildWarningEvents(items []unstructured.Unstructured) []EventSummary {
-	warnings := make([]EventSummary, 0)
-	for index := range items {
-		item := &items[index]
-		eventType, _, _ := unstructured.NestedString(item.Object, "type")
-		if eventType != "Warning" {
-			continue
-		}
-		reason, _, _ := unstructured.NestedString(item.Object, "reason")
-		message, _, _ := unstructured.NestedString(item.Object, "message")
-		namespace := item.GetNamespace()
-		objectName := ""
-		involvedObject, _, _ := unstructured.NestedMap(item.Object, "involvedObject")
-		if involvedObject != nil {
-			kind, _, _ := unstructured.NestedString(involvedObject, "kind")
-			name, _, _ := unstructured.NestedString(involvedObject, "name")
-			objectName = kind + "/" + name
-		}
-		lastSeen := eventTime(item)
-		warnings = append(warnings, EventSummary{Type: eventType, Reason: reason, Message: message, Namespace: namespace, Object: objectName, LastSeen: lastSeen})
-	}
-	sort.Slice(warnings, func(i, j int) bool { return warnings[i].LastSeen.After(warnings[j].LastSeen) })
+	warnings := buildEventSummaries(items, true)
 	if len(warnings) > 8 {
 		warnings = warnings[:8]
 	}
 	return warnings
 }
 
+// eventOptions creates the native field selector used for resource Events.
+func eventOptions(uid string) metav1.ListOptions {
+	return metav1.ListOptions{FieldSelector: fields.OneTermEqualSelector("involvedObject.uid", uid).String(), Limit: 100}
+}
+
+// buildEventSummaries converts unstructured Events into UI summaries.
+func buildEventSummaries(items []unstructured.Unstructured, warningsOnly bool) []EventSummary {
+	events := make([]EventSummary, 0, len(items))
+	for index := range items {
+		event := summarizeEvent(&items[index])
+		if warningsOnly && event.Type != "Warning" {
+			continue
+		}
+		events = append(events, event)
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i].LastSeen.After(events[j].LastSeen) })
+	return events
+}
+
+// summarizeEvent extracts the display fields from one Kubernetes Event.
+func summarizeEvent(item *unstructured.Unstructured) EventSummary {
+	eventType, _, _ := unstructured.NestedString(item.Object, "type")
+	reason, _, _ := unstructured.NestedString(item.Object, "reason")
+	message, _, _ := unstructured.NestedString(item.Object, "message")
+	objectName := ""
+	involvedObject, _, _ := unstructured.NestedMap(item.Object, "involvedObject")
+	if involvedObject != nil {
+		kind, _, _ := unstructured.NestedString(involvedObject, "kind")
+		name, _, _ := unstructured.NestedString(involvedObject, "name")
+		objectName = kind + "/" + name
+	}
+	count := nestedInt64(item.Object, "count")
+	if count < 1 {
+		count = 1
+	}
+	return EventSummary{
+		Type:      eventType,
+		Reason:    reason,
+		Message:   message,
+		Name:      item.GetName(),
+		Namespace: item.GetNamespace(),
+		Object:    objectName,
+		Count:     count,
+		FirstSeen: eventTimeForFields(item, "firstTimestamp", "eventTime", "lastTimestamp"),
+		LastSeen:  eventTimeForFields(item, "lastTimestamp", "eventTime", "firstTimestamp"),
+	}
+}
+
 // eventTime extracts the best available timestamp from an Event.
 func eventTime(item *unstructured.Unstructured) time.Time {
-	for _, field := range []string{"lastTimestamp", "eventTime", "firstTimestamp"} {
+	return eventTimeForFields(item, "lastTimestamp", "eventTime", "firstTimestamp")
+}
+
+// eventTimeForFields returns the first parseable timestamp from supplied fields.
+func eventTimeForFields(item *unstructured.Unstructured, fields ...string) time.Time {
+	for _, field := range fields {
 		value, found, _ := unstructured.NestedString(item.Object, field)
 		if !found || value == "" {
 			continue

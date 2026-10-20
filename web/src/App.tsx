@@ -36,14 +36,17 @@ import {
   fetchDiscovery,
   fetchOverview,
   fetchResource,
+  fetchResourceEvents,
   fetchResources,
   logsUrl,
+  resourceEventsWatchUrl,
   watchUrl,
 } from './api'
 import type {
   ClusterOverview,
   ContextSummary,
   ContextsResponse,
+  EventSummary,
   ResourceDefinition,
   ResourceListResponse,
   ResourceObject,
@@ -176,18 +179,20 @@ export default function App() {
 
   const activeDefinition = route.resource ? resolveDefinition(route.resource, definitions) : undefined
   const activeContext = contexts?.contexts.find((item) => item.name === selectedContext)
+  const validResourceName = route.name && route.name !== 'undefined' && route.name !== 'null' ? route.name : undefined
   const content = !contexts || (contexts.contexts.length > 0 && !selectedContext) ? (
     <LoadingState label="Reading local kubeconfig" />
   ) : contexts.error || contexts.contexts.length === 0 ? (
     <SetupState error={contexts.error} />
-  ) : route.name && activeDefinition ? (
+  ) : validResourceName && activeDefinition ? (
     <ResourceDetailPage
       context={selectedContext}
       namespace={route.namespace ?? selectedNamespace}
       definition={activeDefinition}
-      name={route.name}
+      name={validResourceName}
       writeEnabled={writeEnabled}
       onBack={() => navigate(`/resources/${activeDefinition.resource}`, activeDefinition.resource)}
+      onOpenEvent={(event) => navigate(`/resources/events/${encodeURIComponent(event.name)}`, 'events', event.name, event.namespace || undefined)}
     />
   ) : route.resource && activeDefinition ? (
     <ResourceListPage
@@ -516,7 +521,7 @@ function ResourceRow({ item, onOpen }: { item: ResourceSummary; onOpen: (name: s
 }
 
 /** Renders the tabbed detail view for one generic resource. */
-function ResourceDetailPage({ context, namespace, definition, name, writeEnabled, onBack }: { context: string; namespace: string; definition: ResourceDefinition; name: string; writeEnabled: boolean; onBack: () => void }) {
+function ResourceDetailPage({ context, namespace, definition, name, writeEnabled, onBack, onOpenEvent }: { context: string; namespace: string; definition: ResourceDefinition; name: string; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void }) {
   const [object, setObject] = useState<ResourceObject | null>(null)
   const [yamlText, setYamlText] = useState('')
   const [originalYaml, setOriginalYaml] = useState('')
@@ -530,6 +535,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
 
   useEffect(() => {
     let active = true
+    setTab('overview')
     if (isNew) {
       const initial: ResourceObject = {
         apiVersion: definition.group ? `${definition.group}/${definition.version}` : definition.version,
@@ -578,13 +584,24 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   async function saveChanges() {
     setSaving(true)
     try {
-      const updated = await applyResource(context, definition, namespace, yamlText, false)
-      const text = stringify(sanitizeEditorObject(updated))
-      setObject(updated)
+      const applied = await applyResource(context, definition, namespace, yamlText, false)
+      const appliedName = isNew ? metadataString(applied, 'name') : name
+      const appliedNamespace = definition.namespaced && namespace === 'all' ? metadataString(applied, 'namespace') : namespace
+      let refreshed = applied
+      let refreshError = ''
+      if (appliedName) {
+        try {
+          refreshed = await fetchResource(context, definition, appliedNamespace, appliedName)
+        } catch (caughtError) {
+          refreshError = `Resource applied, but refresh failed: ${(caughtError as Error).message}`
+        }
+      }
+      const text = stringify(sanitizeEditorObject(refreshed))
+      setObject(refreshed)
       setYamlText(text)
       setOriginalYaml(text)
       setReviewReady(false)
-      setError('')
+      setError(refreshError)
       setTab('overview')
     } catch (saveError) {
       setError((saveError as Error).message)
@@ -596,16 +613,17 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   if (error && !object) return <ConnectionState error={error} />
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
+  const detailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
 
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
     <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
-    <div className="detail-tabs" role="tablist">{(definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']).map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => setTab(item)}>{item === 'yaml' ? 'YAML editor' : titleCase(item)}</button>)}</div>
+    <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => setTab(item)}>{item === 'yaml' ? 'YAML editor' : titleCase(item)}</button>)}</div>
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
     {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
     {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
     {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
-    {tab === 'events' && <QuietState icon={<Activity size={22} />} title="Events are scoped from the resource page" detail="The next operational pass will stream related Events and container logs here." />}
+    {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
     {tab === 'related' && <QuietState icon={<Network size={22} />} title="Owner graph is next" detail="KubeHaggis will use ownerReferences to connect this object to its surrounding workload graph." />}
   </div>
 }
@@ -660,6 +678,58 @@ function PodLogsPanel({ context, namespace, pod }: { context: string; namespace:
   return <div className="logs-panel"><div className="logs-toolbar"><div className="logs-title"><TerminalSquare size={16} /><strong>Container output</strong><span>{follow ? 'following stream' : 'snapshot'}</span></div><div className="logs-controls"><label><span>Container</span><input value={container} onChange={(event) => setContainer(event.target.value)} placeholder="default" /></label><label><span>Tail</span><select value={tailLines} onChange={(event) => setTailLines(Number(event.target.value))}><option value={100}>100 lines</option><option value={200}>200 lines</option><option value={500}>500 lines</option><option value={1000}>1,000 lines</option></select></label><label className="check-control"><input type="checkbox" checked={previous} onChange={(event) => setPrevious(event.target.checked)} /><span>Previous</span></label><label className="check-control"><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /><span>Follow</span></label></div></div>{error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}<pre className="log-output">{loading && !logs ? <span className="log-placeholder"><LoaderCircle size={17} className="spin" /> Reading container output</span> : logs || 'No log lines returned.'}</pre></div>
 }
 
+/** Renders the live Event stream associated with a resource UID. */
+function ResourceEventsPanel({ context, namespace, uid, onOpenEvent }: { context: string; namespace: string; uid: string; onOpenEvent: (event: EventSummary) => void }) {
+  const [events, setEvents] = useState<EventSummary[]>([])
+  const [error, setError] = useState('')
+  const [watching, setWatching] = useState(false)
+  const [loading, setLoading] = useState(Boolean(uid))
+
+  useEffect(() => {
+    if (!uid) {
+      setLoading(false)
+      return
+    }
+    let active = true
+    let stream: EventSource | undefined
+    const load = () => {
+      fetchResourceEvents(context, namespace === 'all' ? '' : namespace, uid)
+        .then((response) => {
+          if (!active) return
+          setEvents(response.items)
+          setError('')
+          if (!stream && response.resourceVersion) {
+            stream = new EventSource(resourceEventsWatchUrl(context, namespace === 'all' ? '' : namespace, uid, response.resourceVersion))
+            setWatching(true)
+            stream.onmessage = () => load()
+            stream.onerror = () => setWatching(false)
+          }
+        })
+        .catch((loadError: Error) => active && setError(loadError.message))
+        .finally(() => active && setLoading(false))
+    }
+    load()
+    return () => {
+      active = false
+      stream?.close()
+      setWatching(false)
+    }
+  }, [context, namespace, uid])
+
+  /** Opens a generic Event detail page only when Kubernetes supplied its name. */
+  function openEvent(event: EventSummary) {
+    if (!event.name) {
+      setError('This Event has no Kubernetes name. Refresh the resource and try again.')
+      return
+    }
+    onOpenEvent(event)
+  }
+
+  if (!uid) return <QuietState icon={<Activity size={22} />} title="Events need a resource UID" detail="This object does not expose a UID that can be used for native Event filtering." />
+
+  return <div className="events-panel"><div className="events-toolbar"><div className="logs-title"><Activity size={16} /><strong>Resource Events</strong><span>{events.length} recorded</span></div><span className={watching ? 'live-chip' : 'quiet-chip'}><span />{watching ? 'Live watch' : 'Refresh fallback'}</span></div>{error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}{loading && !events.length ? <div className="events-loading"><LoaderCircle size={17} className="spin" /> Reading resource Events</div> : null}{!loading && !events.length && !error ? <QuietState icon={<ShieldCheck size={22} />} title="No Events for this resource" detail="Kubernetes has not reported an Event associated with this object." /> : null}<div className="event-list">{events.map((event, index) => <button type="button" className="event-row event-row-button" key={`${event.name}-${event.reason}-${event.lastSeen}-${index}`} onClick={() => openEvent(event)}><span className={`event-type event-type-${event.type.toLowerCase()}`}><span />{event.type || 'Normal'}</span><span className="event-copy"><strong>{event.reason || 'Event'}</strong><span>{event.message || 'No message provided.'}</span></span><span className="event-meta"><code>{event.count > 1 ? `x${event.count}` : 'once'}</code><span>{relativeTime(event.lastSeen)}</span></span></button>)}</div></div>
+}
+
 /** Renders a key/value identity row on a detail page. */
 function IdentityRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return <div className="identity-row"><span>{label}</span><strong className={mono ? 'mono' : ''}>{value}</strong></div>
@@ -691,6 +761,14 @@ function readRoute(): RouteState {
   const parts = window.location.pathname.split('/').filter(Boolean)
   if (parts[0] !== 'resources' || !parts[1]) return { path: '/' }
   return { path: window.location.pathname, resource: decodeURIComponent(parts[1]), name: parts[2] ? decodeURIComponent(parts[2]) : undefined, namespace: new URLSearchParams(window.location.search).get('namespace') || undefined }
+}
+
+/** Reads a string from a resource metadata object. */
+function metadataString(object: ResourceObject, field: string): string {
+  const metadata = object.metadata
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return ''
+  const value = (metadata as Record<string, unknown>)[field]
+  return typeof value === 'string' ? value : ''
 }
 
 /** Resolves a resource slug against discovered definitions and common fallbacks. */
