@@ -7,6 +7,7 @@ import type {
   ResourceEventsResponse,
   ResourceListResponse,
   ResourceObject,
+  RelatedResourcesResponse,
 } from './types'
 
 /** Builds a backend API URL with encoded query parameters. */
@@ -73,6 +74,26 @@ export function fetchResource(
 ): Promise<ResourceObject> {
   return fetchJson<ResourceObject>(
     apiUrl('/api/resource', {
+      context,
+      group: definition.group,
+      version: definition.version,
+      resource: definition.resource,
+      namespace: definition.namespaced ? namespace : '',
+      name,
+      namespaced: String(definition.namespaced),
+    }),
+  )
+}
+
+/** Loads bounded, read-only relationships for one complete Kubernetes resource. */
+export function fetchRelated(
+  context: string,
+  definition: ResourceDefinition,
+  namespace: string,
+  name: string,
+): Promise<RelatedResourcesResponse> {
+  return fetchJson<RelatedResourcesResponse>(
+    apiUrl('/api/related', {
       context,
       group: definition.group,
       version: definition.version,

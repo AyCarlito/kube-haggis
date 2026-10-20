@@ -43,6 +43,7 @@ import {
   fetchOverview,
   fetchResource,
   fetchResourceEvents,
+  fetchRelated,
   fetchResources,
   downloadPodFile,
   launchEphemeralContainer,
@@ -62,9 +63,11 @@ import type {
   PortForwardMessage,
   ResourceDefinition,
   ResourceListResponse,
-  ResourceOwnerReference,
   ResourceObject,
   ResourceSummary,
+  RelatedAggregateState,
+  RelatedResource,
+  RelatedResourcesResponse,
   RouteState,
   TerminalMessage,
   MetricsOverview,
@@ -209,7 +212,6 @@ export default function App() {
       namespace={route.namespace ?? selectedNamespace}
       definition={activeDefinition}
       name={validResourceName}
-      definitions={definitions}
       writeEnabled={writeEnabled}
       onBack={() => navigate(`/resources/${activeDefinition.resource}`, activeDefinition.resource)}
       onOpenEvent={(event) => navigate(`/resources/events/${encodeURIComponent(event.name)}`, 'events', event.name, event.namespace || undefined)}
@@ -717,7 +719,7 @@ function ResourceRow({ item, onOpen }: { item: ResourceSummary; onOpen: (name: s
 }
 
 /** Renders the tabbed detail view for one generic resource. */
-function ResourceDetailPage({ context, namespace, definition, name, definitions, writeEnabled, onBack, onOpenEvent, onOpenResource }: { context: string; namespace: string; definition: ResourceDefinition; name: string; definitions: ResourceDefinition[]; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
+function ResourceDetailPage({ context, namespace, definition, name, writeEnabled, onBack, onOpenEvent, onOpenResource }: { context: string; namespace: string; definition: ResourceDefinition; name: string; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
   const [object, setObject] = useState<ResourceObject | null>(null)
   const [yamlText, setYamlText] = useState('')
   const [originalYaml, setOriginalYaml] = useState('')
@@ -836,42 +838,118 @@ function ResourceDetailPage({ context, namespace, definition, name, definitions,
       {tab === 'debug' && definition.resource === 'pods' && !isNew && <PodDebugPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
       {tab === 'files' && definition.resource === 'pods' && !isNew && <PodFileCopyPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
       {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
-    {tab === 'related' && <OwnerReferencesPanel object={object} definitions={definitions} namespace={resourceNamespace} onOpenResource={onOpenResource} />}
+      {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
   </div>
 }
 
-/** Renders standard Kubernetes owner relationships for a resource. */
-function OwnerReferencesPanel({ object, definitions, namespace, onOpenResource }: { object: ResourceObject; definitions: ResourceDefinition[]; namespace: string; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
-  const owners = readOwnerReferences(object)
+/** Renders discovery-backed relationships and explicit read limitations for a resource. */
+function RelatedResourcesPanel({ context, definition, namespace, name, isNew, onOpenResource }: { context: string; definition: ResourceDefinition; namespace: string; name: string; isNew: boolean; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
+  const [response, setResponse] = useState<RelatedResourcesResponse | null>(null)
+  const [loading, setLoading] = useState(!isNew)
+  const [error, setError] = useState('')
 
-  if (!owners.length) {
-    return <QuietState icon={<Network size={22} />} title="No owner references" detail="Kubernetes did not declare an owner for this object." />
-  }
+  useEffect(() => {
+    if (isNew) {
+      setLoading(false)
+      return
+    }
+    let active = true
+    setLoading(true)
+    fetchRelated(context, definition, namespace, name)
+      .then((data) => {
+        if (!active) return
+        setResponse(data)
+        setError('')
+      })
+      .catch((loadError: Error) => active && setError(loadError.message))
+      .finally(() => active && setLoading(false))
+    return () => {
+      active = false
+    }
+  }, [context, definition, namespace, name, isNew])
 
+  if (isNew) return <QuietState icon={<Network size={22} />} title="Save before reading relationships" detail="A new resource has no Kubernetes identity or native relationships until it is created." />
+  if (loading && !response) return <div className="relationship-panel"><div className="panel relationship-summary-panel"><div className="relationship-loading"><LoaderCircle size={17} className="spin" /> Reading native relationships</div></div></div>
+  if (error && !response) return <div className="relationship-panel"><div className="panel relationship-summary-panel"><PanelHeading eyebrow="Relationships" title="Related resources" action="Read failed" tone="warning" /><div className="inline-error"><AlertTriangle size={15} />{error}</div></div></div>
+
+  const items = response?.items ?? []
+  const notices = response?.notices ?? []
   return <div className="relationship-panel">
     <div className="panel relationship-summary-panel">
-      <PanelHeading eyebrow="Relationships" title="Owner references" action={`${owners.length} ${owners.length === 1 ? 'reference' : 'references'}`} tone="neutral" />
-      <p className="relationship-copy">These links come from Kubernetes <code>metadata.ownerReferences</code>. Controller owners are marked when Kubernetes identifies one.</p>
+      <PanelHeading eyebrow="Relationships" title="Related resources" action={relatedAggregateLabel(response?.state || 'empty', items.length)} tone={relatedAggregateTone(response?.state || 'empty')} />
+      <p className="relationship-copy">Links are derived from Kubernetes owner metadata, native selectors, binding fields, and explicit PodSpec references. Only sanitized resource coordinates are returned; Secret values are never read into this view.</p>
+      {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
     </div>
-    <div className="relationship-list">
-      {owners.map((owner, index) => {
-        const ownerDefinition = resolveOwnerDefinition(owner, definitions)
-        const ownerNamespace = ownerDefinition?.namespaced ? namespace : undefined
-        const row = <>
-          <span className="relationship-icon"><Network size={16} /></span>
-          <div className="relationship-main">
-            <div className="relationship-labels"><span className="relationship-kind">{owner.controller ? 'Controller owner' : 'Owner reference'}</span>{owner.blockOwnerDeletion && <span className="relationship-flag">Deletion blocked</span>}</div>
-            <strong>{owner.kind}/{owner.name}</strong>
-            <span className="relationship-meta"><code>{owner.apiVersion}</code>{owner.uid ? <><span>·</span><code>uid {owner.uid.slice(0, 12)}</code></> : null}</span>
-          </div>
-          {!ownerDefinition && <span className="relationship-unresolved">Not discovered</span>}
-        </>
-        return ownerDefinition
-          ? <button type="button" className="relationship-row relationship-row-button" key={`${owner.apiVersion}/${owner.kind}/${owner.name}/${owner.uid || index}`} aria-label={`Open owner ${owner.kind}/${owner.name}`} onClick={() => onOpenResource(ownerDefinition, owner.name, ownerNamespace)}>{row}</button>
-          : <div className="relationship-row" key={`${owner.apiVersion}/${owner.kind}/${owner.name}/${owner.uid || index}`}>{row}</div>
-      })}
-    </div>
+    {notices.length ? <div className="relationship-notices">{notices.map((notice, index) => <RelatedNotice key={`${notice.type}-${notice.source}-${index}`} notice={notice} />)}</div> : null}
+    {items.length ? <div className="relationship-list">{items.map((item, index) => <RelatedResourceRow key={`${item.type}-${item.source}-${item.namespace || ''}-${item.name || ''}-${item.uid || index}`} item={item} onOpenResource={onOpenResource} />)}</div> : notices.length ? <div className="relationship-limited"><AlertTriangle size={16} /><span>No resolved links are visible. The source states above explain what Kubernetes allowed this identity to read.</span></div> : <QuietState icon={<Network size={22} />} title="No related resources" detail={response?.message || 'No safe native relationship was found for this object.'} />}
   </div>
+}
+
+/** Renders one related-resource target as a deep-link when it is verified and discovered. */
+function RelatedResourceRow({ item, onOpenResource }: { item: RelatedResource; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
+  const canOpen = item.state === 'resolved' && Boolean(item.definition && item.name)
+  const kind = item.kind || item.definition?.kind || 'Resource'
+  const name = item.name || 'Unnamed target'
+  const row = <>
+    <span className="relationship-icon"><Network size={16} /></span>
+    <div className="relationship-main">
+      <div className="relationship-labels"><span className="relationship-kind">{relatedTypeLabel(item.type)}</span>{item.controller && <span className="relationship-flag">Controller</span>}{item.blockOwnerDeletion && <span className="relationship-flag">Deletion blocked</span>}</div>
+      <strong>{kind}/{name}</strong>
+      <span className="relationship-meta"><code>{item.source}</code>{item.namespace ? <><span>·</span><code>ns {item.namespace}</code></> : null}{item.uid ? <><span>·</span><code>uid {item.uid.slice(0, 12)}</code></> : null}</span>
+    </div>
+    {item.state === 'resolved' ? <span className="relationship-open">Open <ArrowUpRight size={13} /></span> : <span className={`relationship-unresolved relationship-state-${item.state}`}>{relatedStateLabel(item.state)}{item.message ? ` / ${item.message}` : ''}</span>}
+  </>
+  if (!canOpen || !item.definition || !item.name) return <div className={`relationship-row relationship-row-state-${item.state}`}>{row}</div>
+  const namespace = item.definition.namespaced ? item.namespace : undefined
+  return <button type="button" className="relationship-row relationship-row-button" aria-label={`Open related ${kind}/${name}`} onClick={() => onOpenResource(item.definition!, item.name!, namespace)}>{row}</button>
+}
+
+/** Renders one explicit partial, permission, malformed, or unavailable relationship source. */
+function RelatedNotice({ notice }: { notice: { type: string; source: string; state: string; message: string } }) {
+  return <div className={`relationship-notice relationship-notice-${notice.state}`}><span className="relationship-notice-mark"><AlertTriangle size={14} /></span><div><div className="relationship-notice-heading"><strong>{relatedTypeLabel(notice.type)}</strong><span className={`relationship-state-chip relationship-state-${notice.state}`}>{relatedStateLabel(notice.state)}</span></div><code>{notice.source}</code><span>{notice.message}</span></div></div>
+}
+
+/** Converts an aggregate relationship state into a compact panel action label. */
+function relatedAggregateLabel(state: RelatedAggregateState, count: number): string {
+  if (state === 'permission-denied') return 'RBAC denied'
+  if (state === 'error') return 'Read error'
+  if (state === 'partial') return `${count} link${count === 1 ? '' : 's'} / partial`
+  if (state === 'unavailable') return 'Sources limited'
+  if (state === 'empty') return 'No links'
+  return `${count} link${count === 1 ? '' : 's'}`
+}
+
+/** Converts an aggregate relationship state into the field-console panel tone. */
+function relatedAggregateTone(state: RelatedAggregateState): 'good' | 'warning' | 'neutral' {
+  if (state === 'available') return 'good'
+  if (state === 'empty' || state === 'unavailable') return 'neutral'
+  return 'warning'
+}
+
+/** Converts a relationship type into readable field-console copy. */
+function relatedTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    owner: 'Owner reference',
+    'owned-descendant': 'Owned descendant',
+    'selector-match': 'Selector match',
+    'selected-by': 'Selected by Service',
+    'bound-volume': 'Bound volume',
+    'bound-claim': 'Bound claim',
+    reference: 'Native reference',
+    aggregation: 'Relationship scan',
+    discovery: 'API discovery',
+  }
+  return labels[type] || titleCase(type)
+}
+
+/** Converts a relationship target state into a short explicit status label. */
+function relatedStateLabel(state: string): string {
+  if (state === 'permission-denied') return 'RBAC denied'
+  if (state === 'unresolved') return 'Unresolved'
+  if (state === 'unavailable') return 'Unavailable'
+  if (state === 'partial') return 'Partial'
+  if (state === 'error') return 'Read error'
+  return state
 }
 
 /** Renders the focused ephemeral debug-container launcher for a Pod. */
@@ -1512,38 +1590,6 @@ function metadataString(object: ResourceObject, field: string): string {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return ''
   const value = (metadata as Record<string, unknown>)[field]
   return typeof value === 'string' ? value : ''
-}
-
-/** Reads valid standard owner references from an unstructured resource. */
-function readOwnerReferences(object: ResourceObject): ResourceOwnerReference[] {
-  const metadata = object.metadata
-  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return []
-  const rawReferences = (metadata as Record<string, unknown>).ownerReferences
-  if (!Array.isArray(rawReferences)) return []
-
-  return rawReferences.flatMap((rawReference) => {
-    if (!rawReference || typeof rawReference !== 'object' || Array.isArray(rawReference)) return []
-    const reference = rawReference as Record<string, unknown>
-    const apiVersion = typeof reference.apiVersion === 'string' ? reference.apiVersion : ''
-    const kind = typeof reference.kind === 'string' ? reference.kind : ''
-    const name = typeof reference.name === 'string' ? reference.name : ''
-    if (!apiVersion || !kind || !name) return []
-
-    const owner: ResourceOwnerReference = { apiVersion, kind, name }
-    if (typeof reference.uid === 'string' && reference.uid) owner.uid = reference.uid
-    if (typeof reference.controller === 'boolean') owner.controller = reference.controller
-    if (typeof reference.blockOwnerDeletion === 'boolean') owner.blockOwnerDeletion = reference.blockOwnerDeletion
-    return [owner]
-  })
-}
-
-/** Resolves an owner reference to a discovered generic resource definition. */
-function resolveOwnerDefinition(owner: ResourceOwnerReference, definitions: ResourceDefinition[]): ResourceDefinition | undefined {
-  const separator = owner.apiVersion.indexOf('/')
-  const group = separator === -1 ? '' : owner.apiVersion.slice(0, separator)
-  const version = separator === -1 ? owner.apiVersion : owner.apiVersion.slice(separator + 1)
-  return definitions.find((definition) => definition.group === group && definition.version === version && definition.kind === owner.kind)
-    ?? commonDefinitions.find((definition) => definition.group === group && definition.version === version && definition.kind === owner.kind)
 }
 
 /** Resolves a resource slug against discovered definitions and common fallbacks. */

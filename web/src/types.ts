@@ -190,6 +190,45 @@ export interface ResourceOwnerReference {
   blockOwnerDeletion?: boolean
 }
 
+/** Identifies the aggregate state of a related-resource response. */
+export type RelatedAggregateState = 'available' | 'empty' | 'partial' | 'permission-denied' | 'error' | 'unavailable'
+
+/** Identifies the state of one relationship target or source notice. */
+export type RelatedItemState = 'resolved' | 'unresolved' | 'permission-denied' | 'error' | 'unavailable' | 'partial'
+
+/** Describes one sanitized related-resource target or explicit unresolved relationship. */
+export interface RelatedResource {
+  type: string
+  source: string
+  state: RelatedItemState
+  definition?: ResourceDefinition
+  apiVersion?: string
+  kind?: string
+  name?: string
+  namespace?: string
+  uid?: string
+  message?: string
+  controller?: boolean
+  blockOwnerDeletion?: boolean
+}
+
+/** Describes a relationship source that could not be fully read. */
+export interface RelatedRelationshipNotice {
+  type: string
+  source: string
+  state: RelatedItemState
+  message: string
+}
+
+/** Contains bounded related-resource targets, source notices, and aggregate state. */
+export interface RelatedResourcesResponse {
+  state: RelatedAggregateState
+  message?: string
+  items: RelatedResource[]
+  notices?: RelatedRelationshipNotice[]
+  truncated?: boolean
+}
+
 /** Represents one browser message exchanged with a native Pod terminal. */
 export interface TerminalMessage {
   type: 'input' | 'resize' | 'output' | 'error' | 'closed'

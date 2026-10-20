@@ -229,37 +229,10 @@ func (s *Service) Discovery(ctx context.Context, contextName string) ([]Resource
 	if err != nil {
 		return nil, err
 	}
-
-	resourceLists, discoveryErr := discoveryClient.ServerPreferredResources()
-	if discoveryErr != nil && len(resourceLists) == 0 {
+	definitions, discoveryErr := discoverDefinitions(discoveryClient)
+	if discoveryErr != nil && len(definitions) == 0 {
 		return nil, discoveryErr
 	}
-
-	definitions := make([]ResourceDefinition, 0)
-	for _, resourceList := range resourceLists {
-		groupVersion, err := schema.ParseGroupVersion(resourceList.GroupVersion)
-		if err != nil {
-			continue
-		}
-		for _, resource := range resourceList.APIResources {
-			definitions = append(definitions, ResourceDefinition{
-				Group:      groupVersion.Group,
-				Version:    groupVersion.Version,
-				Resource:   resource.Name,
-				Kind:       resource.Kind,
-				Namespaced: resource.Namespaced,
-				Verbs:      append([]string(nil), resource.Verbs...),
-				ShortNames: append([]string(nil), resource.ShortNames...),
-				Categories: append([]string(nil), resource.Categories...),
-			})
-		}
-	}
-
-	sort.Slice(definitions, func(i, j int) bool {
-		left := definitions[i].Group + "/" + definitions[i].Version + "/" + definitions[i].Resource
-		right := definitions[j].Group + "/" + definitions[j].Version + "/" + definitions[j].Resource
-		return left < right
-	})
 	return definitions, nil
 }
 

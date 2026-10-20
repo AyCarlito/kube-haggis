@@ -26,7 +26,11 @@ type Server struct {
 	logger   *slog.Logger
 	audit    *audit.Store
 	overview func(context.Context, string) (kube.ClusterOverview, error)
+	related  relatedLoader
 }
+
+// relatedLoader describes the read-only relationship aggregation seam used by the HTTP handler.
+type relatedLoader func(context.Context, string, string, string, string, string, string, bool) (kube.RelatedResourceList, error)
 
 // New creates an HTTP server for the KubeHaggis API.
 func New(kubernetes *kube.Service, webDir string, logger *slog.Logger, auditStore *audit.Store) *Server {
@@ -42,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/overview", s.handleOverview)
 	mux.HandleFunc("/api/discovery", s.handleDiscovery)
 	mux.HandleFunc("/api/resources", s.handleResources)
+	mux.HandleFunc("/api/related", s.handleRelated)
 	mux.HandleFunc("/api/watch", s.handleWatch)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/events/watch", s.handleEventWatch)
@@ -127,6 +132,30 @@ func (s *Server) handleResources(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	writeJSON(writer, http.StatusOK, items)
+}
+
+// handleRelated returns bounded, read-only relationships for one generic resource.
+func (s *Server) handleRelated(writer http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	loadRelated := s.related
+	if loadRelated == nil {
+		loadRelated = s.kube.RelatedResources
+	}
+	relationships, err := loadRelated(
+		request.Context(),
+		query.Get("context"),
+		query.Get("group"),
+		query.Get("version"),
+		query.Get("resource"),
+		query.Get("namespace"),
+		query.Get("name"),
+		query.Get("namespaced") != "false",
+	)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, relationships)
 }
 
 // handleWatch streams generic resource changes as server-sent events.
