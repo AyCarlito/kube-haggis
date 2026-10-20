@@ -59,6 +59,7 @@ import {
   portForwardUrl,
   uploadPodFile,
   resourceEventsWatchUrl,
+  reloadContexts as reloadKubeconfig,
   terminalUrl,
   watchUrl,
 } from './api'
@@ -156,34 +157,95 @@ export default function App() {
   const [definitions, setDefinitions] = useState<ResourceDefinition[]>(commonDefinitions)
   const [writeEnabled, setWriteEnabled] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [contextLoading, setContextLoading] = useState(true)
+  const [contextRequestError, setContextRequestError] = useState('')
+  const contextRequestID = useRef(0)
+  const contextLoadingRef = useRef(true)
 
   useEffect(() => {
     let active = true
-    fetchContexts()
-      .then((response) => {
-        if (!active) return
+
+    /** Loads context metadata while preserving the current browser selection after startup. */
+    async function loadContexts(initial: boolean) {
+      if (!initial && contextLoadingRef.current) return
+      const requestID = contextRequestID.current + 1
+      contextRequestID.current = requestID
+      try {
+        const response = await fetchContexts()
+        if (!active || requestID !== contextRequestID.current) return
         setContexts(response)
-        const search = new URLSearchParams(window.location.search)
-        const fromUrl = search.get('context')
-        const context = fromUrl || response.currentContext
-        setSelectedContext(context)
+        setContextRequestError(response.reloadError || '')
+        if (initial) {
+          const search = new URLSearchParams(window.location.search)
+          const fromUrl = search.get('context')
+          setSelectedContext(fromUrl || response.currentContext)
+        }
+      } catch (error) {
+        if (!active || requestID !== contextRequestID.current) return
+        const message = (error as Error).message
+        if (initial) {
+          setContexts({ currentContext: '', contexts: [], sourceState: 'error', revision: 0, reloaded: false, error: message })
+        } else {
+          setContextRequestError(message)
+        }
+      } finally {
+        if (active && requestID === contextRequestID.current && initial) {
+          contextLoadingRef.current = false
+          setContextLoading(false)
+        }
+      }
+    }
+
+    void loadContexts(true)
+    const interval = window.setInterval(() => void loadContexts(false), 15000)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+    }
+  }, [])
+
+  const contextRevision = contexts?.revision ?? 0
+
+  useEffect(() => {
+    if (!selectedContext) return
+    let active = true
+    const routeNamespace = new URLSearchParams(window.location.search).get('namespace')
+    setSelectedNamespace(routeNamespace || readNamespace(selectedContext))
+    setWriteEnabled(false)
+    fetchDiscovery(selectedContext)
+      .then((nextDefinitions) => {
+        if (active && nextDefinitions.length > 0) setDefinitions(nextDefinitions)
       })
-      .catch((error: Error) => {
-        if (!active) return
-        setContexts({ currentContext: '', contexts: [], error: error.message })
+      .catch(() => {
+        if (active) setDefinitions((currentDefinitions) => currentDefinitions.length ? currentDefinitions : commonDefinitions)
       })
     return () => {
       active = false
     }
-  }, [])
+  }, [selectedContext, contextRevision])
 
-  useEffect(() => {
-    if (!selectedContext) return
-    const routeNamespace = new URLSearchParams(window.location.search).get('namespace')
-    setSelectedNamespace(routeNamespace || readNamespace(selectedContext))
-    setWriteEnabled(false)
-    fetchDiscovery(selectedContext).then(setDefinitions).catch(() => setDefinitions(commonDefinitions))
-  }, [selectedContext])
+  /** Forces a kubeconfig reload while preserving the selected context and namespace. */
+  async function reloadKubeconfigSources() {
+    const requestID = contextRequestID.current + 1
+    contextRequestID.current = requestID
+    contextLoadingRef.current = true
+    setContextLoading(true)
+    setContextRequestError('')
+    try {
+      const response = await reloadKubeconfig()
+      if (requestID !== contextRequestID.current) return
+      setContexts(response)
+      setContextRequestError(response.error || response.reloadError || '')
+    } catch (error) {
+      if (requestID !== contextRequestID.current) return
+      setContextRequestError((error as Error).message)
+    } finally {
+      if (requestID === contextRequestID.current) {
+        contextLoadingRef.current = false
+        setContextLoading(false)
+      }
+    }
+  }
 
   /** Navigates to a route while preserving the selected context and namespace. */
   function navigate(path: string, resource?: string, name?: string, resourceNamespace?: string) {
@@ -253,7 +315,7 @@ export default function App() {
       onCreate={() => navigate(`/resources/${activeDefinition.resource}/new`, activeDefinition.resource, 'new')}
     />
   ) : (
-    <OverviewPage context={selectedContext} contexts={contexts} activeContext={activeContext} />
+    <OverviewPage context={selectedContext} contexts={contexts} activeContext={activeContext} revision={contextRevision} />
   )
 
   return (
@@ -312,7 +374,7 @@ export default function App() {
           </div>
           <div className="topbar-tools">
             <ContextPicker contexts={contexts?.contexts ?? []} value={selectedContext} onChange={changeContext} />
-            <NamespacePicker context={selectedContext} value={selectedNamespace} onChange={changeNamespace} />
+            <NamespacePicker context={selectedContext} value={selectedNamespace} revision={contextRevision} onChange={changeNamespace} />
             <button
               className={`write-switch ${writeEnabled ? 'write-switch-on' : ''}`}
               onClick={() => setWriteEnabled((enabled) => !enabled)}
@@ -321,19 +383,25 @@ export default function App() {
               <span className="write-switch-light" />
               {writeEnabled ? 'Write mode on' : 'Read-only'}
             </button>
+            <button className="icon-button kubeconfig-reload" onClick={() => void reloadKubeconfigSources()} disabled={contextLoading} aria-label="Reload kubeconfig" title="Reload kubeconfig">
+              {contextLoading ? <LoaderCircle size={17} className="spin" /> : <RefreshCw size={17} />}
+            </button>
             <button className="icon-button" aria-label="Settings">
               <Settings2 size={18} />
             </button>
           </div>
         </header>
-        <div className="page-scroll">{content}</div>
+        <div className="page-scroll">
+          {contexts && !(contexts.error && contexts.contexts.length === 0) && (contextLoading || contexts.sourceState === 'changed' || Boolean(contexts.reloadError) || Boolean(contextRequestError) || (Boolean(selectedContext) && contexts.contexts.length > 0 && !activeContext)) ? <KubeconfigNotice state={contexts.sourceState} error={contexts.reloadError || contextRequestError} selectedContext={selectedContext} selectedContextAvailable={Boolean(activeContext)} loading={contextLoading} onReload={() => void reloadKubeconfigSources()} /> : null}
+          {content}
+        </div>
       </main>
     </div>
   )
 }
 
 /** Renders the cluster overview and its health summary panels. */
-function OverviewPage({ context, contexts, activeContext }: { context: string; contexts: ContextsResponse | null; activeContext?: ContextSummary }) {
+function OverviewPage({ context, contexts, activeContext, revision }: { context: string; contexts: ContextsResponse | null; activeContext?: ContextSummary; revision: number }) {
   const [overview, setOverview] = useState<ClusterOverview | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(Boolean(context))
@@ -364,7 +432,7 @@ function OverviewPage({ context, contexts, activeContext }: { context: string; c
       active = false
       window.clearInterval(interval)
     }
-  }, [context])
+  }, [context, revision])
 
   if (!contexts) return <LoadingState label="Reading local kubeconfig" />
   if (contexts.error || contexts.contexts.length === 0) {
@@ -657,6 +725,31 @@ function SetupState({ error }: { error?: string }) {
   )
 }
 
+/** Renders safe reload, source-change, and stale-selection notices without replacing active pages. */
+function KubeconfigNotice({ state, error, selectedContext, selectedContextAvailable, loading, onReload }: { state: ContextsResponse['sourceState']; error?: string; selectedContext: string; selectedContextAvailable: boolean; loading: boolean; onReload: () => void }) {
+  let title = 'Kubeconfig sources changed'
+  let detail = 'Contexts and discovery were refreshed. The selected context and any open editor were left untouched.'
+  let tone = 'changed'
+  if (loading) {
+    title = 'Reloading kubeconfig sources'
+    detail = 'Refreshing contexts and discovery. The selected context and any open editor will remain in place.'
+    tone = 'loading'
+  } else if (error || state === 'error') {
+    title = 'Kubeconfig reload needs attention'
+    detail = 'The last-good context and client state remain active. Fix the source files and reload again.'
+    tone = 'error'
+  } else if (!selectedContextAvailable && selectedContext) {
+    title = 'Selected context is no longer available'
+    detail = `"${selectedContext}" remains selected to avoid switching context or discarding active edits. Choose another context above.`
+    tone = 'error'
+  } else if (state === 'changed') {
+    title = 'Kubeconfig sources changed'
+    detail = 'Contexts and discovery were refreshed. The selected context and any open editor were left untouched.'
+    tone = 'changed'
+  }
+  return <div className={`kubeconfig-notice kubeconfig-notice-${tone}`} role="status"><span className="kubeconfig-notice-mark">{loading ? <LoaderCircle size={15} className="spin" /> : tone === 'error' ? <AlertTriangle size={15} /> : <RefreshCw size={15} />}</span><div><strong>{title}</strong><span>{detail}</span>{error && <code>{error}</code>}</div>{!loading && <button type="button" className="secondary-button" onClick={onReload}><RefreshCw size={14} /> Reload</button>}</div>
+}
+
 /** Renders a cluster connection error with the selected context identity. */
 function ConnectionState({ context, error }: { context?: ContextSummary; error: string }) {
   return <div className="state-page"><div className="state-card"><span className="state-icon state-icon-warning"><AlertTriangle size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> Connection issue</span><h1>Could not read this cluster.</h1><p>{context?.name || 'Selected context'} responded with an error before the overview could load.</p><div className="error-block"><code>{error}</code></div><button className="secondary-button" onClick={() => window.location.reload()}><RefreshCw size={15} /> Try again</button></div></div>
@@ -947,7 +1040,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     return () => {
       active = false
     }
-  }, [context, definition, namespace, name, isNew, isSecret])
+  }, [context, definition.group, definition.version, definition.resource, definition.kind, definition.namespaced, namespace, name, isNew, isSecret])
 
   useEffect(() => {
     if (!schemaCandidate) {
@@ -972,7 +1065,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     return () => {
       active = false
     }
-  }, [context, definition, schemaCandidate])
+  }, [context, definition.group, definition.version, definition.resource, definition.kind, schemaCandidate])
 
   /** Runs Kubernetes dry-run validation for the edited resource document. */
   async function reviewChanges() {
@@ -2882,17 +2975,22 @@ function QuietState({ icon, title, detail }: { icon: ReactNode; title: string; d
 
 /** Renders the context selector with cluster identity details. */
 function ContextPicker({ contexts, value, onChange }: { contexts: ContextSummary[]; value: string; onChange: (value: string) => void }) {
-  return <label className="select-shell context-select"><span className="select-icon"><Server size={15} /></span><select value={value} onChange={(event) => onChange(event.target.value)} disabled={!contexts.length}><option value="">No context</option>{contexts.map((context) => <option key={context.name} value={context.name}>{context.name}</option>)}</select><ChevronDown size={14} /></label>
+  const selectedContextAvailable = contexts.some((context) => context.name === value)
+  return <label className="select-shell context-select"><span className="select-icon"><Server size={15} /></span><select value={value} onChange={(event) => onChange(event.target.value)} disabled={!contexts.length}><option value="">No context</option>{value && !selectedContextAvailable && <option value={value}>{value} (unavailable)</option>}{contexts.map((context) => <option key={context.name} value={context.name}>{context.name}</option>)}</select><ChevronDown size={14} /></label>
 }
 
 /** Renders and persists the active namespace selector. */
-function NamespacePicker({ context, value, onChange }: { context: string; value: string; onChange: (value: string) => void }) {
+function NamespacePicker({ context, value, revision, onChange }: { context: string; value: string; revision: number; onChange: (value: string) => void }) {
   const [namespaces, setNamespaces] = useState<string[]>([])
   useEffect(() => {
     if (!context) return
     const definition = commonDefinitions.find((item) => item.resource === 'namespaces')!
-    fetchResources(context, definition, 'all').then((response) => setNamespaces(response.items.map((item) => item.name).sort())).catch(() => setNamespaces([]))
-  }, [context])
+    fetchResources(context, definition, 'all').then((response) => {
+      const nextNamespaces = response.items.map((item) => item.name).sort()
+      setNamespaces(nextNamespaces)
+      if (value !== 'all' && !nextNamespaces.includes(value)) onChange('all')
+    }).catch(() => setNamespaces([]))
+  }, [context, revision])
   return <label className="select-shell namespace-select"><span className="namespace-glyph">ns</span><select value={value} onChange={(event) => onChange(event.target.value)} disabled={!context}><option value="all">All namespaces</option>{namespaces.map((namespace) => <option key={namespace} value={namespace}>{namespace}</option>)}</select><ChevronDown size={14} /></label>
 }
 

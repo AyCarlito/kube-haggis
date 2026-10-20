@@ -13,8 +13,15 @@ export interface ContextSummary {
 export interface ContextsResponse {
   currentContext: string
   contexts: ContextSummary[]
+  sourceState: KubeconfigSourceState
+  revision: number
+  reloaded: boolean
   error?: string
+  reloadError?: string
 }
+
+/** Identifies the safe state of the backend kubeconfig source snapshot. */
+export type KubeconfigSourceState = 'ready' | 'changed' | 'error'
 
 /** Describes one resource discovered from a Kubernetes API server. */
 export interface ResourceDefinition {

@@ -54,6 +54,23 @@ func TestSummarizeContext(t *testing.T) {
 	}
 }
 
+// TestSummarizeContextRedactsServerUserInfo verifies context summaries cannot echo URL credentials.
+func TestSummarizeContextRedactsServerUserInfo(t *testing.T) {
+	config := &clientcmdapi.Config{
+		Contexts: map[string]*clientcmdapi.Context{
+			"field": {Cluster: "cluster-a", AuthInfo: "operator"},
+		},
+		Clusters: map[string]*clientcmdapi.Cluster{
+			"cluster-a": {Server: "https://operator:secret@example.test:6443"},
+		},
+	}
+
+	summary := summarizeContext(config, "field")
+	if summary.Server != "https://example.test:6443" || strings.Contains(summary.Server, "secret") {
+		t.Fatalf("server URL credentials were not redacted: %q", summary.Server)
+	}
+}
+
 // TestBuildNodeOverview verifies ready, pressure, and cordon counters.
 func TestBuildNodeOverview(t *testing.T) {
 	items := []unstructured.Unstructured{

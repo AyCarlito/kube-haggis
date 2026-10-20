@@ -54,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/contexts", s.handleContexts)
+	mux.HandleFunc("/api/contexts/reload", s.handleContextsReload)
 	mux.HandleFunc("/api/audit", s.handleAudit)
 	mux.HandleFunc("/api/overview", s.handleOverview)
 	mux.HandleFunc("/api/discovery", s.handleDiscovery)
@@ -85,12 +86,42 @@ func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request)
 
 // handleContexts returns kubeconfig contexts without exposing credentials.
 func (s *Server) handleContexts(writer http.ResponseWriter, request *http.Request) {
-	contexts, current, err := s.kube.Contexts()
+	snapshot, err := s.kube.Contexts()
+	payload := contextSnapshotPayload(snapshot)
 	if err != nil {
-		writeJSON(writer, http.StatusOK, map[string]interface{}{"currentContext": "", "contexts": []kube.ContextSummary{}, "error": err.Error()})
+		payload["error"] = err.Error()
+	}
+	writeJSON(writer, http.StatusOK, payload)
+}
+
+// handleContextsReload forces a kubeconfig reload without returning source contents or credentials.
+func (s *Server) handleContextsReload(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]interface{}{"currentContext": current, "contexts": contexts})
+	snapshot, err := s.kube.ReloadContexts()
+	payload := contextSnapshotPayload(snapshot)
+	if err != nil {
+		payload["error"] = err.Error()
+	}
+	writeJSON(writer, http.StatusOK, payload)
+}
+
+// contextSnapshotPayload builds the public context response from safe reload metadata.
+func contextSnapshotPayload(snapshot kube.ContextSnapshot) map[string]interface{} {
+	payload := map[string]interface{}{
+		"currentContext": snapshot.CurrentContext,
+		"contexts":       snapshot.Contexts,
+		"sourceState":    snapshot.Kubeconfig.State,
+		"revision":       snapshot.Kubeconfig.Revision,
+		"reloaded":       snapshot.Kubeconfig.Reloaded,
+	}
+	if snapshot.Kubeconfig.Error != "" {
+		payload["reloadError"] = snapshot.Kubeconfig.Error
+	}
+	return payload
 }
 
 // handleAudit returns the newest redacted local mutation entries.

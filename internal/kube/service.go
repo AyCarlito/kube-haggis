@@ -3,11 +3,15 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -190,38 +194,85 @@ type ClusterOverview struct {
 	UpdatedAt        time.Time        `json:"updatedAt"`
 }
 
+// KubeconfigReloadStatus reports safe kubeconfig source state without exposing file contents.
+type KubeconfigReloadStatus struct {
+	State    string `json:"state"`
+	Revision uint64 `json:"revision"`
+	Reloaded bool   `json:"reloaded"`
+	Error    string `json:"error,omitempty"`
+}
+
+// ContextSnapshot contains the current kubeconfig contexts and safe reload state.
+type ContextSnapshot struct {
+	Contexts       []ContextSummary
+	CurrentContext string
+	Kubeconfig     KubeconfigReloadStatus
+}
+
+// configSourceFingerprint stores metadata for every kubeconfig source in loading order.
+type configSourceFingerprint struct {
+	Files []configFileFingerprint
+}
+
+// configFileFingerprint stores non-content metadata for one kubeconfig source.
+type configFileFingerprint struct {
+	Path          string
+	State         uint8
+	Size          int64
+	ModTime       int64
+	Mode          uint32
+	TargetState   uint8
+	TargetSize    int64
+	TargetModTime int64
+	TargetMode    uint32
+}
+
+// configLoadResult describes whether the current request observed a reload attempt.
+type configLoadResult struct {
+	Reloaded bool
+	Failed   bool
+}
+
 // Service owns kubeconfig loading and creates dynamic clients for contexts.
 type Service struct {
-	rules *clientcmd.ClientConfigLoadingRules
+	kubeconfigPath  string
+	mu              sync.Mutex
+	rules           *clientcmd.ClientConfigLoadingRules
+	config          *clientcmdapi.Config
+	fingerprint     configSourceFingerprint
+	loaded          bool
+	revision        uint64
+	lastReloadError string
 }
+
+const (
+	kubeconfigStateReady   = "ready"
+	kubeconfigStateChanged = "changed"
+	kubeconfigStateError   = "error"
+	sourceFileMissing      = 1
+	sourceFilePresent      = 2
+	sourceFileUnreadable   = 3
+)
 
 // NewService creates a Kubernetes service using standard kubeconfig rules.
 func NewService(kubeconfigPath string) *Service {
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if strings.TrimSpace(kubeconfigPath) != "" {
-		rules.ExplicitPath = kubeconfigPath
-	}
-	return &Service{rules: rules}
+	return &Service{kubeconfigPath: kubeconfigPath}
 }
 
 // Contexts returns all contexts and the kubeconfig current-context value.
-func (s *Service) Contexts() ([]ContextSummary, string, error) {
-	config, err := s.loadConfig()
-	if err != nil {
-		return nil, "", err
-	}
+func (s *Service) Contexts() (ContextSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	config, result, err := s.ensureConfigLocked(false)
+	return s.contextSnapshotLocked(config, result, err), err
+}
 
-	names := make([]string, 0, len(config.Contexts))
-	for name := range config.Contexts {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	contexts := make([]ContextSummary, 0, len(names))
-	for _, name := range names {
-		contexts = append(contexts, summarizeContext(config, name))
-	}
-	return contexts, config.CurrentContext, nil
+// ReloadContexts forces a safe kubeconfig reload and returns the resulting context snapshot.
+func (s *Service) ReloadContexts() (ContextSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	config, result, err := s.ensureConfigLocked(true)
+	return s.contextSnapshotLocked(config, result, err), err
 }
 
 // Discovery returns the preferred resource definitions advertised by a cluster.
@@ -240,10 +291,12 @@ func (s *Service) Discovery(ctx context.Context, contextName string) ([]Resource
 
 // Overview gathers the data needed by the cluster landing page.
 func (s *Service) Overview(ctx context.Context, contextName string) (ClusterOverview, error) {
-	contexts, currentContext, err := s.Contexts()
+	contextSnapshot, err := s.Contexts()
 	if err != nil {
 		return ClusterOverview{}, err
 	}
+	contexts := contextSnapshot.Contexts
+	currentContext := contextSnapshot.CurrentContext
 	if strings.TrimSpace(contextName) == "" {
 		contextName = currentContext
 	}
@@ -580,31 +633,37 @@ func (s *Service) WatchEventsForResource(ctx context.Context, contextName, names
 
 // loadConfig loads the merged kubeconfig from the configured loading rules.
 func (s *Service) loadConfig() (*clientcmdapi.Config, error) {
-	config, err := s.rules.Load()
-	if err != nil {
-		return nil, fmt.Errorf("load kubeconfig: %w", err)
-	}
-	return config, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	config, _, err := s.ensureConfigLocked(false)
+	return config, err
 }
 
 // clients creates dynamic and discovery clients for one kubeconfig context.
 func (s *Service) clients(contextName string) (dynamic.Interface, discovery.DiscoveryInterface, *rest.Config, error) {
-	config, err := s.loadConfig()
+	s.mu.Lock()
+	config, _, err := s.ensureConfigLocked(false)
 	if err != nil {
+		s.mu.Unlock()
 		return nil, nil, nil, err
 	}
 	if strings.TrimSpace(contextName) == "" {
 		contextName = config.CurrentContext
 	}
 	if contextName == "" {
+		s.mu.Unlock()
 		return nil, nil, nil, fmt.Errorf("kubeconfig has no current context")
 	}
 	if _, found := config.Contexts[contextName]; !found {
+		s.mu.Unlock()
 		return nil, nil, nil, fmt.Errorf("context %q was not found", contextName)
 	}
+	configCopy := *config
+	rules := s.rules
+	s.mu.Unlock()
 
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: contextName}
-	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(s.rules, overrides)
+	clientConfig := clientcmd.NewNonInteractiveClientConfig(configCopy, contextName, overrides, rules)
 	restConfig, err := clientConfig.ClientConfig()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build client config for %q: %w", contextName, err)
@@ -620,6 +679,136 @@ func (s *Service) clients(contextName string) (dynamic.Interface, discovery.Disc
 	return dynamicClient, discoveryClient, restConfig, nil
 }
 
+// ensureConfigLocked loads a new snapshot when source metadata changes or a reload is forced.
+func (s *Service) ensureConfigLocked(force bool) (*clientcmdapi.Config, configLoadResult, error) {
+	rules := s.newLoadingRules()
+	fingerprint := fingerprintLoadingRules(rules)
+	if !force && s.loaded && s.config != nil && s.fingerprint.equal(fingerprint) {
+		return s.config, configLoadResult{}, nil
+	}
+
+	config, err := rules.Load()
+	if err != nil {
+		safeErr := safeKubeconfigError(err)
+		s.lastReloadError = safeErr.Error()
+		if s.loaded && s.config != nil {
+			return s.config, configLoadResult{Failed: true}, nil
+		}
+		return nil, configLoadResult{Failed: true}, safeErr
+	}
+
+	wasLoaded := s.loaded
+	s.rules = rules
+	s.config = config
+	s.fingerprint = fingerprint
+	s.loaded = true
+	s.revision++
+	s.lastReloadError = ""
+	return config, configLoadResult{Reloaded: wasLoaded || force}, nil
+}
+
+// newLoadingRules constructs standard client-go rules for the current explicit path or environment.
+func (s *Service) newLoadingRules() *clientcmd.ClientConfigLoadingRules {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if strings.TrimSpace(s.kubeconfigPath) != "" {
+		rules.ExplicitPath = s.kubeconfigPath
+	}
+	return rules
+}
+
+// contextSnapshotLocked converts a loaded config into a UI-safe context snapshot.
+func (s *Service) contextSnapshotLocked(config *clientcmdapi.Config, result configLoadResult, loadErr error) ContextSnapshot {
+	status := KubeconfigReloadStatus{
+		State:    kubeconfigStateReady,
+		Revision: s.revision,
+		Reloaded: result.Reloaded,
+	}
+	if result.Failed || loadErr != nil {
+		status.State = kubeconfigStateError
+		status.Error = s.lastReloadError
+	}
+	if result.Reloaded && status.State == kubeconfigStateReady {
+		status.State = kubeconfigStateChanged
+	}
+
+	snapshot := ContextSnapshot{Kubeconfig: status}
+	if config == nil {
+		return snapshot
+	}
+	names := make([]string, 0, len(config.Contexts))
+	for name := range config.Contexts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	snapshot.Contexts = make([]ContextSummary, 0, len(names))
+	for _, name := range names {
+		snapshot.Contexts = append(snapshot.Contexts, summarizeContext(config, name))
+	}
+	snapshot.CurrentContext = config.CurrentContext
+	return snapshot
+}
+
+// fingerprintLoadingRules records source metadata without reading source contents.
+func fingerprintLoadingRules(rules *clientcmd.ClientConfigLoadingRules) configSourceFingerprint {
+	paths := rules.GetLoadingPrecedence()
+	fingerprint := configSourceFingerprint{Files: make([]configFileFingerprint, 0, len(paths))}
+	for _, path := range paths {
+		fingerprint.Files = append(fingerprint.Files, fingerprintConfigFile(path))
+	}
+	return fingerprint
+}
+
+// fingerprintConfigFile records the source and resolved target metadata for one path.
+func fingerprintConfigFile(path string) configFileFingerprint {
+	fingerprint := configFileFingerprint{Path: path}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fingerprint.State = sourceFileMissing
+		} else {
+			fingerprint.State = sourceFileUnreadable
+		}
+		return fingerprint
+	}
+	fingerprint.State = sourceFilePresent
+	fingerprint.Size = info.Size()
+	fingerprint.ModTime = info.ModTime().UnixNano()
+	fingerprint.Mode = uint32(info.Mode())
+
+	target, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fingerprint.TargetState = sourceFileMissing
+		} else {
+			fingerprint.TargetState = sourceFileUnreadable
+		}
+		return fingerprint
+	}
+	fingerprint.TargetState = sourceFilePresent
+	fingerprint.TargetSize = target.Size()
+	fingerprint.TargetModTime = target.ModTime().UnixNano()
+	fingerprint.TargetMode = uint32(target.Mode())
+	return fingerprint
+}
+
+// equal reports whether two source fingerprints contain identical metadata and ordering.
+func (fingerprint configSourceFingerprint) equal(other configSourceFingerprint) bool {
+	if len(fingerprint.Files) != len(other.Files) {
+		return false
+	}
+	for index := range fingerprint.Files {
+		if fingerprint.Files[index] != other.Files[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// safeKubeconfigError prevents source paths and file contents from reaching the browser.
+func safeKubeconfigError(error) error {
+	return errors.New("load kubeconfig: configured source files could not be read or parsed")
+}
+
 // summarizeContext converts raw kubeconfig data into a UI-safe context summary.
 func summarizeContext(config *clientcmdapi.Config, name string) ContextSummary {
 	contextEntry := config.Contexts[name]
@@ -629,7 +818,7 @@ func summarizeContext(config *clientcmdapi.Config, name string) ContextSummary {
 	cluster := config.Clusters[contextEntry.Cluster]
 	server := ""
 	if cluster != nil {
-		server = cluster.Server
+		server = safeServerAddress(cluster.Server)
 	}
 	return ContextSummary{
 		Name:      name,
@@ -638,6 +827,16 @@ func summarizeContext(config *clientcmdapi.Config, name string) ContextSummary {
 		Server:    server,
 		IsCurrent: config.CurrentContext == name,
 	}
+}
+
+// safeServerAddress removes optional URL user information from a context summary.
+func safeServerAddress(address string) string {
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.User == nil {
+		return address
+	}
+	parsed.User = nil
+	return parsed.String()
 }
 
 // findContext finds a context summary by kubeconfig context name.

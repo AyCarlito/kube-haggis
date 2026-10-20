@@ -41,6 +41,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - PVC resize and VolumeSnapshot workflows with StorageClass/API capability states, dry-run review, and explicit confirmation.
 - High-friction single and bulk delete workflows with resource-version preconditions, server-side dry-run review, exact confirmations, per-item results, and redacted audit outcomes.
 - Schema-generated forms for supported structural CRDs with bounded validation and YAML fallback for unsupported schemas.
+- Kubeconfig reload controls and metadata-only file-change detection with last-good-state retention and safe context refresh.
 - Local-only visual identity using the provided `haggis.svg` asset.
 
 ### Partially Implemented
@@ -54,7 +55,6 @@ The repository currently contains the first usable vertical slice. The backend a
 
 ### Remaining First-Release Work
 
-- Kubeconfig reload controls and file-change handling.
 - UI for local mutation history.
 - Fake-cluster and handler tests covering discovery, watches, mutations, and permission failures.
 

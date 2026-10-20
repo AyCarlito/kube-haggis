@@ -44,6 +44,11 @@ export function fetchContexts(): Promise<ContextsResponse> {
   return fetchJson<ContextsResponse>('/api/contexts')
 }
 
+/** Forces the backend to reload kubeconfig sources without exposing their contents. */
+export function reloadContexts(): Promise<ContextsResponse> {
+  return fetchJson<ContextsResponse>('/api/contexts/reload', { method: 'POST' })
+}
+
 /** Loads the cluster overview for a kubeconfig context. */
 export function fetchOverview(context: string): Promise<ClusterOverview> {
   return fetchJson<ClusterOverview>(apiUrl('/api/overview', { context }))
