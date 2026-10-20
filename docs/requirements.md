@@ -34,6 +34,7 @@ The repository currently contains the first usable vertical slice. The backend a
 - Native interactive Pod `exec` and `attach` sessions available in read-only mode with TTY input, resize handling, container selection, and Kubernetes RBAC authorization.
 - Native Pod port-forward sessions with loopback binding, target/local port controls, session lifecycle, and Kubernetes RBAC authorization.
 - Ephemeral debug-container launch through `pods/ephemeralcontainers` and bounded native file download/upload through `pods/exec`.
+- Native `metrics.k8s.io/v1beta1` collection with node and Pod CPU/memory usage summaries, freshness states, and responsive overview charts.
 - Local-only visual identity using the provided `haggis.svg` asset.
 
 ### Partially Implemented
@@ -43,12 +44,10 @@ The repository currently contains the first usable vertical slice. The backend a
 - Event detail pages omit the Events tab because Events are not expected to have child Events.
 - CRDs support discovery, generic CRUD, and YAML editing. Schema-generated CRD forms are not implemented yet.
 - Client-side apply currently uses full-object Kubernetes updates rather than a three-way `kubectl apply` merge. Resource-version conflicts reach the UI as errors, but there is no dedicated conflict-resolution workflow yet.
-- The overview detects whether `metrics.k8s.io` is available, but it does not yet fetch or chart live usage.
 - Mutation history is persisted and exposed by the backend API, but it does not yet have a dedicated history view in the UI.
 
 ### Remaining First-Release Work
 
-- Metrics API collection and CPU/memory charts.
 - Related-resource relationship views beyond standard `metadata.ownerReferences`.
 - Targeted workload forms and actions for scale, restart, pause/resume, rollback, image changes, and job scheduling.
 - Node cordon, uncordon, drain, and taint workflows.

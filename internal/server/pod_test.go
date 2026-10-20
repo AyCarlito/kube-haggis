@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -89,6 +91,54 @@ func TestWriteErrorClassifiesUnsupportedSubresource(t *testing.T) {
 	writeError(response, errString("ephemeral debug containers are not supported by this Kubernetes API server"))
 	if response.Code != http.StatusNotImplemented {
 		t.Fatalf("unsupported subresource status: %d", response.Code)
+	}
+}
+
+// TestHandleOverviewReturnsMetricsPayload verifies metrics remain on the read-only overview API.
+func TestHandleOverviewReturnsMetricsPayload(t *testing.T) {
+	server := &Server{
+		overview: func(context.Context, string) (kube.ClusterOverview, error) {
+			return kube.ClusterOverview{
+				MetricsAvailable: true,
+				Metrics: kube.MetricsOverview{
+					State:     "available",
+					NodeState: "available",
+					PodState:  "available",
+					Nodes:     []kube.NodeMetric{{Name: "worker-a", Usage: kube.MetricUsage{CPUCores: 0.5, MemoryBytes: 1024}}},
+					Pods:      []kube.PodMetric{{Name: "api", Namespace: "default", Usage: kube.MetricUsage{CPUCores: 0.25, MemoryBytes: 512}}},
+				},
+			}, nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/overview?context=field", nil)
+	response := httptest.NewRecorder()
+
+	server.handleOverview(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("overview request failed: %d %s", response.Code, response.Body.String())
+	}
+	var payload kube.ClusterOverview
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode overview response: %v", err)
+	}
+	if !payload.MetricsAvailable || payload.Metrics.State != "available" || len(payload.Metrics.Nodes) != 1 || len(payload.Metrics.Pods) != 1 {
+		t.Fatalf("metrics payload was not returned: %+v", payload)
+	}
+}
+
+// TestHandleOverviewReturnsBackendError verifies overview collection errors use the standard API response.
+func TestHandleOverviewReturnsBackendError(t *testing.T) {
+	server := &Server{overview: func(context.Context, string) (kube.ClusterOverview, error) {
+		return kube.ClusterOverview{}, errString("metrics collection transport failed")
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	response := httptest.NewRecorder()
+
+	server.handleOverview(response, request)
+
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "metrics collection transport failed") {
+		t.Fatalf("expected backend error, got %d %s", response.Code, response.Body.String())
 	}
 }
 

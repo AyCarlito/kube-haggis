@@ -67,6 +67,10 @@ import type {
   ResourceSummary,
   RouteState,
   TerminalMessage,
+  MetricsOverview,
+  MetricsState,
+  NodeMetric,
+  PodMetric,
 } from './types'
 
 const commonDefinitions: ResourceDefinition[] = [
@@ -338,7 +342,7 @@ function OverviewPage({ context, contexts, activeContext }: { context: string; c
   if (contexts.error || contexts.contexts.length === 0) {
     return <SetupState error={contexts?.error} />
   }
-  if (loading && !overview) return <LoadingState label="Reading cluster signal" />
+  if (loading && !overview) return <LoadingState label="Reading cluster signal and native metrics" />
   if (error && !overview) return <ConnectionState context={activeContext} error={error} />
   if (!overview) return <EmptyState title="No cluster selected" detail="Choose a context above to open its overview." />
 
@@ -374,15 +378,17 @@ function OverviewPage({ context, contexts, activeContext }: { context: string; c
           {overview.warnings.length ? <WarningList warnings={overview.warnings} /> : <QuietState icon={<ShieldCheck size={22} />} title="Nothing shouting" detail="No recent Warning Events were reported." />}
         </div>
         <div className="panel posture-panel">
-          <PanelHeading eyebrow="Cluster posture" title="Capacity & coverage" action={overview.metricsAvailable ? 'Metrics online' : 'Metrics unavailable'} tone={overview.metricsAvailable ? 'good' : 'neutral'} />
+          <PanelHeading eyebrow="Cluster posture" title="Capacity & coverage" action={metricsStateLabel(overview.metricsAvailable, overview.metrics.state)} tone={metricsStateTone(overview.metricsAvailable, overview.metrics.state)} />
           <div className="posture-stack">
             <PostureRow icon={<Layers3 size={16} />} label="Namespaces" value={String(overview.namespaces)} note="scoped workspaces" />
             <PostureRow icon={<Activity size={16} />} label="Restarts" value={String(overview.pods.restarting)} note="Pods with restarts" tone={overview.pods.restarting ? 'warning' : 'good'} />
             <PostureRow icon={<HardDrive size={16} />} label="Bound claims" value={String(overview.storage.bound)} note="PersistentVolumeClaims" />
           </div>
-          <div className="panel-note"><Gauge size={14} /> Usage charts will appear when metrics.k8s.io is available.</div>
+          <div className="panel-note"><Gauge size={14} /> Native usage stays read-only and follows Kubernetes RBAC.</div>
         </div>
       </section>
+
+      <MetricsPanel metrics={overview.metrics} metricsAvailable={overview.metricsAvailable} loading={loading} />
 
       <section className="dashboard-footer-line">
         <span><RefreshCw size={13} /> Refreshed {relativeTime(overview.updatedAt)}</span>
@@ -391,6 +397,179 @@ function OverviewPage({ context, contexts, activeContext }: { context: string; c
       </section>
     </div>
   )
+}
+
+/** Renders native node and Pod usage charts with explicit source states. */
+function MetricsPanel({ metrics, metricsAvailable, loading }: { metrics: MetricsOverview; metricsAvailable: boolean; loading: boolean }) {
+  const hasNodeSamples = metrics.nodes.length > 0
+  const hasPodSamples = metrics.pods.length > 0
+  const hasSamples = hasNodeSamples || hasPodSamples
+  const displayState: MetricsDisplayState = loading && !hasSamples ? 'loading' : metrics.state
+
+  return (
+    <section className="metrics-panel panel">
+      <div className="metrics-panel-heading">
+        <div>
+          <span className="panel-eyebrow">Native telemetry / metrics.k8s.io</span>
+          <h2>CPU &amp; memory field read</h2>
+          <p>Usage is sampled from the Kubernetes Metrics API. Nodes show capacity percentages; Pod rows combine all containers.</p>
+        </div>
+        <span className={`panel-action panel-action-${metricsStateTone(metricsAvailable, displayState)}`}><span />{metricsStateLabel(metricsAvailable, displayState)}</span>
+      </div>
+      {loading && hasSamples && <div className="metrics-refresh-strip"><LoaderCircle size={14} className="spin" /> Refreshing native metrics; the last sample remains visible.</div>}
+      {!hasSamples ? <MetricStateNotice state={displayState} message={displayState === 'loading' ? undefined : metrics.message} /> : null}
+      {hasSamples ? (
+        <div className="metrics-chart-grid">
+          <NodeUsageChart state={metrics.nodeState} message={metrics.nodeMessage} count={metrics.nodeCount} items={metrics.nodes} />
+          <PodUsageChart state={metrics.podState} message={metrics.podMessage} count={metrics.podCount} items={metrics.pods} />
+        </div>
+      ) : null}
+      {hasMetricTimestamp(metrics.updatedAt) && <div className="metrics-panel-footer"><span><Activity size={13} /> Latest sample {relativeTime(metrics.updatedAt)}</span><span>{metrics.message || 'Native metrics are read through the local Go backend.'}</span></div>}
+    </section>
+  )
+}
+
+/** Identifies the additional loading state used while the overview is being refreshed. */
+type MetricsDisplayState = MetricsState | 'loading'
+
+/** Renders a node usage chart with CPU and memory capacity bars. */
+function NodeUsageChart({ state, message, count, items }: { state: MetricsState; message?: string; count: number; items: NodeMetric[] }) {
+  const maxCpu = Math.max(...items.map((item) => item.usage.cpuCores), 0)
+  const maxMemory = Math.max(...items.map((item) => item.usage.memoryBytes), 0)
+  const showNotice = state !== 'available' && state !== 'stale'
+  return (
+    <article className="metrics-chart">
+      <div className="metrics-chart-heading">
+        <div className="metrics-chart-title"><span className="metrics-chart-icon metrics-chart-icon-copper"><Gauge size={16} /></span><div><h3>Nodes</h3><span>{count} samples / top {items.length}</span></div></div>
+        <span className={`metrics-source-chip metrics-source-${state}`}>{metricsSourceLabel(state)}</span>
+      </div>
+      {showNotice || !items.length ? <MetricStateNotice state={state} message={message} compact /> : null}
+      {state === 'stale' && items.length ? <div className="metrics-stale-note"><AlertTriangle size={14} />{message || 'Node samples may be stale.'}</div> : null}
+      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <NodeUsageRow key={item.name} item={item} maxCpu={maxCpu} maxMemory={maxMemory} />)}</div> : null}
+    </article>
+  )
+}
+
+/** Renders a Pod usage chart with relative CPU and memory bars. */
+function PodUsageChart({ state, message, count, items }: { state: MetricsState; message?: string; count: number; items: PodMetric[] }) {
+  const maxCpu = Math.max(...items.map((item) => item.usage.cpuCores), 0)
+  const maxMemory = Math.max(...items.map((item) => item.usage.memoryBytes), 0)
+  const showNotice = state !== 'available' && state !== 'stale'
+  return (
+    <article className="metrics-chart">
+      <div className="metrics-chart-heading">
+        <div className="metrics-chart-title"><span className="metrics-chart-icon metrics-chart-icon-moss"><CircleDot size={16} /></span><div><h3>Pods</h3><span>{count} samples / top {items.length} by CPU</span></div></div>
+        <span className={`metrics-source-chip metrics-source-${state}`}>{metricsSourceLabel(state)}</span>
+      </div>
+      {showNotice || !items.length ? <MetricStateNotice state={state} message={message} compact /> : null}
+      {state === 'stale' && items.length ? <div className="metrics-stale-note"><AlertTriangle size={14} />{message || 'Pod samples may be stale.'}</div> : null}
+      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <PodUsageRow key={`${item.namespace}/${item.name}`} item={item} maxCpu={maxCpu} maxMemory={maxMemory} />)}</div> : null}
+    </article>
+  )
+}
+
+/** Renders one node's CPU and memory utilization bars. */
+function NodeUsageRow({ item, maxCpu, maxMemory }: { item: NodeMetric; maxCpu: number; maxMemory: number }) {
+  const cpuWidth = usageBarWidth(item.cpuPercent, item.usage.cpuCores, maxCpu)
+  const memoryWidth = usageBarWidth(item.memoryPercent, item.usage.memoryBytes, maxMemory)
+  return <div className="metrics-row"><div className="metrics-row-label"><strong>{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={cpuWidth} value={item.cpuPercent > 0 ? `${formatMetricPercent(item.cpuPercent)}` : formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={memoryWidth} value={item.memoryPercent > 0 ? `${formatMetricPercent(item.memoryPercent)}` : formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></div>
+}
+
+/** Renders one Pod's aggregated CPU and memory bars. */
+function PodUsageRow({ item, maxCpu, maxMemory }: { item: PodMetric; maxCpu: number; maxMemory: number }) {
+  const namespace = item.namespace ? `${item.namespace}/` : ''
+  return <div className="metrics-row"><div className="metrics-row-label"><strong>{namespace}{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={usageBarWidth(0, item.usage.cpuCores, maxCpu)} value={formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={usageBarWidth(0, item.usage.memoryBytes, maxMemory)} value={formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></div>
+}
+
+/** Renders one labeled usage bar shared by node and Pod rows. */
+function MetricBar({ label, width, value, tone }: { label: string; width: number; value: string; tone: 'copper' | 'moss' }) {
+  return <div className="metric-bar-line"><span className="metric-bar-label">{label}</span><span className={`metric-bar-track metric-bar-track-${tone}`}><span style={{ width: `${width}%` }} /></span><code>{value}</code></div>
+}
+
+/** Renders an unavailable, loading, empty, denied, stale, or error metrics notice. */
+function MetricStateNotice({ state, message, compact = false }: { state: MetricsDisplayState; message?: string; compact?: boolean }) {
+  const icon = state === 'loading' ? <LoaderCircle size={17} className="spin" /> : state === 'permission-denied' ? <LockKeyhole size={17} /> : state === 'error' || state === 'stale' ? <AlertTriangle size={17} /> : state === 'empty' ? <Box size={17} /> : <Gauge size={17} />
+  return <div className={`metric-state-notice metric-state-${state} ${compact ? 'metric-state-notice-compact' : ''}`}><span className="metric-state-icon">{icon}</span><div><strong>{metricStateTitle(state)}</strong><span>{message || metricStateFallback(state)}</span></div></div>
+}
+
+/** Returns the dashboard label for an overall metrics state. */
+function metricsStateLabel(metricsAvailable: boolean, state: MetricsDisplayState): string {
+  if (state === 'loading') return 'Collecting metrics'
+  if (state === 'permission-denied') return 'Metrics access denied'
+  if (state === 'error') return 'Metrics read failed'
+  if (state === 'stale') return 'Metrics stale'
+  if (state === 'empty') return 'No samples yet'
+  if (!metricsAvailable || state === 'unavailable') return 'Metrics-server absent'
+  return 'Metrics online'
+}
+
+/** Returns the panel heading tone for an overall metrics state. */
+function metricsStateTone(metricsAvailable: boolean, state: MetricsDisplayState): 'good' | 'warning' | 'neutral' {
+  if (state === 'available' && metricsAvailable) return 'good'
+  if (state === 'unavailable' || state === 'empty') return 'neutral'
+  return 'warning'
+}
+
+/** Returns the compact source label shown beside one metrics chart. */
+function metricsSourceLabel(state: MetricsState): string {
+  if (state === 'permission-denied') return 'RBAC denied'
+  if (state === 'unavailable') return 'Not exposed'
+  if (state === 'empty') return 'No samples'
+  if (state === 'error') return 'Read error'
+  if (state === 'stale') return 'Stale sample'
+  return 'Native API'
+}
+
+/** Returns the human-facing title for an explicit metrics state. */
+function metricStateTitle(state: MetricsDisplayState): string {
+  if (state === 'loading') return 'Collecting native usage'
+  if (state === 'permission-denied') return 'Metrics access is denied'
+  if (state === 'unavailable') return 'Metrics-server is not available'
+  if (state === 'empty') return 'No usage samples yet'
+  if (state === 'error') return 'Metrics could not be read'
+  if (state === 'stale') return 'Usage sample is stale'
+  return 'Native usage is ready'
+}
+
+/** Returns a useful fallback explanation when the backend has no message. */
+function metricStateFallback(state: MetricsDisplayState): string {
+  if (state === 'loading') return 'Reading node and Pod usage from metrics.k8s.io.'
+  if (state === 'permission-denied') return 'Kubernetes RBAC does not allow this identity to list metrics.k8s.io resources.'
+  if (state === 'unavailable') return 'Install or register metrics-server to expose metrics.k8s.io/v1beta1.'
+  if (state === 'empty') return 'The Metrics API answered, but it returned no node or Pod samples.'
+  if (state === 'error') return 'The native Metrics API returned an error; the rest of the overview is still available.'
+  if (state === 'stale') return 'The latest sample is older than the dashboard freshness window.'
+  return 'Usage is available through the native Kubernetes Metrics API.'
+}
+
+/** Calculates a bounded bar width using capacity percentages or visible-row scaling. */
+function usageBarWidth(capacityPercent: number, value: number, maximum: number): number {
+  if (capacityPercent > 0) return Math.min(100, Math.max(0, capacityPercent))
+  if (maximum <= 0) return 0
+  return Math.min(100, Math.max(0, value / maximum * 100))
+}
+
+/** Formats a normalized CPU value for a dense operator row. */
+function formatMetricCPU(cores: number): string {
+  if (cores < 1) return `${Math.round(cores * 1000)}m`
+  return `${cores.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')} cores`
+}
+
+/** Formats a normalized memory value using binary Kubernetes units. */
+function formatMetricMemory(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KiB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '')} MiB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1).replace(/\.0$/, '')} GiB`
+}
+
+/** Formats a utilization percentage without noisy decimal places. */
+function formatMetricPercent(value: number): string {
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, '')}%`
+}
+
+/** Returns true when a metrics timestamp represents a real sample rather than a zero Go time. */
+function hasMetricTimestamp(value?: string): value is string {
+  return Boolean(value && !value.startsWith('0001-01-01'))
 }
 
 /** Renders a reusable numeric health card. */

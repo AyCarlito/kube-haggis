@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,10 +21,11 @@ import (
 
 // Server connects HTTP handlers to the Kubernetes service and frontend files.
 type Server struct {
-	kube   *kube.Service
-	webDir string
-	logger *slog.Logger
-	audit  *audit.Store
+	kube     *kube.Service
+	webDir   string
+	logger   *slog.Logger
+	audit    *audit.Store
+	overview func(context.Context, string) (kube.ClusterOverview, error)
 }
 
 // New creates an HTTP server for the KubeHaggis API.
@@ -81,7 +83,11 @@ func (s *Server) handleAudit(writer http.ResponseWriter, request *http.Request) 
 // handleOverview returns the aggregate model for one cluster context.
 func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Request) {
 	contextName := request.URL.Query().Get("context")
-	overview, err := s.kube.Overview(request.Context(), contextName)
+	loadOverview := s.overview
+	if loadOverview == nil {
+		loadOverview = s.kube.Overview
+	}
+	overview, err := loadOverview(request.Context(), contextName)
 	if err != nil {
 		writeError(writer, err)
 		return

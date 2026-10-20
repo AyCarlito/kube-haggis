@@ -12,6 +12,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
@@ -26,6 +27,18 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/yaml"
+)
+
+const (
+	metricsGroupVersion          = "metrics.k8s.io/v1beta1"
+	metricsStaleAfter            = 5 * time.Minute
+	metricsDisplayLimit          = 8
+	metricsStateAvailable        = "available"
+	metricsStateUnavailable      = "unavailable"
+	metricsStateEmpty            = "empty"
+	metricsStatePermissionDenied = "permission-denied"
+	metricsStateError            = "error"
+	metricsStateStale            = "stale"
 )
 
 // ContextSummary describes a kubeconfig context in a form suitable for the UI.
@@ -111,6 +124,44 @@ type StorageOverview struct {
 	Lost    int `json:"lost"`
 }
 
+// MetricUsage contains normalized CPU cores and memory bytes from metrics.k8s.io.
+type MetricUsage struct {
+	CPUCores    float64 `json:"cpuCores"`
+	MemoryBytes int64   `json:"memoryBytes"`
+}
+
+// NodeMetric contains one node's native usage and capacity utilization.
+type NodeMetric struct {
+	Name          string      `json:"name"`
+	Usage         MetricUsage `json:"usage"`
+	CPUPercent    float64     `json:"cpuPercent"`
+	MemoryPercent float64     `json:"memoryPercent"`
+}
+
+// PodMetric contains one Pod's usage after aggregating all of its containers.
+type PodMetric struct {
+	Name      string      `json:"name"`
+	Namespace string      `json:"namespace,omitempty"`
+	Usage     MetricUsage `json:"usage"`
+}
+
+// MetricsOverview contains native node and Pod usage plus explicit source states.
+type MetricsOverview struct {
+	State         string       `json:"state"`
+	Message       string       `json:"message,omitempty"`
+	UpdatedAt     *time.Time   `json:"updatedAt,omitempty"`
+	NodeState     string       `json:"nodeState"`
+	NodeMessage   string       `json:"nodeMessage,omitempty"`
+	NodeUpdatedAt *time.Time   `json:"nodeUpdatedAt,omitempty"`
+	NodeCount     int          `json:"nodeCount"`
+	Nodes         []NodeMetric `json:"nodes"`
+	PodState      string       `json:"podState"`
+	PodMessage    string       `json:"podMessage,omitempty"`
+	PodUpdatedAt  *time.Time   `json:"podUpdatedAt,omitempty"`
+	PodCount      int          `json:"podCount"`
+	Pods          []PodMetric  `json:"pods"`
+}
+
 // EventSummary contains the useful, compact portion of a Kubernetes Event.
 type EventSummary struct {
 	Type      string    `json:"type"`
@@ -134,6 +185,7 @@ type ClusterOverview struct {
 	Storage          StorageOverview  `json:"storage"`
 	Warnings         []EventSummary   `json:"warnings"`
 	MetricsAvailable bool             `json:"metricsAvailable"`
+	Metrics          MetricsOverview  `json:"metrics"`
 	UpdatedAt        time.Time        `json:"updatedAt"`
 }
 
@@ -272,8 +324,28 @@ func (s *Service) Overview(ctx context.Context, contextName string) (ClusterOver
 	}
 
 	metricsAvailable := false
-	if _, metricsErr := discoveryClient.ServerResourcesForGroupVersion("metrics.k8s.io/v1beta1"); metricsErr == nil {
+	metrics := unavailableMetricsOverview("metrics-server is not installed or metrics.k8s.io is not registered with this cluster.")
+	if _, metricsErr := discoveryClient.ServerResourcesForGroupVersion(metricsGroupVersion); metricsErr == nil {
 		metricsAvailable = true
+		metrics = collectMetrics(ctx, dynamicClient, nodes.Items, time.Now().UTC())
+	} else if apierrors.IsForbidden(metricsErr) {
+		message := "Kubernetes RBAC denied discovery of metrics.k8s.io."
+		metrics = unavailableMetricsOverview(message)
+		metrics.State = metricsStatePermissionDenied
+		metrics.Message = message
+		metrics.NodeState = metricsStatePermissionDenied
+		metrics.NodeMessage = message
+		metrics.PodState = metricsStatePermissionDenied
+		metrics.PodMessage = message
+	} else if !apierrors.IsNotFound(metricsErr) {
+		message := fmt.Sprintf("Could not discover metrics.k8s.io: %v", metricsErr)
+		metrics = unavailableMetricsOverview(message)
+		metrics.State = metricsStateError
+		metrics.Message = message
+		metrics.NodeState = metricsStateError
+		metrics.NodeMessage = message
+		metrics.PodState = metricsStateError
+		metrics.PodMessage = message
 	}
 
 	return ClusterOverview{
@@ -285,6 +357,7 @@ func (s *Service) Overview(ctx context.Context, contextName string) (ClusterOver
 		Storage:          buildStorageOverview(claims.Items),
 		Warnings:         buildWarningEvents(events.Items),
 		MetricsAvailable: metricsAvailable,
+		Metrics:          metrics,
 		UpdatedAt:        time.Now().UTC(),
 	}, nil
 }
@@ -659,6 +732,351 @@ func resourceInterface(client dynamic.Interface, gvr schema.GroupVersionResource
 		return client.Resource(gvr).Namespace(namespace), nil
 	}
 	return client.Resource(gvr), nil
+}
+
+// metricsSourceResult contains one metrics.k8s.io collection result before it is added to the overview.
+type metricsSourceResult struct {
+	state     string
+	message   string
+	updatedAt time.Time
+	count     int
+	nodeItems []NodeMetric
+	podItems  []PodMetric
+}
+
+// metricsGVR builds a GroupVersionResource for a metrics.k8s.io resource.
+func metricsGVR(resource string) schema.GroupVersionResource {
+	return schema.GroupVersionResource{Group: "metrics.k8s.io", Version: "v1beta1", Resource: resource}
+}
+
+// unavailableMetricsOverview creates a consistent response when metrics-server is absent.
+func unavailableMetricsOverview(message string) MetricsOverview {
+	return MetricsOverview{
+		State:       metricsStateUnavailable,
+		Message:     message,
+		NodeState:   metricsStateUnavailable,
+		NodeMessage: message,
+		Nodes:       []NodeMetric{},
+		PodState:    metricsStateUnavailable,
+		PodMessage:  message,
+		Pods:        []PodMetric{},
+	}
+}
+
+// collectMetrics reads native node and Pod metrics through the existing dynamic client.
+func collectMetrics(ctx context.Context, client dynamic.Interface, nodes []unstructured.Unstructured, now time.Time) MetricsOverview {
+	nodeResult := collectNodeMetrics(ctx, client, nodes, now)
+	podResult := collectPodMetrics(ctx, client, now)
+	state, message := summarizeMetricsState(nodeResult, podResult)
+	nodeItems := nodeResult.nodeItems
+	if nodeItems == nil {
+		nodeItems = []NodeMetric{}
+	}
+	podItems := podResult.podItems
+	if podItems == nil {
+		podItems = []PodMetric{}
+	}
+	updatedAt := nodeResult.updatedAt
+	if podResult.updatedAt.After(updatedAt) {
+		updatedAt = podResult.updatedAt
+	}
+	return MetricsOverview{
+		State:         state,
+		Message:       message,
+		UpdatedAt:     metricTimePointer(updatedAt),
+		NodeState:     nodeResult.state,
+		NodeMessage:   nodeResult.message,
+		NodeUpdatedAt: metricTimePointer(nodeResult.updatedAt),
+		NodeCount:     nodeResult.count,
+		Nodes:         nodeItems,
+		PodState:      podResult.state,
+		PodMessage:    podResult.message,
+		PodUpdatedAt:  metricTimePointer(podResult.updatedAt),
+		PodCount:      podResult.count,
+		Pods:          podItems,
+	}
+}
+
+// metricTimePointer omits zero timestamps from metrics API responses.
+func metricTimePointer(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
+}
+
+// collectNodeMetrics reads and normalizes the node metrics collection.
+func collectNodeMetrics(ctx context.Context, client dynamic.Interface, nodes []unstructured.Unstructured, now time.Time) metricsSourceResult {
+	items, err := client.Resource(metricsGVR("nodes")).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return metricsSourceError(err, "node")
+	}
+	parsed, updatedAt, err := parseNodeMetrics(items.Items, nodeCapacities(nodes))
+	if err != nil {
+		return metricsSourceResult{state: metricsStateError, message: err.Error()}
+	}
+	state, message := metricSampleState(len(parsed), updatedAt, now, "node")
+	return metricsSourceResult{
+		state:     state,
+		message:   message,
+		updatedAt: updatedAt,
+		count:     len(parsed),
+		nodeItems: topNodeMetrics(parsed),
+	}
+}
+
+// collectPodMetrics reads and aggregates the Pod metrics collection.
+func collectPodMetrics(ctx context.Context, client dynamic.Interface, now time.Time) metricsSourceResult {
+	items, err := client.Resource(metricsGVR("pods")).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return metricsSourceError(err, "Pod")
+	}
+	parsed, updatedAt, err := parsePodMetrics(items.Items)
+	if err != nil {
+		return metricsSourceResult{state: metricsStateError, message: err.Error()}
+	}
+	state, message := metricSampleState(len(parsed), updatedAt, now, "Pod")
+	return metricsSourceResult{
+		state:     state,
+		message:   message,
+		updatedAt: updatedAt,
+		count:     len(parsed),
+		podItems:  topPodMetrics(parsed),
+	}
+}
+
+// metricsSourceError classifies a metrics collection error without failing the whole overview.
+func metricsSourceError(err error, resourceName string) metricsSourceResult {
+	state := metricsStateError
+	message := fmt.Sprintf("Could not read %s metrics from metrics.k8s.io: %v", resourceName, err)
+	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+		state = metricsStatePermissionDenied
+		message = fmt.Sprintf("Kubernetes RBAC denied access to %s metrics.", resourceName)
+	} else if apierrors.IsNotFound(err) {
+		state = metricsStateUnavailable
+		message = fmt.Sprintf("metrics.k8s.io does not expose %s metrics on this cluster.", resourceName)
+	}
+	return metricsSourceResult{state: state, message: message}
+}
+
+// summarizeMetricsState derives an overall state while preserving per-source failures.
+func summarizeMetricsState(nodes, pods metricsSourceResult) (string, string) {
+	if nodes.count > 0 || pods.count > 0 {
+		if nodes.state == metricsStateStale || pods.state == metricsStateStale {
+			return metricsStateStale, "At least one native metrics source returned a stale sample."
+		}
+		if nodes.state == metricsStateError || nodes.state == metricsStatePermissionDenied || pods.state == metricsStateError || pods.state == metricsStatePermissionDenied {
+			return metricsStateAvailable, "Some metrics sources could not be read; each chart reports its own state."
+		}
+		return metricsStateAvailable, "Native usage collected from metrics.k8s.io."
+	}
+	if nodes.state == metricsStatePermissionDenied && pods.state == metricsStatePermissionDenied {
+		return metricsStatePermissionDenied, "Kubernetes RBAC denied access to node and Pod metrics."
+	}
+	if nodes.state == metricsStateError || pods.state == metricsStateError {
+		return metricsStateError, "metrics.k8s.io responded, but usage could not be read."
+	}
+	if nodes.state == metricsStateUnavailable || pods.state == metricsStateUnavailable {
+		return metricsStateUnavailable, "metrics.k8s.io does not expose the usage resources required by this overview."
+	}
+	return metricsStateEmpty, "metrics.k8s.io is available, but it returned no usage samples."
+}
+
+// metricSampleState classifies a successful metrics collection by freshness and size.
+func metricSampleState(count int, updatedAt, now time.Time, resourceName string) (string, string) {
+	if count == 0 {
+		return metricsStateEmpty, fmt.Sprintf("No %s usage samples were returned by metrics.k8s.io.", resourceName)
+	}
+	if updatedAt.IsZero() {
+		return metricsStateError, fmt.Sprintf("The %s metrics response did not include a sample timestamp.", resourceName)
+	}
+	if now.After(updatedAt.Add(metricsStaleAfter)) {
+		return metricsStateStale, fmt.Sprintf("The latest %s sample is %s old; values may be stale.", resourceName, now.Sub(updatedAt).Round(time.Second))
+	}
+	return metricsStateAvailable, fmt.Sprintf("Current %s usage from metrics.k8s.io.", resourceName)
+}
+
+// parseNodeMetrics converts metrics.k8s.io node objects into chart-ready values.
+func parseNodeMetrics(items []unstructured.Unstructured, capacities map[string]MetricUsage) ([]NodeMetric, time.Time, error) {
+	metrics := make([]NodeMetric, 0, len(items))
+	var updatedAt time.Time
+	for index := range items {
+		item := &items[index]
+		if item.GetName() == "" {
+			return nil, time.Time{}, fmt.Errorf("node metrics item %d has no name", index)
+		}
+		usage, err := parseMetricUsage(item.Object, fmt.Sprintf("node %q", item.GetName()))
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		timestamp, err := parseMetricTimestamp(item.Object, fmt.Sprintf("node %q", item.GetName()))
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		capacity := capacities[item.GetName()]
+		metrics = append(metrics, NodeMetric{
+			Name:          item.GetName(),
+			Usage:         usage,
+			CPUPercent:    metricUtilization(usage.CPUCores, capacity.CPUCores),
+			MemoryPercent: metricUtilization(float64(usage.MemoryBytes), float64(capacity.MemoryBytes)),
+		})
+		if timestamp.After(updatedAt) {
+			updatedAt = timestamp
+		}
+	}
+	return metrics, updatedAt, nil
+}
+
+// parsePodMetrics converts Pod metrics into one aggregate usage value per Pod.
+func parsePodMetrics(items []unstructured.Unstructured) ([]PodMetric, time.Time, error) {
+	metrics := make([]PodMetric, 0, len(items))
+	var updatedAt time.Time
+	for index := range items {
+		item := &items[index]
+		if item.GetName() == "" {
+			return nil, time.Time{}, fmt.Errorf("Pod metrics item %d has no name", index)
+		}
+		containers, found, err := unstructured.NestedSlice(item.Object, "containers")
+		if err != nil {
+			return nil, time.Time{}, fmt.Errorf("read containers for Pod %q: %w", item.GetName(), err)
+		}
+		if !found {
+			return nil, time.Time{}, fmt.Errorf("Pod %q metrics has no containers", item.GetName())
+		}
+		usage := MetricUsage{}
+		for containerIndex, rawContainer := range containers {
+			container, ok := rawContainer.(map[string]interface{})
+			if !ok {
+				return nil, time.Time{}, fmt.Errorf("Pod %q container %d is malformed", item.GetName(), containerIndex)
+			}
+			containerUsage, usageErr := parseMetricUsage(container, fmt.Sprintf("Pod %q container %d", item.GetName(), containerIndex))
+			if usageErr != nil {
+				return nil, time.Time{}, usageErr
+			}
+			usage.CPUCores += containerUsage.CPUCores
+			usage.MemoryBytes += containerUsage.MemoryBytes
+		}
+		timestamp, err := parseMetricTimestamp(item.Object, fmt.Sprintf("Pod %q", item.GetName()))
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		metrics = append(metrics, PodMetric{Name: item.GetName(), Namespace: item.GetNamespace(), Usage: usage})
+		if timestamp.After(updatedAt) {
+			updatedAt = timestamp
+		}
+	}
+	return metrics, updatedAt, nil
+}
+
+// parseMetricUsage reads CPU and memory quantities from a metrics object.
+func parseMetricUsage(object map[string]interface{}, owner string) (MetricUsage, error) {
+	usage, found, err := unstructured.NestedMap(object, "usage")
+	if err != nil {
+		return MetricUsage{}, fmt.Errorf("read usage for %s: %w", owner, err)
+	}
+	if !found {
+		return MetricUsage{}, fmt.Errorf("%s has no usage values", owner)
+	}
+	return parseMetricUsageMap(usage, owner)
+}
+
+// parseMetricUsageMap normalizes CPU and memory resource.Quantity strings.
+func parseMetricUsageMap(values map[string]interface{}, owner string) (MetricUsage, error) {
+	cpu, err := parseMetricQuantity(values["cpu"], owner+" CPU")
+	if err != nil {
+		return MetricUsage{}, err
+	}
+	memory, err := parseMetricQuantity(values["memory"], owner+" memory")
+	if err != nil {
+		return MetricUsage{}, err
+	}
+	return MetricUsage{CPUCores: cpu.AsApproximateFloat64(), MemoryBytes: memory.Value()}, nil
+}
+
+// parseMetricQuantity parses one metrics.k8s.io quantity while rejecting malformed JSON values.
+func parseMetricQuantity(value interface{}, field string) (resource.Quantity, error) {
+	text, ok := value.(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		return resource.Quantity{}, fmt.Errorf("%s must be a non-empty resource quantity", field)
+	}
+	quantity, err := resource.ParseQuantity(text)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("parse %s: %w", field, err)
+	}
+	return quantity, nil
+}
+
+// parseMetricTimestamp reads the RFC3339 sample timestamp returned by metrics.k8s.io.
+func parseMetricTimestamp(object map[string]interface{}, owner string) (time.Time, error) {
+	timestamp, found, err := unstructured.NestedString(object, "timestamp")
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read timestamp for %s: %w", owner, err)
+	}
+	if !found || strings.TrimSpace(timestamp) == "" {
+		return time.Time{}, fmt.Errorf("%s has no sample timestamp", owner)
+	}
+	parsed, err := time.Parse(time.RFC3339, timestamp)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse timestamp for %s: %w", owner, err)
+	}
+	return parsed.UTC(), nil
+}
+
+// nodeCapacities extracts CPU and memory capacity used for node utilization percentages.
+func nodeCapacities(items []unstructured.Unstructured) map[string]MetricUsage {
+	capacities := make(map[string]MetricUsage, len(items))
+	for index := range items {
+		item := &items[index]
+		rawCapacity, found, err := unstructured.NestedMap(item.Object, "status", "capacity")
+		if err != nil || !found {
+			continue
+		}
+		capacity, err := parseMetricUsageMap(rawCapacity, fmt.Sprintf("node %q capacity", item.GetName()))
+		if err != nil {
+			continue
+		}
+		capacities[item.GetName()] = capacity
+	}
+	return capacities
+}
+
+// metricUtilization returns usage as a percentage of a positive capacity.
+func metricUtilization(usage, capacity float64) float64 {
+	if usage <= 0 || capacity <= 0 {
+		return 0
+	}
+	return usage / capacity * 100
+}
+
+// topNodeMetrics sorts node metrics by CPU usage and limits dashboard payload size.
+func topNodeMetrics(items []NodeMetric) []NodeMetric {
+	sort.SliceStable(items, func(left, right int) bool {
+		if items[left].Usage.CPUCores == items[right].Usage.CPUCores {
+			return items[left].Name < items[right].Name
+		}
+		return items[left].Usage.CPUCores > items[right].Usage.CPUCores
+	})
+	if len(items) > metricsDisplayLimit {
+		return items[:metricsDisplayLimit]
+	}
+	return items
+}
+
+// topPodMetrics sorts Pod metrics by CPU usage and limits dashboard payload size.
+func topPodMetrics(items []PodMetric) []PodMetric {
+	sort.SliceStable(items, func(left, right int) bool {
+		if items[left].Usage.CPUCores == items[right].Usage.CPUCores {
+			if items[left].Namespace == items[right].Namespace {
+				return items[left].Name < items[right].Name
+			}
+			return items[left].Namespace < items[right].Namespace
+		}
+		return items[left].Usage.CPUCores > items[right].Usage.CPUCores
+	})
+	if len(items) > metricsDisplayLimit {
+		return items[:metricsDisplayLimit]
+	}
+	return items
 }
 
 // summarizeResource extracts common fields from an unstructured resource.

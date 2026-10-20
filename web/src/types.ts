@@ -88,6 +88,47 @@ export interface StorageOverview {
   lost: number
 }
 
+/** Identifies the explicit state of a native metrics source or aggregate. */
+export type MetricsState = 'available' | 'unavailable' | 'empty' | 'permission-denied' | 'error' | 'stale'
+
+/** Contains normalized CPU and memory values returned by metrics.k8s.io. */
+export interface MetricUsage {
+  cpuCores: number
+  memoryBytes: number
+}
+
+/** Contains one node's usage and capacity utilization values. */
+export interface NodeMetric {
+  name: string
+  usage: MetricUsage
+  cpuPercent: number
+  memoryPercent: number
+}
+
+/** Contains one Pod's usage aggregated across its containers. */
+export interface PodMetric {
+  name: string
+  namespace?: string
+  usage: MetricUsage
+}
+
+/** Contains native metrics data and explicit node/Pod source states. */
+export interface MetricsOverview {
+  state: MetricsState
+  message?: string
+  updatedAt?: string
+  nodeState: MetricsState
+  nodeMessage?: string
+  nodeUpdatedAt?: string
+  nodeCount: number
+  nodes: NodeMetric[]
+  podState: MetricsState
+  podMessage?: string
+  podUpdatedAt?: string
+  podCount: number
+  pods: PodMetric[]
+}
+
 /** Contains a compact warning Event shown on the cluster overview. */
 export interface EventSummary {
   type: string
@@ -117,6 +158,7 @@ export interface ClusterOverview {
   storage: StorageOverview
   warnings: EventSummary[]
   metricsAvailable: boolean
+  metrics: MetricsOverview
   updatedAt: string
 }
 
