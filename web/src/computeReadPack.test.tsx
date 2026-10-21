@@ -48,6 +48,17 @@ export function runComputeReadPackComponentTests(): void {
 
   const deniedMarkup = renderToStaticMarkup(<ComputeReadPackView data={computeData('Pod', 'permission-denied')} />)
   assertCompute(deniedMarkup.includes('RBAC denied') && deniedMarkup.includes('2026-10-20T10:05:00Z'), 'permission-denied telemetry or sample timestamp was hidden')
+
+  const alignedData = computeData('Pod', 'available')
+  alignedData.requests = {
+    cpu: computeValue('available', '24'),
+    memory: computeValue('available', '24G'),
+    state: 'available',
+  }
+  alignedData.usage.cpu = computeValue('available', '12.116325676')
+  alignedData.usage.memory = computeValue('available', '2.794655744G')
+  const alignedMarkup = renderToStaticMarkup(<ComputeReadPackView data={alignedData} />)
+  assertCompute(alignedMarkup.includes('12.116325676') && alignedMarkup.includes('2.794655744G') && !alignedMarkup.includes('12116325676n') && !alignedMarkup.includes('2729156Ki'), 'actual usage did not render in the request units')
 }
 
 runComputeReadPackComponentTests()

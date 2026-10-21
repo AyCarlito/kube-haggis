@@ -26,6 +26,7 @@ func extractComputeReadPack(ctx context.Context, client dynamic.Interface, defin
 func extractComputeReadPackAt(ctx context.Context, client dynamic.Interface, definition ResourceDefinition, object *unstructured.Unstructured, budget *relatedCallBudget, now time.Time) OperationalReadPackPanel {
 	data, objectPartial := computeReadPackObjectData(definition, object)
 	data.Usage = readComputeUsage(ctx, client, definition, object, budget, now)
+	alignComputeUsageUnits(&data)
 	state := computeReadPackState(data, objectPartial)
 	return newOperationalReadPackPanel(readPackPanelCompute, "Compute", state, computeReadPackMessage(data, objectPartial), &data, false)
 }
@@ -266,6 +267,58 @@ func newComputeQuantitySet(cpu, memory ComputeQuantityValue, message string) Com
 		state = computeQuantityStatePartial
 	}
 	return ComputeQuantitySet{CPU: cpu, Memory: memory, State: state, Message: message}
+}
+
+// alignComputeUsageUnits renders actual CPU and memory in the corresponding object-side unit.
+func alignComputeUsageUnits(data *ComputeReadPackData) {
+	if data == nil {
+		return
+	}
+	data.Usage.CPU = alignComputeQuantityUnit(data.Usage.CPU, computeReferenceQuantity(data.Requests.CPU, data.Limits.CPU, data.Capacity.CPU, data.Allocatable.CPU))
+	data.Usage.Memory = alignComputeQuantityUnit(data.Usage.Memory, computeReferenceQuantity(data.Requests.Memory, data.Limits.Memory, data.Capacity.Memory, data.Allocatable.Memory))
+}
+
+// computeReferenceQuantity selects the first displayed object-side quantity that provides a unit.
+func computeReferenceQuantity(values ...ComputeQuantityValue) string {
+	for _, value := range values {
+		if strings.TrimSpace(value.Value) != "" {
+			return value.Value
+		}
+	}
+	return ""
+}
+
+// alignComputeQuantityUnit converts one actual quantity to the unit suffix used by a reference quantity.
+func alignComputeQuantityUnit(value ComputeQuantityValue, reference string) ComputeQuantityValue {
+	if strings.TrimSpace(value.Value) == "" || strings.TrimSpace(reference) == "" {
+		return value
+	}
+	actual, actualErr := resource.ParseQuantity(value.Value)
+	unitSuffix := computeQuantityUnitSuffix(reference)
+	unit, unitErr := resource.ParseQuantity("1" + unitSuffix)
+	if actualErr != nil || unitErr != nil {
+		return value
+	}
+	actualDecimal := actual.AsDec()
+	normalized := actualDecimal.QuoExact(actualDecimal, unit.AsDec()).String()
+	if unitSuffix != "" {
+		normalized += unitSuffix
+	}
+	if len(normalized) > readPackScalarLimit {
+		return value
+	}
+	value.Value = normalized
+	return value
+}
+
+// computeQuantityUnitSuffix extracts a Kubernetes display suffix from a normalized quantity.
+func computeQuantityUnitSuffix(value string) string {
+	for _, suffix := range []string{"Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "n", "u", "m", "k", "K", "M", "G", "T", "P", "E"} {
+		if strings.HasSuffix(strings.TrimSpace(value), suffix) {
+			return suffix
+		}
+	}
+	return ""
 }
 
 // readComputeUsage retrieves one exact Node or namespaced Pod metrics object through the authenticated dynamic client.

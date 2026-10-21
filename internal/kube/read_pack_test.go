@@ -135,6 +135,32 @@ func TestNodeComputeUsesNativeCapacityAndAllocatable(t *testing.T) {
 	}
 }
 
+// TestComputeReadPackAlignsActualUsageUnits verifies metrics use the request units shown beside them.
+func TestComputeReadPackAlignsActualUsageUnits(t *testing.T) {
+	definition := readPackDefinition("", "v1", "pods", "Pod", true)
+	pod := relatedObject("v1", "Pod", "api-0", "team-a", "pod-uid", map[string]interface{}{
+		"spec": map[string]interface{}{"containers": []interface{}{map[string]interface{}{"name": "app", "resources": map[string]interface{}{
+			"requests": map[string]interface{}{"cpu": "24", "memory": "24G"},
+		}}}},
+	})
+	metric := relatedObject("metrics.k8s.io/v1beta1", "PodMetrics", "api-0", "team-a", "", map[string]interface{}{
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"containers": []interface{}{map[string]interface{}{"name": "app", "usage": map[string]interface{}{"cpu": "12116325676n", "memory": "2729156Ki"}}},
+	})
+	client := newRelatedDynamicClientForDefinitions([]ResourceDefinition{definition})
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if action.GetResource().Group == "metrics.k8s.io" {
+			return true, metric, nil
+		}
+		return false, nil, nil
+	})
+	panel := extractComputeReadPackAt(context.Background(), client, definition, pod, newRelatedCallBudget(context.Background()), time.Now().UTC())
+	data, ok := panel.Data.(*ComputeReadPackData)
+	if !ok || data.Usage.CPU.Value != "12.116325676" || data.Usage.Memory.Value != "2.794655744G" {
+		t.Fatalf("actual usage did not use request units: panel=%+v data=%+v", panel, data)
+	}
+}
+
 // TestComputeReadPackRejectsSameNamedMetricFromAnotherNamespace verifies exact Pod metric identity.
 func TestComputeReadPackRejectsSameNamedMetricFromAnotherNamespace(t *testing.T) {
 	definition := readPackDefinition("", "v1", "pods", "Pod", true)

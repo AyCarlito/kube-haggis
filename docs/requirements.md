@@ -367,3 +367,57 @@ Allow operators to replace a scale value rather than being forced to edit around
 - Keep the existing write-mode requirement, server-side dry-run review, resource-version binding, confirmation, and post-apply refresh unchanged.
 - Show an inline validation message and keep review disabled until the value is valid; allow the operator to clear and retype the complete value with normal keyboard editing and mobile numeric input behavior.
 - Add focused tests covering initial zero, delete-and-type, blank validation, invalid input, and a valid transition from zero to one.
+
+## Additional Planned Requirements
+
+The following requirements are newly captured follow-on work and are not yet implemented.
+
+### U8. Ingress in Configure navigation (Planned)
+
+Make Ingress objects directly available from the Configure section of the navigation sidebar.
+
+- Add `Ingress` to the Configure section alongside `Services` and `ConfigMaps`.
+- Resolve the entry through discovery to the canonical `networking.k8s.io` Ingress group/version/resource identity rather than a guessed short route.
+- Preserve the active kubeconfig context and namespace behavior when opening the Ingress resource list.
+- Keep the entry and its unavailable or permission-denied state consistent with the discovery-backed resource catalog.
+
+### U9. Clickable landing-page resource metrics (Planned)
+
+Make the Node and Pod samples in the landing-page CPU and memory metrics panel useful navigation targets.
+
+- Make each Node metric sample keyboard-accessible and clickable to the exact Node resource detail view.
+- Make each Pod metric sample keyboard-accessible and clickable to the exact namespaced Pod resource detail view.
+- Preserve the active kubeconfig context and the Pod sample's namespace when navigating.
+- Use the complete discovered group/version/resource identity and do not infer a destination from an ambiguous resource name.
+- Keep samples clickable when their data is stale but still visible; retain explicit loading, empty, unavailable, permission-denied, and error states when no safe destination exists.
+- Provide accessible labels that identify the target kind, namespace where applicable, and name without requiring the operator to infer that a metric row is interactive.
+
+### U10. Compute read pack for Nodes and Pods (Planned)
+
+Extend the resource detail Read Pack with a `Compute` heading for Node and Pod resources.
+
+- Show CPU and memory values for requests, limits, and actual usage in a compact, consistently labeled view.
+- Render actual CPU and memory usage in the same display units as the corresponding request when a request value exists; fall back to the limit, capacity, or allocatable unit only when the request unit is absent, and never expose raw nanocore or mismatched memory-unit values beside the object-side quantity.
+- For Pods, derive request and limit values from the resource's container specifications using standard Kubernetes resource quantities, and make it clear when values are absent or partial.
+- For Nodes, show the native capacity and allocatable values for the node-side capacity fields; do not invent request or limit values when Kubernetes does not provide a safe node-level equivalent.
+- Read actual Node and Pod usage from the authenticated backend metrics path already used by the landing page (`metrics.k8s.io`); do not fetch metrics documents or credentials from the browser and do not add an external metrics integration.
+- Keep usage identity exact: Node usage is keyed by Node name, and Pod usage is keyed by namespace and name. Do not display usage from a same-named object in another namespace or API identity.
+- Show the metrics sample time and preserve explicit available, stale, permission-denied, unavailable, empty, and partial states without hiding the object-side requests, limits, capacity, or allocatable data.
+- Keep the generic YAML, Events, and related-resource views available when the Compute panel cannot be populated.
+- Bound the additional metrics reads and reuse the existing metrics freshness and cancellation behavior so a resource detail page cannot hang on telemetry.
+
+### U11. Event involved-object relationship (Planned)
+
+Replace the Event related-resource reverse-owner action with a direct relationship to the object named by the Event's `involvedObject` field.
+
+- Do not offer `Load owned descendants` from an Event detail page. Events are not owner controllers, so broad reverse-owner discovery provides no useful relationship and creates avoidable read errors and call-budget exhaustion.
+- Always include an Event's `involvedObject` as the primary related-resource relationship when the field is present.
+- Preserve and use the involved object's `apiVersion`, `kind`, `name`, `namespace`, `uid`, and other safe identity fields needed to resolve and verify the target. Resolve the target through discovery using the full API version and kind rather than guessing a resource slug.
+- Make a resolved involved-object relationship clickable to the exact resource detail route, including namespace for namespaced targets. If discovery, RBAC, or object existence prevents safe resolution, show the relationship and an explicit unresolved state instead of creating an incorrect link.
+- Do not require the Event target to have an owner reference, and do not replace an involved-object relationship with a same-named lookup from another API version or namespace.
+- Do not implement owned-descendant loading as a reverse scan across all discovered listable resources. An unrelated custom resource must never be queried merely because it is present in discovery.
+- Treat the current object's `metadata.ownerReferences` as its direct-owner data. Resolve those declared owners directly; do not perform a broad list operation to discover owners that are already named by the object.
+- For descendants, query only explicitly supported controller-to-child relationships for the current kind and exact owner UID. The initial native relationship map must cover the known Kubernetes chains, including Deployment to ReplicaSet, ReplicaSet to Pod, StatefulSet to Pod, DaemonSet to Pod, Job to Pod, and CronJob to Job where the relevant APIs are available.
+- Limit descendant list requests to the supported child group/version/resource identities and the safe namespace scope for the current object. Filter returned objects by their `metadata.ownerReferences` rather than treating same-name or label-matching objects as owned.
+- Do not infer a generic descendant relationship for arbitrary CRDs or offer `Load owned descendants` when no supported child relationship exists. Show direct owners and other explicit relationships without performing an unrelated reverse scan.
+- Keep supported descendant loading optional, bounded, and explicitly partial when a supported child API is unavailable, forbidden, times out, or reaches its limit. Report one relationship-level limitation for the affected supported child query rather than exposing a list of unrelated resource read errors.
