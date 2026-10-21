@@ -50,6 +50,28 @@ The current product scope and implementation status are maintained in `docs/requ
 - Keep resource lists discovery-driven and generic, with targeted actions layered on top.
 - Keep YAML available as the complete fallback for every resource and CRD.
 
+## Resource Routing
+
+- Use complete group/version/resource identity for all known resource destinations, including sidebar navigation and overview cards.
+- Static built-in navigation must resolve core, `apps`, and `batch` resources to their discovered canonical GVR. Do not fall back to `/resources/<slug>` when metrics or another API exposes the same resource name, such as Pods or Nodes.
+- Preserve the generic ambiguity guard for unknown or genuinely ambiguous resource slugs. A short route is acceptable only when the loaded catalog proves it is unambiguous.
+
+## Watches And Freshness
+
+- Normal watch events are coalesced for 250 ms and trigger a background relist. Keep a panel visibly `Live` while existing data is present during a successful background relist.
+- Use `Refreshing`, `Reconnecting`, `Stale`, and `Unavailable` for initial loads, failed relists, stream closures, network failures, expired resource versions, and permission failures. Do not reintroduce a foreground `Refreshing` transition for every normal watch event.
+- Cancel debounce, retry, stable-live, and in-flight refresh work on navigation, context changes, reloads, and component disposal. Cover these transitions with deterministic fake-clock tests.
+
+## Schema Forms
+
+- Retrieve built-in and CRD schemas in the Go backend through authenticated Kubernetes OpenAPI v3, with OpenAPI v2 compatibility fallback. Never fetch OpenAPI documents or credentials from the browser, and do not shell out to `kubectl`.
+- Resolve only bounded local references and single-reference `allOf` wrappers. Preserve descriptions, validation metadata, and read-only markers.
+- Exact scalar unions are supported for Kubernetes `IntOrString` and resource quantities, including `oneOf` and `anyOf` forms. Preserve the JSON variant: numeric IntOrString values remain numbers, named/percentage values remain strings, and quantities remain canonical text.
+- Do not infer arbitrary object/array unions, multi-branch `allOf`, recursive references, external references, or preserve-unknown structures into controls. Those cases must remain explicit YAML fallbacks.
+- The current CRD product policy treats `x-kubernetes-preserve-unknown-fields: true` as a bounded `map[string]string` assumption so it can use the map editor. Preserve known declared properties, keep the map bounded, and retain read-only propagation for status subtrees.
+- Keep `metadata.name` and `metadata.namespace` in the dedicated identity controls. Render other normalized metadata fields through the schema form when available; keep server-owned metadata, `managedFields`, and status read-only.
+- Preserve the current schema bounds: maximum depth `32`, normalized fields `4096`, and reported fallbacks `32`. Increase bounds only with focused performance and payload tests.
+
 ## Development Commands
 
 Run backend tests and static analysis from the repository root:
@@ -57,6 +79,7 @@ Run backend tests and static analysis from the repository root:
 ```sh
 go test ./...
 go vet ./...
+go test -race ./internal/kube ./internal/server
 ```
 
 Build the frontend from `web/`:
@@ -64,6 +87,20 @@ Build the frontend from `web/`:
 ```sh
 npm install
 npm run build
+```
+
+Frontend pure model tests are executable modules rather than an `npm test` script. Run the changed module from `web/`, or run the complete model suite:
+
+```sh
+npm exec --no -- tsx src/catalog.test.ts
+npm exec --no -- tsx src/crd.test.ts
+npm exec --no -- tsx src/diagnostics.test.ts
+npm exec --no -- tsx src/overview.test.ts
+npm exec --no -- tsx src/readPack.test.ts
+npm exec --no -- tsx src/search.test.ts
+npm exec --no -- tsx src/watch.test.ts
+npm exec --no -- tsx src/workload.test.ts
+npm exec --no -- tsx src/schemaForm.test.ts
 ```
 
 Run the application locally after building the frontend:
