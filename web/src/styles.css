@@ -67,18 +67,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .footer-version { display: block; margin-top: 7px; color: var(--muted-dark); font: var(--type-label)/var(--leading-compact) var(--mono); }
 
 .main-shell { min-width: 0; flex: 1; }
-.topbar { height: 72px; display: flex; align-items: center; gap: 16px; padding: 0 34px; border-bottom: 1px solid var(--line); background: rgba(17, 19, 15, .84); backdrop-filter: blur(18px); position: sticky; top: 0; z-index: 8; }
-.crumbs { display: flex; align-items: center; gap: 10px; min-width: 170px; color: var(--paper); font-size: var(--type-control); line-height: 1.35; font-weight: 700; }
+.topbar { height: 72px; display: flex; align-items: center; gap: 16px; min-width: 0; padding: 0 34px; border-bottom: 1px solid var(--line); background: rgba(17, 19, 15, .84); backdrop-filter: blur(18px); position: sticky; top: 0; z-index: 8; }
+.crumbs { display: flex; flex: 0 1 220px; align-items: center; gap: 10px; min-width: 0; overflow: hidden; color: var(--paper); font-size: var(--type-control); line-height: 1.35; font-weight: 700; white-space: nowrap; }
+.crumbs > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .crumb-muted, .crumb-slash { color: var(--muted-dark); font-weight: 500; }
-.topbar-tools { display: flex; align-items: center; justify-content: flex-end; gap: 9px; margin-left: auto; }
+.topbar-tools { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; gap: 9px; min-width: 0; margin-left: auto; }
 .select-shell { position: relative; display: flex; align-items: center; height: 36px; border: 1px solid var(--line); border-radius: 7px; background: rgba(32, 37, 31, .76); color: var(--paper); }
-.select-shell select { appearance: none; height: 100%; min-width: 128px; padding: 0 28px 0 34px; border: 0; outline: 0; background: var(--panel-raised); color: var(--paper); color-scheme: dark; font-size: var(--type-control); line-height: 1.25; font-weight: 700; cursor: pointer; }
+.select-shell select { appearance: none; width: 100%; height: 100%; min-width: 0; overflow: hidden; padding: 0 28px 0 34px; border: 0; outline: 0; background: var(--panel-raised); color: var(--paper); color-scheme: dark; font-size: var(--type-control); line-height: 1.25; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .select-shell select option { background: var(--panel-raised); color: var(--paper); }
 .select-shell > svg:last-child { position: absolute; right: 9px; pointer-events: none; color: var(--muted); }
+.context-select { flex: 1 1 36rem; min-width: 132px; max-width: 38rem; }
 .select-icon { position: absolute; left: 10px; color: var(--copper-bright); pointer-events: none; }
-.namespace-select select { min-width: 132px; padding-left: 35px; color: #bac6b1; font-weight: 500; }
+.namespace-select { flex: 0 1 18rem; min-width: 132px; max-width: 18rem; }
+.namespace-select select { padding-left: 35px; color: #bac6b1; font-weight: 500; }
 .namespace-glyph { position: absolute; left: 10px; color: var(--moss); font: 10px var(--mono); pointer-events: none; }
-.write-switch { display: flex; align-items: center; gap: 7px; min-height: var(--control-height); height: var(--control-height); padding: 0 11px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--muted); font: var(--type-meta)/var(--leading-compact) var(--mono); cursor: pointer; transition: border-color .2s, color .2s, background .2s; }
+.write-switch { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; min-height: var(--control-height); height: var(--control-height); padding: 0 11px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--muted); font: var(--type-meta)/var(--leading-compact) var(--mono); white-space: nowrap; cursor: pointer; transition: border-color .2s, color .2s, background .2s; }
 .write-switch:hover:not(:disabled) { border-color: rgba(230, 182, 111, .38); color: var(--paper); }
 .write-switch:disabled { cursor: not-allowed; opacity: .5; }
 .write-switch-on { border-color: rgba(168, 189, 131, .42); background: rgba(168, 189, 131, .08); color: var(--moss); }
@@ -900,6 +903,7 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
 
 @media (max-width: 1080px) { .workload-panel-grid { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .workload-intro { display: block; }.workload-stamp { min-width: 0; margin-top: 25px; }.workload-panel-grid { margin-top: 28px; }.workload-panel { padding: 18px; }.workload-target-grid { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .context-select { flex: 0 0 36px; width: 36px; min-width: 36px; max-width: 36px; } }
 
 /* U5: concise shared treatment for the remaining dense surfaces. */
 
