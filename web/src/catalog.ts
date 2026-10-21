@@ -44,7 +44,7 @@ export function isAmbiguousCatalogRoute(route: RouteState, definitions: Resource
 }
 
 /** Builds the canonical group/version/resource route used by new deep links. */
-export function catalogResourcePath(definition: ResourceDefinition, name?: string): string {
+export function catalogResourcePath<T extends Pick<ResourceDefinition, 'group' | 'version' | 'resource'>>(definition: T, name?: string): string {
   const group = definition.group ? `group-${encodeURIComponent(definition.group)}` : 'core'
   const base = `/resources/${group}/${encodeURIComponent(definition.version)}/${encodeURIComponent(definition.resource)}`
   return name === undefined ? base : `${base}/${encodeURIComponent(name)}`
@@ -69,6 +69,7 @@ const staticNavigationResourceIdentities: Record<string, Pick<ResourceDefinition
   nodes: { group: '', version: 'v1', resource: 'nodes' },
   events: { group: '', version: 'v1', resource: 'events' },
   services: { group: '', version: 'v1', resource: 'services' },
+  ingresses: { group: 'networking.k8s.io', version: 'v1', resource: 'ingresses' },
   configmaps: { group: '', version: 'v1', resource: 'configmaps' },
   secrets: { group: '', version: 'v1', resource: 'secrets' },
   persistentvolumeclaims: { group: '', version: 'v1', resource: 'persistentvolumeclaims' },
@@ -80,13 +81,12 @@ const staticNavigationResourceIdentities: Record<string, Pick<ResourceDefinition
   cronjobs: { group: 'batch', version: 'v1', resource: 'cronjobs' },
 }
 
-/** Builds an exact route for a known static destination when its expected GVR is discovered, otherwise preserving generic slug routing. */
+/** Builds an exact route for a known static destination without guessing an alternate API resource. */
 export function catalogStaticNavigationPath(resource: string, definitions: ResourceDefinition[], name?: string): string {
   const identity = staticNavigationResourceIdentities[resource]
-  const definition = identity
-    ? definitions.find((item) => item.group === identity.group && item.version === identity.version && item.resource === identity.resource)
-    : undefined
-  return definition ? catalogResourcePath(definition, name) : catalogResourcePathForSlug(resource, definitions, name)
+  if (!identity) return catalogResourcePathForSlug(resource, definitions, name)
+  const definition = definitions.find((item) => item.group === identity.group && item.version === identity.version && item.resource === identity.resource)
+  return catalogResourcePath(definition ?? identity, name)
 }
 
 /** Builds an exact Event route for core/v1 when both Kubernetes Event APIs are discovered. */

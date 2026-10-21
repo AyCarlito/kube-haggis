@@ -41,6 +41,19 @@ export function runCatalogModelTests(): void {
   assertCatalog(catalogStaticNavigationPath('pods', duplicateMetricsDefinitions) === '/resources/core/v1/pods', 'static Pod navigation did not select the canonical core GVR')
   assertCatalog(catalogStaticNavigationPath('nodes', duplicateMetricsDefinitions) === '/resources/core/v1/nodes', 'static Node navigation did not select the canonical core GVR')
   assertCatalog(catalogStaticNavigationPath('widgets', definitions) === '/resources/widgets', 'unknown ambiguous static navigation did not retain its guarded short route')
+  const ingressDefinition: ResourceDefinition = { group: 'networking.k8s.io', version: 'v1', resource: 'ingresses', kind: 'Ingress', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] }
+  const ingressDefinitions: ResourceDefinition[] = [
+    ingressDefinition,
+    { group: 'metrics.k8s.io', version: 'v1beta1', resource: 'ingresses', kind: 'IngressMetrics', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] },
+  ]
+  const ingressPath = catalogStaticNavigationPath('ingresses', ingressDefinitions, 'edge')
+  assertCatalog(ingressPath === '/resources/group-networking.k8s.io/v1/ingresses/edge', 'static Ingress navigation did not select networking.k8s.io/v1 over an alternate API')
+  const ingressRoute = parseResourceRoute(ingressPath, '?context=field&namespace=team-a')
+  assertCatalog(ingressRoute.group === 'networking.k8s.io' && ingressRoute.version === 'v1' && ingressRoute.resource === 'ingresses' && ingressRoute.name === 'edge' && ingressRoute.namespace === 'team-a', 'Ingress navigation lost its exact GVR or namespace state')
+  assertCatalog(resolveCatalogDefinition(ingressRoute, ingressDefinitions) === ingressDefinition, 'canonical Ingress navigation resolved the alternate API resource')
+  const alternateOnlyIngressDefinitions = ingressDefinitions.filter((definition) => definition !== ingressDefinition)
+  assertCatalog(catalogStaticNavigationPath('ingresses', alternateOnlyIngressDefinitions) === '/resources/group-networking.k8s.io/v1/ingresses', 'unserved Ingress navigation guessed an alternate API resource')
+  assertCatalog(resolveCatalogDefinition(parseResourceRoute('/resources/group-networking.k8s.io/v1/ingresses', ''), alternateOnlyIngressDefinitions) === undefined, 'unserved Ingress navigation did not preserve the explicit unavailable state')
   const eventDefinitions: ResourceDefinition[] = [
     { group: '', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] },
     { group: 'events.k8s.io', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] },

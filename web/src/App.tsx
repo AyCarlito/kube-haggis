@@ -251,6 +251,7 @@ const navGroups = [
     label: 'Configure',
     items: [
       { label: 'Services', resource: 'services', icon: Network },
+      { label: 'Ingress', resource: 'ingresses', icon: Network },
       { label: 'ConfigMaps', resource: 'configmaps', icon: FileCode2 },
       { label: 'Secrets', resource: 'secrets', icon: LockKeyhole },
       { label: 'Storage claims', resource: 'persistentvolumeclaims', icon: HardDrive },
