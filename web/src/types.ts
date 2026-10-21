@@ -1101,7 +1101,7 @@ export interface PortForwardMessage {
 /** Represents the browser route used by the single-page application. */
 export interface RouteState {
   path: string
-  view?: 'history' | 'catalog' | 'search' | 'diagnostics'
+  view?: 'history' | 'catalog' | 'search' | 'diagnostics' | 'workloads'
   search?: string
   group?: string
   version?: string

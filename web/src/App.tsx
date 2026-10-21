@@ -86,6 +86,7 @@ import {
   parseResourceRoute,
   resolveCatalogDefinition,
 } from './catalog'
+import { overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
 import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchHref, searchQueryEquals, searchResultKey, searchResultResourcePath } from './search'
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
@@ -432,6 +433,8 @@ export default function App() {
     <ResourceCatalogPage catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} onOpen={(definition) => navigate(catalogResourcePath(definition), definition.resource)} />
   ) : contexts.error || contexts.contexts.length === 0 ? (
     <SetupState error={contexts.error} />
+  ) : route.view === 'workloads' ? (
+    <WorkloadsPage context={selectedContext} namespace={selectedNamespace} definitions={definitions} catalogLoading={catalogLoading} catalogError={catalogError} />
   ) : route.resource && catalogLoading && !catalog ? (
     <LoadingState label="Reading the Kubernetes API catalog" />
   ) : route.resource && catalogError && !catalog ? (
@@ -465,7 +468,7 @@ export default function App() {
       onCreate={() => navigate(catalogResourcePath(activeDefinition, 'new'), activeDefinition.resource, 'new')}
     />
   ) : (
-    <OverviewPage context={selectedContext} contexts={contexts} activeContext={activeContext} revision={contextRevision} />
+    <OverviewPage context={selectedContext} namespace={selectedNamespace} definitions={definitions} contexts={contexts} activeContext={activeContext} revision={contextRevision} />
   )
 
   return (
@@ -520,7 +523,7 @@ export default function App() {
           <div className="crumbs">
             <span className="crumb-muted">KubeHaggis</span>
             <span className="crumb-slash">/</span>
-            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'diagnostics' ? 'Diagnostics' : route.view === 'search' ? 'Global search' : route.view === 'catalog' ? 'API catalog' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
+            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'diagnostics' ? 'Diagnostics' : route.view === 'search' ? 'Global search' : route.view === 'catalog' ? 'API catalog' : route.view === 'workloads' ? 'Workloads' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
           </div>
           <div className="topbar-tools">
             <ContextPicker contexts={contexts?.contexts ?? []} value={selectedContext} onChange={changeContext} />
@@ -552,7 +555,7 @@ export default function App() {
 }
 
 /** Renders the cluster overview and its health summary panels. */
-function OverviewPage({ context, contexts, activeContext, revision }: { context: string; contexts: ContextsResponse | null; activeContext?: ContextSummary; revision: number }) {
+function OverviewPage({ context, namespace, definitions, contexts, activeContext, revision }: { context: string; namespace: string; definitions: ResourceDefinition[]; contexts: ContextsResponse | null; activeContext?: ContextSummary; revision: number }) {
   const [overview, setOverview] = useState<ClusterOverview | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(Boolean(context))
@@ -596,6 +599,7 @@ function OverviewPage({ context, contexts, activeContext, revision }: { context:
   const workloadHealth = overview.workloads.deployments + overview.workloads.statefulSets + overview.workloads.daemonSets
   const workloadReady = overview.workloads.healthyDeployments + overview.workloads.healthyStatefulSets + overview.workloads.healthyDaemonSets
   const warningCount = overview.warnings.length
+  const targets = overviewNavigationTargets(definitions)
 
   return (
     <div className="dashboard-page">
@@ -613,10 +617,10 @@ function OverviewPage({ context, contexts, activeContext, revision }: { context:
       </section>
 
       <section className="stat-grid">
-        <MetricCard label="Nodes ready" value={`${overview.nodes.ready}/${overview.nodes.total}`} detail={overview.nodes.pressure ? `${overview.nodes.pressure} under pressure` : `${overview.nodes.cordoned} cordoned`} tone={overview.nodes.notReady ? 'warning' : 'good'} icon={<Server size={17} />} />
-        <MetricCard label="Pods running" value={`${overview.pods.running}`} detail={`${overview.pods.pending} pending / ${overview.pods.failed} failed`} tone={overview.pods.failed || overview.pods.pending ? 'warning' : 'good'} icon={<CircleDot size={17} />} />
-        <MetricCard label="Workload health" value={workloadHealth ? `${workloadReady}/${workloadHealth}` : '—'} detail={`${overview.workloads.jobs} jobs / ${overview.workloads.cronJobs} schedules`} tone={workloadHealth && workloadReady < workloadHealth ? 'warning' : 'good'} icon={<Layers3 size={17} />} />
-        <MetricCard label="Storage claims" value={`${overview.storage.bound}/${overview.storage.total}`} detail={`${overview.storage.pending} pending / ${overview.storage.lost} lost`} tone={overview.storage.pending || overview.storage.lost ? 'warning' : 'good'} icon={<HardDrive size={17} />} />
+        <MetricCard label="Nodes ready" value={`${overview.nodes.ready}/${overview.nodes.total}`} detail={overview.nodes.pressure ? `${overview.nodes.pressure} under pressure` : `${overview.nodes.cordoned} cordoned`} tone={overview.nodes.notReady ? 'warning' : 'good'} icon={<Server size={17} />} href={targets.nodes ? routeHref(targets.nodes, context, namespace) : undefined} ariaLabel="Open the canonical Nodes list" />
+        <MetricCard label="Pods running" value={`${overview.pods.running}`} detail={`${overview.pods.pending} pending / ${overview.pods.failed} failed`} tone={overview.pods.failed || overview.pods.pending ? 'warning' : 'good'} icon={<CircleDot size={17} />} href={targets.pods ? routeHref(targets.pods, context, namespace) : undefined} ariaLabel="Open the canonical Pods list" />
+        <MetricCard label="Workload health" value={workloadHealth ? `${workloadReady}/${workloadHealth}` : '—'} detail={`${overview.workloads.jobs} jobs / ${overview.workloads.cronJobs} schedules`} tone={workloadHealth && workloadReady < workloadHealth ? 'warning' : 'good'} icon={<Layers3 size={17} />} href={targets.workloads ? routeHref(targets.workloads, context, namespace) : undefined} ariaLabel="Open the aggregate workload view for Deployments, StatefulSets, and DaemonSets" />
+        <MetricCard label="Storage claims" value={`${overview.storage.bound}/${overview.storage.total}`} detail={`${overview.storage.pending} pending / ${overview.storage.lost} lost`} tone={overview.storage.pending || overview.storage.lost ? 'warning' : 'good'} icon={<HardDrive size={17} />} href={targets.storageClaims ? routeHref(targets.storageClaims, context, namespace) : undefined} ariaLabel="Open the canonical PersistentVolumeClaim list" />
       </section>
 
       <section className="dashboard-grid">
@@ -627,9 +631,9 @@ function OverviewPage({ context, contexts, activeContext, revision }: { context:
         <div className="panel posture-panel">
           <PanelHeading eyebrow="Cluster posture" title="Capacity & coverage" action={metricsStateLabel(overview.metricsAvailable, overview.metrics.state)} tone={metricsStateTone(overview.metricsAvailable, overview.metrics.state)} />
           <div className="posture-stack">
-            <PostureRow icon={<Layers3 size={16} />} label="Namespaces" value={String(overview.namespaces)} note="scoped workspaces" />
-            <PostureRow icon={<Activity size={16} />} label="Restarts" value={String(overview.pods.restarting)} note="Pods with restarts" tone={overview.pods.restarting ? 'warning' : 'good'} />
-            <PostureRow icon={<HardDrive size={16} />} label="Bound claims" value={String(overview.storage.bound)} note="PersistentVolumeClaims" />
+            <PostureRow icon={<Layers3 size={16} />} label="Namespaces" value={String(overview.namespaces)} note="scoped workspaces" href={targets.namespaces ? routeHref(targets.namespaces, context, namespace) : undefined} ariaLabel="Open the canonical Namespaces list" />
+            <PostureRow icon={<Activity size={16} />} label="Restarts" value={String(overview.pods.restarting)} note="Pods with restarts" tone={overview.pods.restarting ? 'warning' : 'good'} href={targets.podRestarts ? routeHref(targets.podRestarts, context, namespace) : undefined} ariaLabel="Open the canonical Pods list to inspect restarts" />
+            <PostureRow icon={<HardDrive size={16} />} label="Bound claims" value={String(overview.storage.bound)} note="PersistentVolumeClaims" href={targets.boundClaims ? routeHref(targets.boundClaims, context, namespace) : undefined} ariaLabel="Open the canonical PersistentVolumeClaim list" />
           </div>
           <div className="panel-note"><Gauge size={14} /> Native usage stays read-only and follows Kubernetes RBAC.</div>
         </div>
@@ -644,6 +648,53 @@ function OverviewPage({ context, contexts, activeContext, revision }: { context:
       </section>
     </div>
   )
+}
+
+/** Renders the aggregate workload landing view without collapsing health into one controller kind. */
+function WorkloadsPage({ context, namespace, definitions, catalogLoading, catalogError }: { context: string; namespace: string; definitions: ResourceDefinition[]; catalogLoading: boolean; catalogError: string }) {
+  const targets = workloadNavigationTargets(definitions)
+  const controllerTargets = targets.slice(0, 3)
+  const taskTargets = targets.slice(3)
+  const availableCount = targets.filter((target) => target.path).length
+  const catalogLabel = catalogLoading && !definitions.length ? 'Reading catalog' : catalogError ? 'Catalog needs attention' : `${availableCount}/${targets.length} destinations`
+
+  return (
+    <div className="workload-page">
+      <section className="workload-intro">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-mark" /> Workload field / aggregate health</div>
+          <h1>Workloads</h1>
+          <p className="intro-copy">The overview health figure combines Deployments, StatefulSets, and DaemonSets. Use the exact resource destinations below to inspect each controller kind without losing the current context or namespace scope.</p>
+        </div>
+        <div className="context-stamp workload-stamp">
+          <span className="stamp-label">Navigation scope</span>
+          <code>{namespace === 'all' ? 'all namespaces' : namespace}</code>
+          <span className="stamp-status"><span className="signal-dot signal-dot-good" /> {catalogLabel}</span>
+        </div>
+      </section>
+      {catalogError && <div className="workload-catalog-notice"><AlertTriangle size={15} /><span>Some exact workload destinations are unavailable until API discovery succeeds: {catalogError}</span></div>}
+      <section className="workload-panel-grid">
+        <section className="panel workload-panel">
+          <div className="panel-heading"><div><span className="panel-eyebrow">Overview health sources</span><h2>Controller kinds</h2></div><span className="panel-action panel-action-good"><span />{controllerTargets.filter((target) => target.path).length}/3 available</span></div>
+          <p className="workload-panel-copy">These three Kubernetes workload kinds make up the aggregate Workload health card.</p>
+          <div className="workload-target-grid">{controllerTargets.map((target) => <WorkloadDestination key={target.key} target={target} context={context} namespace={namespace} />)}</div>
+        </section>
+        <section className="panel workload-panel">
+          <div className="panel-heading"><div><span className="panel-eyebrow">Adjacent task context</span><h2>Jobs &amp; schedules</h2></div><span className="panel-action panel-action-neutral"><span />{taskTargets.filter((target) => target.path).length}/2 available</span></div>
+          <p className="workload-panel-copy">Finite Jobs and scheduled CronJobs remain available beside the controller view.</p>
+          <div className="workload-target-grid">{taskTargets.map((target) => <WorkloadDestination key={target.key} target={target} context={context} namespace={namespace} />)}</div>
+        </section>
+      </section>
+    </div>
+  )
+}
+
+/** Renders one canonical workload destination or an explicit unavailable state. */
+function WorkloadDestination({ target, context, namespace }: { target: WorkloadNavigationTarget; context: string; namespace: string }) {
+  const icon = target.key === 'deployments' ? <Layers3 size={16} /> : target.key === 'statefulsets' ? <Database size={16} /> : target.key === 'daemonsets' ? <Zap size={16} /> : <Clock3 size={16} />
+  const content = <><span className="workload-target-icon">{icon}</span><span className="workload-target-copy"><strong>{target.label}</strong><span>{target.description}</span>{!target.path && <small>Unavailable in the current API catalog</small>}</span>{target.path ? <ArrowUpRight size={15} className="workload-target-arrow" /> : <span className="workload-target-state">Unavailable</span>}</>
+  if (!target.path) return <div className="workload-target workload-target-unavailable" aria-disabled="true">{content}</div>
+  return <a className="workload-target" href={routeHref(target.path, context, namespace)} aria-label={`Open the canonical ${target.label} list`}>{content}</a>
 }
 
 /** Renders native node and Pod usage charts with explicit source states. */
@@ -820,14 +871,10 @@ function hasMetricTimestamp(value?: string): value is string {
 }
 
 /** Renders a reusable numeric health card. */
-function MetricCard({ label, value, detail, tone, icon }: { label: string; value: string; detail: string; tone: 'good' | 'warning' | 'neutral'; icon: ReactNode }) {
-  return (
-    <article className={`metric-card metric-${tone}`}>
-      <div className="metric-top"><span className="metric-icon">{icon}</span><span className="metric-kicker">{label}</span><ArrowUpRight size={14} className="metric-arrow" /></div>
-      <div className="metric-value">{value}</div>
-      <div className="metric-detail">{detail}</div>
-    </article>
-  )
+function MetricCard({ label, value, detail, tone, icon, href, ariaLabel }: { label: string; value: string; detail: string; tone: 'good' | 'warning' | 'neutral'; icon: ReactNode; href?: string; ariaLabel?: string }) {
+  const content = <><div className="metric-top"><span className="metric-icon">{icon}</span><span className="metric-kicker">{label}</span>{href && <ArrowUpRight size={14} className="metric-arrow" />}</div><div className="metric-value">{value}</div><div className="metric-detail">{detail}</div></>
+  if (!href) return <article className={`metric-card metric-${tone}`}>{content}</article>
+  return <a className={`metric-card metric-card-link metric-${tone}`} href={href} aria-label={ariaLabel || `Open ${label}`}>{content}</a>
 }
 
 /** Renders a section heading with a compact state marker. */
@@ -856,8 +903,10 @@ function WarningList({ warnings }: { warnings: ClusterOverview['warnings'] }) {
 }
 
 /** Renders a single posture statistic row. */
-function PostureRow({ icon, label, value, note, tone = 'neutral' }: { icon: ReactNode; label: string; value: string; note: string; tone?: 'good' | 'warning' | 'neutral' }) {
-  return <div className="posture-row"><span className={`posture-icon posture-${tone}`}>{icon}</span><div><strong>{label}</strong><span>{note}</span></div><b>{value}</b></div>
+function PostureRow({ icon, label, value, note, tone = 'neutral', href, ariaLabel }: { icon: ReactNode; label: string; value: string; note: string; tone?: 'good' | 'warning' | 'neutral'; href?: string; ariaLabel?: string }) {
+  const content = <><span className={`posture-icon posture-${tone}`}>{icon}</span><div><strong>{label}</strong><span>{note}</span></div><b>{value}</b>{href && <ArrowUpRight size={14} className="posture-arrow" />}</>
+  if (!href) return <div className="posture-row">{content}</div>
+  return <a className="posture-row posture-row-link" href={href} aria-label={ariaLabel || `Open ${label}`}>{content}</a>
 }
 
 /** Renders a cluster setup state when no kubeconfig contexts are available. */

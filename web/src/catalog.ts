@@ -19,6 +19,7 @@ export function parseResourceRoute(pathname: string, search: string): RouteState
   if (parts[0] === 'diagnostics') return { path: '/diagnostics', view: 'diagnostics' }
   if (parts[0] === 'search') return { path: '/search', view: 'search', search, namespace: new URLSearchParams(search).get('namespace') || undefined }
   if (parts[0] === 'catalog') return { path: '/catalog', view: 'catalog' }
+  if (parts[0] === 'workloads') return { path: '/workloads', view: 'workloads', namespace: new URLSearchParams(search).get('namespace') || undefined }
   if (parts[0] !== 'resources' || !parts[1]) return { path: '/' }
   const namespace = new URLSearchParams(search).get('namespace') || undefined
   if (parts.length >= 4) {
