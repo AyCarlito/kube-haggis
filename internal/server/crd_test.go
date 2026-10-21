@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )

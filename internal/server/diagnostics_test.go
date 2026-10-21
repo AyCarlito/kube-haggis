@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kube-haggis/kube-haggis/internal/audit"
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/audit"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

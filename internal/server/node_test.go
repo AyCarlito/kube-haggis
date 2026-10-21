@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kube-haggis/kube-haggis/internal/audit"
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/audit"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 	"net/http"
 	"net/http/httptest"
 )

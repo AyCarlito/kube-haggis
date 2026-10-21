@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 )
 
 // workloadActionLoader describes the native workload operation seam used by the HTTP handler.

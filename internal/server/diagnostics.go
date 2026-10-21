@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 

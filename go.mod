@@ -1,4 +1,4 @@
-module github.com/kube-haggis/kube-haggis
+module github.com/AyCarlito/kube-haggis
 
 go 1.26.0
 

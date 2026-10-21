@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 )
 
 // TestHandleOperationalReadPackPreservesSafePanelStates verifies the single read-pack response seam.

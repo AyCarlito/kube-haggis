@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kube-haggis/kube-haggis/internal/audit"
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/audit"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
