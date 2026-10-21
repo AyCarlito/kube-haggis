@@ -56,17 +56,19 @@ type ContextSummary struct {
 	LastError string `json:"lastError,omitempty"`
 }
 
-// ResourceDefinition describes a discovered Kubernetes resource kind.
+// ResourceDefinition describes one discovered top-level Kubernetes resource and its capabilities.
 type ResourceDefinition struct {
-	Group          string   `json:"group"`
-	Version        string   `json:"version"`
-	Resource       string   `json:"resource"`
-	Kind           string   `json:"kind"`
-	Namespaced     bool     `json:"namespaced"`
-	CustomResource bool     `json:"customResource"`
-	Verbs          []string `json:"verbs"`
-	ShortNames     []string `json:"shortNames,omitempty"`
-	Categories     []string `json:"categories,omitempty"`
+	Group          string                `json:"group"`
+	Version        string                `json:"version"`
+	Resource       string                `json:"resource"`
+	Kind           string                `json:"kind"`
+	Namespaced     bool                  `json:"namespaced"`
+	Scope          string                `json:"scope"`
+	CustomResource bool                  `json:"customResource"`
+	Verbs          []string              `json:"verbs"`
+	ShortNames     []string              `json:"shortNames,omitempty"`
+	Categories     []string              `json:"categories,omitempty"`
+	Subresources   []ResourceSubresource `json:"subresources,omitempty"`
 }
 
 // ResourceSummary contains the common fields shown in resource tables.
@@ -235,16 +237,17 @@ type configLoadResult struct {
 
 // Service owns kubeconfig loading and creates dynamic clients for contexts.
 type Service struct {
-	kubeconfigPath   string
-	mu               sync.Mutex
-	rules            *clientcmd.ClientConfigLoadingRules
-	config           *clientcmdapi.Config
-	fingerprint      configSourceFingerprint
-	loaded           bool
-	revision         uint64
-	lastReloadError  string
-	discoveryCache   map[discoveryCacheKey]discoveryCacheEntry
-	discoveryFlights map[discoveryCacheKey]*discoveryFlight
+	kubeconfigPath       string
+	mu                   sync.Mutex
+	rules                *clientcmd.ClientConfigLoadingRules
+	config               *clientcmdapi.Config
+	fingerprint          configSourceFingerprint
+	loaded               bool
+	revision             uint64
+	lastReloadError      string
+	discoveryCache       map[discoveryCacheKey]discoveryCacheEntry
+	discoveryFlights     map[discoveryCacheKey]*discoveryFlight
+	discoveryGenerations map[discoveryCacheKey]uint64
 }
 
 const (
@@ -259,9 +262,10 @@ const (
 // NewService creates a Kubernetes service using standard kubeconfig rules.
 func NewService(kubeconfigPath string) *Service {
 	return &Service{
-		kubeconfigPath:   kubeconfigPath,
-		discoveryCache:   make(map[discoveryCacheKey]discoveryCacheEntry),
-		discoveryFlights: make(map[discoveryCacheKey]*discoveryFlight),
+		kubeconfigPath:       kubeconfigPath,
+		discoveryCache:       make(map[discoveryCacheKey]discoveryCacheEntry),
+		discoveryFlights:     make(map[discoveryCacheKey]*discoveryFlight),
+		discoveryGenerations: make(map[discoveryCacheKey]uint64),
 	}
 }
 
@@ -397,6 +401,13 @@ func (s *Service) Overview(ctx context.Context, contextName string) (ClusterOver
 
 // ListResources lists any discovered resource using a group-version-resource reference and an optional continuation token.
 func (s *Service) ListResources(ctx context.Context, contextName, group, version, resource, namespace string, namespaced bool, limit int, labelSelector, continueToken string) (ResourceList, error) {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return ResourceList{}, err
+	}
+	if err := validateResourceNamespace(definition, namespace, false); err != nil {
+		return ResourceList{}, err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return ResourceList{}, err
@@ -409,16 +420,6 @@ func (s *Service) ListResources(ctx context.Context, contextName, group, version
 	items, err := listResource(ctx, dynamicClient, gvr, namespace, namespaced, options)
 	if err != nil {
 		return ResourceList{}, err
-	}
-
-	definition := ResourceDefinition{Group: group, Version: version, Resource: resource, Namespaced: namespaced}
-	if definitions, discoveryErr := s.Discovery(ctx, contextName); discoveryErr == nil {
-		for _, candidate := range definitions {
-			if candidate.Group == group && candidate.Version == version && candidate.Resource == resource {
-				definition = candidate
-				break
-			}
-		}
 	}
 
 	result := ResourceList{
@@ -435,6 +436,13 @@ func (s *Service) ListResources(ctx context.Context, contextName, group, version
 
 // WatchResources opens a Kubernetes watch for a discovered resource.
 func (s *Service) WatchResources(ctx context.Context, contextName, group, version, resource, namespace string, namespaced bool, resourceVersion string) (watch.Interface, error) {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateResourceNamespace(definition, namespace, false); err != nil {
+		return nil, err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return nil, err
@@ -446,6 +454,13 @@ func (s *Service) WatchResources(ctx context.Context, contextName, group, versio
 
 // GetResource returns the complete unstructured object for a resource name.
 func (s *Service) GetResource(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool) (*unstructured.Unstructured, error) {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateResourceNamespace(definition, namespace, true); err != nil {
+		return nil, err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return nil, err
@@ -460,6 +475,13 @@ func (s *Service) GetResource(ctx context.Context, contextName, group, version, 
 
 // ApplyResource creates or client-side updates a YAML or JSON resource document.
 func (s *Service) ApplyResource(ctx context.Context, contextName, group, version, resource, namespace string, namespaced, dryRun bool, body []byte) (*unstructured.Unstructured, error) {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateResourceNamespace(definition, namespace, false); err != nil {
+		return nil, err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return nil, err
@@ -505,6 +527,13 @@ func (s *Service) DeleteResource(ctx context.Context, contextName, group, versio
 
 // DeleteResourceWithOptions deletes one resource with optional dry-run, force, and resource-version preconditions.
 func (s *Service) DeleteResourceWithOptions(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool, options ResourceDeleteOptions) error {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return err
+	}
+	if err := validateResourceNamespace(definition, namespace, true); err != nil {
+		return err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return err

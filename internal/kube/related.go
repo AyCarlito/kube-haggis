@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -114,29 +113,7 @@ type relatedTargetResult struct {
 // discoverDefinitions converts preferred discovery output into generic resource definitions.
 func discoverDefinitions(discoveryClient discovery.DiscoveryInterface) ([]ResourceDefinition, error) {
 	resourceLists, discoveryErr := discoveryClient.ServerPreferredResources()
-	definitions := make([]ResourceDefinition, 0)
-	for _, resourceList := range resourceLists {
-		groupVersion, err := schema.ParseGroupVersion(resourceList.GroupVersion)
-		if err != nil {
-			continue
-		}
-		for _, resource := range resourceList.APIResources {
-			definitions = append(definitions, ResourceDefinition{
-				Group:      groupVersion.Group,
-				Version:    groupVersion.Version,
-				Resource:   resource.Name,
-				Kind:       resource.Kind,
-				Namespaced: resource.Namespaced,
-				Verbs:      append([]string(nil), resource.Verbs...),
-				ShortNames: append([]string(nil), resource.ShortNames...),
-				Categories: append([]string(nil), resource.Categories...),
-			})
-		}
-	}
-	sort.Slice(definitions, func(left, right int) bool {
-		return definitionKey(definitions[left]) < definitionKey(definitions[right])
-	})
-	return definitions, discoveryErr
+	return normalizeResourceLists(resourceLists), discoveryErr
 }
 
 // RelatedResources returns read-only relationships for one discovered resource.
@@ -160,6 +137,15 @@ func (s *Service) relatedResources(ctx context.Context, contextName, group, vers
 		return RelatedResourceList{}, err
 	}
 	definitions, discoveryErr := s.cachedDiscovery(requestContext, resolvedContext, revision, dynamicClient, discoveryClient)
+	definition := relatedDefinition(definitions, group, version, resource)
+	if definition.Kind != "" {
+		if definition.Namespaced != namespaced {
+			return RelatedResourceList{}, fmt.Errorf("resource %s scope contradicts discovery: requested %s, discovered %s", definitionKey(definition), resourceScope(namespaced), definition.Scope)
+		}
+		if err := validateResourceNamespace(definition, namespace, true); err != nil {
+			return RelatedResourceList{}, err
+		}
+	}
 	resourceClient, err := resourceInterface(dynamicClient, schema.GroupVersionResource{Group: group, Version: version, Resource: resource}, namespace, namespaced, false)
 	if err != nil {
 		return RelatedResourceList{}, err

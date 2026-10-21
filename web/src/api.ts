@@ -9,6 +9,7 @@ import type {
   ResourceDeleteResponse,
   BulkDeleteResponse,
   ResourceConflictResponse,
+  ResourceCatalogResponse,
   ResourceEventsResponse,
   ResourceListResponse,
   ResourceObject,
@@ -89,9 +90,14 @@ export function fetchOverview(context: string): Promise<ClusterOverview> {
   return fetchJson<ClusterOverview>(apiUrl('/api/overview', { context }))
 }
 
-/** Loads discovered API resource definitions for a kubeconfig context. */
+/** Loads the complete discovery-backed resource catalog for a kubeconfig context. */
+export function fetchResourceCatalog(context: string, refresh = false): Promise<ResourceCatalogResponse> {
+  return fetchJson<ResourceCatalogResponse>(apiUrl('/api/discovery', { context, refresh: refresh ? 'true' : undefined }))
+}
+
+/** Loads discovered API resource definitions for callers that only need catalog items. */
 export async function fetchDiscovery(context: string): Promise<ResourceDefinition[]> {
-  const response = await fetchJson<{ items: ResourceDefinition[] }>(apiUrl('/api/discovery', { context }))
+  const response = await fetchResourceCatalog(context)
   return response.items
 }
 

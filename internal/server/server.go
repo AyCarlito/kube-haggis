@@ -179,15 +179,21 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 	writeJSON(writer, http.StatusOK, overview)
 }
 
-// handleDiscovery returns preferred API resource definitions for one context.
+// handleDiscovery returns the complete API resource catalog and explicit discovery health for one context.
 func (s *Server) handleDiscovery(writer http.ResponseWriter, request *http.Request) {
 	contextName := request.URL.Query().Get("context")
-	definitions, err := s.kube.Discovery(request.Context(), contextName)
+	if parseBool(request.URL.Query().Get("refresh")) {
+		if err := s.kube.InvalidateDiscovery(contextName); err != nil {
+			writeError(writer, err)
+			return
+		}
+	}
+	catalog, err := s.kube.ResourceCatalog(request.Context(), contextName)
 	if err != nil {
 		writeError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]interface{}{"items": definitions})
+	writeJSON(writer, http.StatusOK, catalog)
 }
 
 // handleSchema returns a read-only structural CRD schema or an explicit YAML fallback state.
@@ -663,7 +669,7 @@ func writeError(writer http.ResponseWriter, err error) {
 		status = http.StatusNotImplemented
 	case strings.Contains(message, "not available on this kubernetes api server"):
 		status = http.StatusNotImplemented
-	case strings.Contains(message, "pvc resize is unsupported") || strings.Contains(message, "unsupported pvc operation") || strings.Contains(message, "volumesnapshot api is unavailable") || strings.Contains(message, "confirmation") || strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "unsupported workload action") || strings.Contains(message, "unsupported node action") || strings.Contains(message, "not a supported workload") || strings.Contains(message, "not supported for node") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
+	case strings.Contains(message, "pvc resize is unsupported") || strings.Contains(message, "unsupported pvc operation") || strings.Contains(message, "volumesnapshot api is unavailable") || strings.Contains(message, "confirmation") || strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "not present in the discovery catalog") || strings.Contains(message, "scope contradicts") || strings.Contains(message, "cluster-scoped resource") || strings.Contains(message, "invalid") || strings.Contains(message, "unsupported workload action") || strings.Contains(message, "unsupported node action") || strings.Contains(message, "not a supported workload") || strings.Contains(message, "not supported for node") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
 		status = http.StatusBadRequest
 	}
 	writeJSON(writer, status, map[string]string{"error": err.Error()})

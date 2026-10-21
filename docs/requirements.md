@@ -48,6 +48,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Dedicated resource-version conflict review with safe current-object refresh, bounded difference summaries, local-draft preservation, and explicit retry preparation.
 - Local-only visual identity using the provided `haggis.svg` asset.
 - Revision-scoped discovery caching, bounded related-resource query planning, deferred reverse-owner scans, safe relationship diagnostics, and large-discovery benchmark coverage.
+- Complete discovery-backed GVR catalog with subresource capabilities, partial-discovery states, scope validation, and canonical resource routes.
 
 ### Partially Implemented
 
@@ -183,7 +184,7 @@ Improve the performance and predictability of the related-resource view without 
 - Include safe query-count and timing information for diagnostics.
 - Add a benchmark fixture with at least 1,000 discovered resources and establish a p95 latency target for direct relationships.
 
-### F2. Complete discovery-backed resource catalog
+### F2. Complete discovery-backed resource catalog (Implemented)
 
 Expose every discoverable built-in and custom top-level resource through a complete, unambiguous resource catalog.
 

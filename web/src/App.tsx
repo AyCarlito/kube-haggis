@@ -51,7 +51,7 @@ import {
   deleteResources,
   fetchAudit,
   fetchContexts,
-  fetchDiscovery,
+  fetchResourceCatalog,
   fetchOverview,
   fetchPVCOperations,
   fetchResource,
@@ -71,6 +71,15 @@ import {
   terminalUrl,
   watchUrl,
 } from './api'
+import {
+  catalogEventResourcePath,
+  catalogResourcePath,
+  catalogResourcePathForSlug,
+  groupResourceCatalog,
+  isAmbiguousCatalogRoute,
+  parseResourceRoute,
+  resolveCatalogDefinition,
+} from './catalog'
 import type {
   AuditEntry,
   AuditResponse,
@@ -81,6 +90,7 @@ import type {
   EventSummary,
   PortForwardMessage,
   ResourceDefinition,
+  ResourceCatalogResponse,
   ResourceDeleteItem,
   ResourceDeleteResponse,
   BulkDeleteResponse,
@@ -114,19 +124,19 @@ import type {
 } from './types'
 
 const commonDefinitions: ResourceDefinition[] = [
-  { group: 'apps', version: 'v1', resource: 'deployments', kind: 'Deployment', namespaced: true, verbs: [] },
-  { group: 'apps', version: 'v1', resource: 'statefulsets', kind: 'StatefulSet', namespaced: true, verbs: [] },
-  { group: 'apps', version: 'v1', resource: 'daemonsets', kind: 'DaemonSet', namespaced: true, verbs: [] },
-  { group: 'batch', version: 'v1', resource: 'jobs', kind: 'Job', namespaced: true, verbs: [] },
-  { group: 'batch', version: 'v1', resource: 'cronjobs', kind: 'CronJob', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'pods', kind: 'Pod', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'services', kind: 'Service', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'configmaps', kind: 'ConfigMap', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'secrets', kind: 'Secret', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'persistentvolumeclaims', kind: 'PersistentVolumeClaim', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'nodes', kind: 'Node', namespaced: false, verbs: [] },
-  { group: '', version: 'v1', resource: 'namespaces', kind: 'Namespace', namespaced: false, verbs: [] },
-  { group: '', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, verbs: [] },
+  { group: 'apps', version: 'v1', resource: 'deployments', kind: 'Deployment', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: 'apps', version: 'v1', resource: 'statefulsets', kind: 'StatefulSet', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: 'apps', version: 'v1', resource: 'daemonsets', kind: 'DaemonSet', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: 'batch', version: 'v1', resource: 'jobs', kind: 'Job', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: 'batch', version: 'v1', resource: 'cronjobs', kind: 'CronJob', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'pods', kind: 'Pod', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'services', kind: 'Service', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'configmaps', kind: 'ConfigMap', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'secrets', kind: 'Secret', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'persistentvolumeclaims', kind: 'PersistentVolumeClaim', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'nodes', kind: 'Node', namespaced: false, scope: 'Cluster', verbs: [] },
+  { group: '', version: 'v1', resource: 'namespaces', kind: 'Namespace', namespaced: false, scope: 'Cluster', verbs: [] },
+  { group: '', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, scope: 'Namespaced', verbs: [] },
 ]
 
 /** Identifies the safe summary columns available in every generic resource table. */
@@ -174,6 +184,7 @@ const navGroups = [
     label: 'Observe',
     items: [
       { label: 'Cluster overview', resource: undefined, icon: Gauge },
+      { label: 'API resource catalog', path: '/catalog', icon: Box },
       { label: 'Pods', resource: 'pods', icon: CircleDot },
       { label: 'Nodes', resource: 'nodes', icon: Server },
       { label: 'Events', resource: 'events', icon: Activity },
@@ -206,7 +217,11 @@ export default function App() {
   const [contexts, setContexts] = useState<ContextsResponse | null>(null)
   const [selectedContext, setSelectedContext] = useState('')
   const [selectedNamespace, setSelectedNamespace] = useState('all')
-  const [definitions, setDefinitions] = useState<ResourceDefinition[]>(commonDefinitions)
+  const [definitions, setDefinitions] = useState<ResourceDefinition[]>([])
+  const [catalog, setCatalog] = useState<ResourceCatalogResponse | null>(null)
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogError, setCatalogError] = useState('')
+  const [catalogRefreshNonce, setCatalogRefreshNonce] = useState(0)
   const [writeEnabled, setWriteEnabled] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [contextLoading, setContextLoading] = useState(true)
@@ -264,17 +279,30 @@ export default function App() {
     const routeNamespace = new URLSearchParams(window.location.search).get('namespace')
     setSelectedNamespace(routeNamespace || readNamespace(selectedContext))
     setWriteEnabled(false)
-    fetchDiscovery(selectedContext)
-      .then((nextDefinitions) => {
-        if (active && nextDefinitions.length > 0) setDefinitions(nextDefinitions)
+    setCatalog(null)
+    setDefinitions([])
+    setCatalogLoading(true)
+    setCatalogError('')
+    fetchResourceCatalog(selectedContext, catalogRefreshNonce > 0)
+      .then((nextCatalog) => {
+        if (active) {
+          setCatalog(nextCatalog)
+          setDefinitions(nextCatalog.items)
+          setCatalogError('')
+        }
       })
-      .catch(() => {
-        if (active) setDefinitions((currentDefinitions) => currentDefinitions.length ? currentDefinitions : commonDefinitions)
+      .catch((loadError: Error) => {
+        if (active) {
+          setCatalog(null)
+          setDefinitions([])
+          setCatalogError(loadError.message)
+        }
       })
+      .finally(() => active && setCatalogLoading(false))
     return () => {
       active = false
     }
-  }, [selectedContext, contextRevision])
+  }, [selectedContext, contextRevision, catalogRefreshNonce])
 
   /** Forces a kubeconfig reload while preserving the selected context and namespace. */
   async function reloadKubeconfigSources() {
@@ -297,6 +325,11 @@ export default function App() {
         setContextLoading(false)
       }
     }
+  }
+
+  /** Retries API discovery and invalidates the server-side catalog cache. */
+  function retryCatalog() {
+    setCatalogRefreshNonce((value) => value + 1)
   }
 
   /** Navigates to a route while preserving the selected context and namespace. */
@@ -339,15 +372,26 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
-  const activeDefinition = route.resource ? resolveDefinition(route.resource, definitions) : undefined
+  const activeDefinition = route.resource ? resolveCatalogDefinition(route, definitions) : undefined
+  const ambiguousShortRoute = route.resource ? isAmbiguousCatalogRoute(route, definitions) : false
   const activeContext = contexts?.contexts.find((item) => item.name === selectedContext)
   const validResourceName = route.name && route.name !== 'undefined' && route.name !== 'null' ? route.name : undefined
   const content = !contexts || (contexts.contexts.length > 0 && !selectedContext) ? (
     <LoadingState label="Reading local kubeconfig" />
   ) : route.view === 'history' ? (
     <MutationHistoryPage contexts={contexts} selectedContext={selectedContext} activeContext={activeContext} revision={contextRevision} />
+  ) : route.view === 'catalog' ? (
+    <ResourceCatalogPage catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} onOpen={(definition) => navigate(catalogResourcePath(definition), definition.resource)} />
   ) : contexts.error || contexts.contexts.length === 0 ? (
     <SetupState error={contexts.error} />
+  ) : route.resource && catalogLoading && !catalog ? (
+    <LoadingState label="Reading the Kubernetes API catalog" />
+  ) : route.resource && catalogError && !catalog ? (
+    <CatalogState title="Resource catalog unavailable" detail={catalogError} onRetry={retryCatalog} />
+  ) : route.resource && ambiguousShortRoute ? (
+    <CatalogState title="Resource route is ambiguous" detail={`The short route /resources/${route.resource} matches more than one discovered API resource. Open the catalog and choose its full group/version/resource identity.`} onRetry={() => navigate('/catalog')} />
+  ) : route.resource && !activeDefinition ? (
+    <CatalogState title="Resource is not in the catalog" detail="This deep link does not match a currently discovered group, version, and resource. Refresh discovery before retrying." onRetry={retryCatalog} />
   ) : validResourceName && activeDefinition ? (
     <ResourceDetailPage
       context={selectedContext}
@@ -355,9 +399,9 @@ export default function App() {
       definition={activeDefinition}
       name={validResourceName}
       writeEnabled={writeEnabled}
-      onBack={() => navigate(`/resources/${activeDefinition.resource}`, activeDefinition.resource)}
-      onOpenEvent={(event) => navigate(`/resources/events/${encodeURIComponent(event.name)}`, 'events', event.name, event.namespace || undefined)}
-      onOpenResource={(definition, resourceName, resourceNamespace) => navigate(`/resources/${definition.resource}/${encodeURIComponent(resourceName)}`, definition.resource, resourceName, resourceNamespace)}
+      onBack={() => navigate(catalogResourcePath(activeDefinition), activeDefinition.resource)}
+      onOpenEvent={(event) => navigate(catalogEventResourcePath(definitions, event.name), 'events', event.name, event.namespace || undefined)}
+      onOpenResource={(definition, resourceName, resourceNamespace) => navigate(catalogResourcePath(definition, resourceName), definition.resource, resourceName, resourceNamespace)}
     />
   ) : route.resource && activeDefinition ? (
     <ResourceListPage
@@ -365,8 +409,8 @@ export default function App() {
       namespace={selectedNamespace}
       definition={activeDefinition}
       writeEnabled={writeEnabled}
-      onOpen={(name, itemNamespace) => navigate(`/resources/${activeDefinition.resource}/${encodeURIComponent(name)}`, activeDefinition.resource, name, activeDefinition.namespaced && selectedNamespace === 'all' ? itemNamespace : undefined)}
-      onCreate={() => navigate(`/resources/${activeDefinition.resource}/new`, activeDefinition.resource, 'new')}
+      onOpen={(name, itemNamespace) => navigate(catalogResourcePath(activeDefinition, name), activeDefinition.resource, name, activeDefinition.namespaced && selectedNamespace === 'all' ? itemNamespace : undefined)}
+      onCreate={() => navigate(catalogResourcePath(activeDefinition, 'new'), activeDefinition.resource, 'new')}
     />
   ) : (
     <OverviewPage context={selectedContext} contexts={contexts} activeContext={activeContext} revision={contextRevision} />
@@ -393,7 +437,7 @@ export default function App() {
               {group.items.map((item) => {
                 const Icon = item.icon
                 const isActive = 'path' in item ? route.path === item.path : item.resource ? route.resource === item.resource : !route.resource && !route.view
-                const destination = 'path' in item && item.path ? item.path : item.resource ? `/resources/${item.resource}` : '/'
+                const destination = 'path' in item && item.path ? item.path : item.resource === 'events' ? catalogEventResourcePath(definitions) : item.resource ? catalogResourcePathForSlug(item.resource, definitions) : '/'
                 return (
                   <a
                     className={`nav-item ${isActive ? 'nav-item-active' : ''}`}
@@ -424,7 +468,7 @@ export default function App() {
           <div className="crumbs">
             <span className="crumb-muted">KubeHaggis</span>
             <span className="crumb-slash">/</span>
-            <span>{route.view === 'history' ? 'Mutation history' : route.resource ? titleCase(route.resource) : 'Cluster overview'}</span>
+            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'catalog' ? 'API catalog' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
           </div>
           <div className="topbar-tools">
             <ContextPicker contexts={contexts?.contexts ?? []} value={selectedContext} onChange={changeContext} />
@@ -447,6 +491,7 @@ export default function App() {
         </header>
         <div className="page-scroll">
           {contexts && !(contexts.error && contexts.contexts.length === 0) && (contextLoading || contexts.sourceState === 'changed' || Boolean(contexts.reloadError) || Boolean(contextRequestError) || (Boolean(selectedContext) && contexts.contexts.length > 0 && !activeContext)) ? <KubeconfigNotice state={contexts.sourceState} error={contexts.reloadError || contextRequestError} selectedContext={selectedContext} selectedContextAvailable={Boolean(activeContext)} loading={contextLoading} onReload={() => void reloadKubeconfigSources()} /> : null}
+          {selectedContext && (catalogLoading || Boolean(catalogError) || (catalog && catalog.state !== 'available')) ? <DiscoveryNotice catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} /> : null}
           {content}
         </div>
       </main>
@@ -817,6 +862,64 @@ function LoadingState({ label }: { label: string }) {
 /** Renders an empty state with a concise next action. */
 function EmptyState({ title, detail }: { title: string; detail: string }) {
   return <div className="state-page"><div className="state-card"><span className="state-icon"><Box size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> Quiet field</span><h1>{title}</h1><p>{detail}</p></div></div>
+}
+
+/** Renders explicit discovery health while keeping usable catalog rows visible. */
+function DiscoveryNotice({ catalog, loading, error, onRetry }: { catalog: ResourceCatalogResponse | null; loading: boolean; error: string; onRetry: () => void }) {
+  const issueCount = catalog?.issues?.length ?? 0
+  let title = 'API catalog is partial'
+  let detail = `${issueCount} discovery source${issueCount === 1 ? '' : 's'} need attention. Known resources remain available.`
+  let tone = 'partial'
+  if (loading) {
+    title = 'Reading the Kubernetes API catalog'
+    detail = 'Loading every served API group and version. The catalog will not be reduced to a preferred-version shortcut.'
+    tone = 'loading'
+  } else if (error) {
+    title = 'API catalog could not be loaded'
+    detail = 'The current resource route stays unresolved until discovery succeeds. Retry after the API server or permissions recover.'
+    tone = 'error'
+  } else if (catalog?.state === 'permission-denied') {
+    title = 'API catalog access is restricted'
+    detail = 'Kubernetes RBAC denied discovery for the available API sources. Retry after access changes.'
+    tone = 'error'
+  } else if (catalog?.state === 'unavailable') {
+    title = 'Some Kubernetes APIs are unavailable'
+    detail = 'The catalog retained any successful discovery results. Retry to check unavailable API groups again.'
+    tone = 'unavailable'
+  } else if (catalog?.state === 'error') {
+    title = 'API discovery returned an error'
+    detail = 'Some group or version metadata could not be read. Retry to refresh the catalog.'
+    tone = 'error'
+  }
+  return <div className={`discovery-notice discovery-notice-${tone}`} role="status"><span className="discovery-notice-mark">{loading ? <LoaderCircle size={15} className="spin" /> : <AlertTriangle size={15} />}</span><div><strong>{title}</strong><span>{detail}</span>{catalog?.issues?.slice(0, 3).map((issue, index) => <code key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}>{issue.message}</code>)}{error && <code>{error}</code>}</div>{!loading && <button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={14} /> Retry discovery</button>}</div>
+}
+
+/** Renders the complete grouped API resource catalog without truncating large CRD sets. */
+function ResourceCatalogPage({ catalog, loading, error, onRetry, onOpen }: { catalog: ResourceCatalogResponse | null; loading: boolean; error: string; onRetry: () => void; onOpen: (definition: ResourceDefinition) => void }) {
+  if (loading && !catalog) return <LoadingState label="Reading the Kubernetes API catalog" />
+  if (error && !catalog) return <CatalogState title="Resource catalog unavailable" detail={error} onRetry={onRetry} />
+  if (!catalog) return <CatalogState title="No API catalog loaded" detail="Choose a cluster context to read its discoverable resources." onRetry={onRetry} />
+  const groups = groupResourceCatalog(catalog.items)
+  return <div className="catalog-page">
+    <section className="catalog-intro">
+      <div><div className="eyebrow"><span className="eyebrow-mark" /> Kubernetes API / discovery</div><h1>Resource catalog</h1><p className="intro-copy">Every discovered top-level resource, served version, namespace scope, and subresource capability in this cluster. Short links are only retained when their resource name is unambiguous.</p></div>
+      <div className="catalog-stamp"><span className="stamp-label">Catalog coverage</span><strong>{catalog.items.length}</strong><code>{catalog.state === 'available' ? 'all discovery sources online' : `${catalog.issues?.length ?? 0} source issues`}</code></div>
+    </section>
+    {catalog.issues?.length ? <div className="catalog-issues">{catalog.issues.map((issue, index) => <div className={`catalog-issue catalog-issue-${issue.state}`} key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={14} /><div><strong>{issue.group ? `${issue.group}/${issue.version}` : issue.version || 'API discovery'}</strong><span>{issue.message}</span></div><button type="button" className="text-button" onClick={onRetry}>Retry</button></div>)}</div> : null}
+    {!groups.length ? <div className="catalog-empty"><Box size={22} /><strong>No top-level resources were discovered</strong><span>Retry discovery when the Kubernetes API is reachable.</span><button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={14} /> Refresh catalog</button></div> : <div className="catalog-groups">{groups.map(({ group, versions }) => <section className="catalog-group" key={group}><div className="catalog-group-heading"><span className="panel-eyebrow">API group</span><h2>{group || 'Core'}</h2><code>{versions.reduce((total, version) => total + version.definitions.length, 0)} resources</code></div>{versions.map(({ version, definitions }) => <div className="catalog-version" key={`${group}/${version}`}><div className="catalog-version-heading"><strong>{version}</strong><span>{definitions.length} top-level resource{definitions.length === 1 ? '' : 's'}</span></div><div className="catalog-table"><div className="catalog-table-heading"><span>Resource</span><span>Kind</span><span>Scope</span><span>Discovery</span><span>Capabilities</span></div>{definitions.map((definition) => <CatalogResourceRow key={`${definition.group}/${definition.version}/${definition.resource}`} definition={definition} onOpen={onOpen} />)}</div></div>)}</section>)}</div>}
+  </div>
+}
+
+/** Renders one complete GVR row with verbs, aliases, categories, and subresources. */
+function CatalogResourceRow({ definition, onOpen }: { definition: ResourceDefinition; onOpen: (definition: ResourceDefinition) => void }) {
+  const scope = definition.scope || (definition.namespaced ? 'Namespaced' : 'Cluster')
+  const subresources = definition.subresources ?? []
+  return <button type="button" className="catalog-row" onClick={() => onOpen(definition)}><span className="catalog-resource-cell"><strong>{definition.resource}</strong><code>{definition.group ? `${definition.group}/${definition.version}` : definition.version}</code></span><span className="catalog-kind-cell">{definition.kind || 'Unknown kind'}</span><span><span className={`catalog-scope catalog-scope-${scope.toLowerCase()}`}>{scope}</span></span><span className="catalog-meta-cell"><span className="catalog-chip-list">{(definition.verbs ?? []).map((verb) => <code key={verb}>{verb}</code>)}</span>{definition.shortNames?.length ? <small>aliases: {definition.shortNames.join(', ')}</small> : null}{definition.categories?.length ? <small>categories: {definition.categories.join(', ')}</small> : null}</span><span className="catalog-meta-cell">{subresources.length ? <span className="catalog-chip-list">{subresources.map((subresource) => <code key={subresource.name}>{subresource.name}</code>)}</span> : <small>No discovered subresources</small>}{subresources.map((subresource) => <small key={`${subresource.name}-verbs`}>{subresource.name}: {(subresource.verbs ?? []).join(', ') || 'verbs not advertised'}</small>)}</span></button>
+}
+
+/** Renders a retryable resource-catalog failure without substituting a guessed resource. */
+function CatalogState({ title, detail, onRetry }: { title: string; detail: string; onRetry: () => void }) {
+  return <div className="state-page"><div className="state-card"><span className="state-icon state-icon-warning"><AlertTriangle size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> API catalog</span><h1>{title}</h1><p>{detail}</p><button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={15} /> Retry discovery</button></div></div>
 }
 
 /** Renders the read-only local mutation ledger with bounded search and outcome filters. */
@@ -3627,10 +3730,7 @@ function NamespacePicker({ context, value, revision, onChange }: { context: stri
 
 /** Reads the current browser URL into the KubeHaggis route model. */
 function readRoute(): RouteState {
-  const parts = window.location.pathname.split('/').filter(Boolean)
-  if (parts[0] === 'history') return { path: '/history', view: 'history' }
-  if (parts[0] !== 'resources' || !parts[1]) return { path: '/' }
-  return { path: window.location.pathname, resource: decodeURIComponent(parts[1]), name: parts[2] ? decodeURIComponent(parts[2]) : undefined, namespace: new URLSearchParams(window.location.search).get('namespace') || undefined }
+  return parseResourceRoute(window.location.pathname, window.location.search)
 }
 
 /** Reads a string from a resource metadata object. */
@@ -3639,11 +3739,6 @@ function metadataString(object: ResourceObject, field: string): string {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return ''
   const value = (metadata as Record<string, unknown>)[field]
   return typeof value === 'string' ? value : ''
-}
-
-/** Resolves a resource slug against discovered definitions and common fallbacks. */
-function resolveDefinition(resource: string, definitions: ResourceDefinition[]): ResourceDefinition {
-  return definitions.find((item) => item.resource === resource) ?? commonDefinitions.find((item) => item.resource === resource) ?? { group: '', version: 'v1', resource, kind: titleCase(resource), namespaced: true, verbs: [] }
 }
 
 /** Identifies custom-resource candidates without probing built-in API groups for CRD schemas. */

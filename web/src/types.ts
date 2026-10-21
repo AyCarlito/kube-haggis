@@ -51,10 +51,40 @@ export interface ResourceDefinition {
   resource: string
   kind: string
   namespaced: boolean
+  scope: ResourceScope
   customResource?: boolean
   verbs: string[]
   shortNames?: string[]
   categories?: string[]
+  subresources?: ResourceSubresource[]
+}
+
+/** Identifies the namespace scope reported by Kubernetes discovery. */
+export type ResourceScope = 'Namespaced' | 'Cluster'
+
+/** Describes one discovered subresource capability attached to a top-level resource. */
+export interface ResourceSubresource {
+  name: string
+  verbs: string[]
+}
+
+/** Identifies the aggregate health of the discovery-backed catalog. */
+export type ResourceCatalogState = 'available' | 'partial' | 'unavailable' | 'permission-denied' | 'error'
+
+/** Describes one API group or version that could not be completely discovered. */
+export interface DiscoveryIssue {
+  group?: string
+  version?: string
+  state: Exclude<ResourceCatalogState, 'available' | 'partial'>
+  message: string
+  retryable: boolean
+}
+
+/** Contains the complete resource catalog and explicit discovery issue state. */
+export interface ResourceCatalogResponse {
+  items: ResourceDefinition[]
+  state: ResourceCatalogState
+  issues?: DiscoveryIssue[]
 }
 
 /** Identifies why a schema form is available or why YAML remains the fallback. */
@@ -528,7 +558,9 @@ export interface PortForwardMessage {
 /** Represents the browser route used by the single-page application. */
 export interface RouteState {
   path: string
-  view?: 'history'
+  view?: 'history' | 'catalog'
+  group?: string
+  version?: string
   resource?: string
   name?: string
   namespace?: string

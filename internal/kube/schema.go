@@ -121,40 +121,58 @@ func loadResourceSchema(ctx context.Context, client dynamic.Interface, group, ve
 
 // markCustomResourceDefinitions annotates discovered definitions without making CRDs a typed resource implementation.
 func markCustomResourceDefinitions(ctx context.Context, client dynamic.Interface, definitions []ResourceDefinition) {
+	_ = markCustomResourceDefinitionsWithError(ctx, client, definitions)
+}
+
+// markCustomResourceDefinitionsWithError annotates all discovered CRD versions and reports metadata access failures.
+func markCustomResourceDefinitionsWithError(ctx context.Context, client dynamic.Interface, definitions []ResourceDefinition) error {
 	if client == nil || len(definitions) == 0 {
-		return
+		return nil
 	}
-	list, err := client.Resource(customResourceDefinitionGVR()).List(ctx, metav1.ListOptions{Limit: 1000})
-	if err != nil {
-		return
-	}
-	for index := range list.Items {
-		crd := &list.Items[index]
-		group, foundGroup, groupErr := unstructured.NestedString(crd.Object, "spec", "group")
-		plural, foundPlural, pluralErr := unstructured.NestedString(crd.Object, "spec", "names", "plural")
-		if groupErr != nil || pluralErr != nil || !foundGroup || !foundPlural {
-			continue
+	resourceClient := client.Resource(customResourceDefinitionGVR())
+	continueToken := ""
+	seenContinueTokens := make(map[string]struct{})
+	for {
+		list, err := resourceClient.List(ctx, metav1.ListOptions{Continue: continueToken})
+		if err != nil {
+			return err
 		}
-		versions, foundVersions, versionsErr := unstructured.NestedSlice(crd.Object, "spec", "versions")
-		if versionsErr != nil || !foundVersions {
-			continue
-		}
-		for _, rawVersion := range versions {
-			versionObject, ok := rawVersion.(map[string]interface{})
-			if !ok {
+		for index := range list.Items {
+			crd := &list.Items[index]
+			group, foundGroup, groupErr := unstructured.NestedString(crd.Object, "spec", "group")
+			plural, foundPlural, pluralErr := unstructured.NestedString(crd.Object, "spec", "names", "plural")
+			if groupErr != nil || pluralErr != nil || !foundGroup || !foundPlural {
 				continue
 			}
-			versionName, foundName, nameErr := unstructured.NestedString(versionObject, "name")
-			if nameErr != nil || !foundName {
+			versions, foundVersions, versionsErr := unstructured.NestedSlice(crd.Object, "spec", "versions")
+			if versionsErr != nil || !foundVersions {
 				continue
 			}
-			for definitionIndex := range definitions {
-				definition := &definitions[definitionIndex]
-				if definition.Group == group && definition.Version == versionName && definition.Resource == plural {
-					definition.CustomResource = true
+			for _, rawVersion := range versions {
+				versionObject, ok := rawVersion.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				versionName, foundName, nameErr := unstructured.NestedString(versionObject, "name")
+				if nameErr != nil || !foundName {
+					continue
+				}
+				for definitionIndex := range definitions {
+					definition := &definitions[definitionIndex]
+					if definition.Group == group && definition.Version == versionName && definition.Resource == plural {
+						definition.CustomResource = true
+					}
 				}
 			}
 		}
+		continueToken = list.GetContinue()
+		if continueToken == "" {
+			return nil
+		}
+		if _, found := seenContinueTokens[continueToken]; found {
+			return fmt.Errorf("CustomResourceDefinition discovery returned a repeated continuation token")
+		}
+		seenContinueTokens[continueToken] = struct{}{}
 	}
 }
 

@@ -188,6 +188,9 @@ func TestServiceApplyResourcePropagatesRBACAndConflict(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if writeMutationDiscoveryResponse(writer, request) {
+					return
+				}
 				if request.Method != http.MethodPut {
 					t.Errorf("expected resource update, got %s", request.Method)
 				}
@@ -216,6 +219,9 @@ func TestServiceApplyResourcePropagatesRBACAndConflict(t *testing.T) {
 func TestServiceApplyResourceRejectsMalformedDocumentBeforeMutation(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if writeMutationDiscoveryResponse(writer, request) {
+			return
+		}
 		requests++
 		http.Error(writer, "unexpected mutation", http.StatusInternalServerError)
 	}))
@@ -229,4 +235,27 @@ func TestServiceApplyResourceRejectsMalformedDocumentBeforeMutation(t *testing.T
 	if requests != 0 {
 		t.Fatalf("malformed resource reached the fake API: %d requests", requests)
 	}
+}
+
+// writeMutationDiscoveryResponse serves the minimum discovery surface required before generic mutation tests.
+func writeMutationDiscoveryResponse(writer http.ResponseWriter, request *http.Request) bool {
+	writeJSON := func(value interface{}) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(value)
+	}
+	switch request.URL.Path {
+	case "/api":
+		writeJSON(&metav1.APIVersions{Versions: []string{"v1"}})
+	case "/api/v1":
+		writeJSON(&metav1.APIResourceList{GroupVersion: "v1", APIResources: []metav1.APIResource{{Name: "configmaps", Kind: "ConfigMap", Namespaced: true, Verbs: []string{"get", "list"}}}})
+	case "/apis":
+		writeJSON(&metav1.APIGroupList{Groups: []metav1.APIGroup{{Name: "apps", Versions: []metav1.GroupVersionForDiscovery{{GroupVersion: "apps/v1", Version: "v1"}}, PreferredVersion: metav1.GroupVersionForDiscovery{GroupVersion: "apps/v1", Version: "v1"}}}})
+	case "/apis/apps/v1":
+		writeJSON(&metav1.APIResourceList{GroupVersion: "apps/v1", APIResources: []metav1.APIResource{{Name: "deployments", Kind: "Deployment", Namespaced: true, Verbs: []string{"get", "list", "update"}}}})
+	case "/apis/apiextensions.k8s.io/v1/customresourcedefinitions":
+		writeJSON(map[string]interface{}{"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinitionList", "items": []interface{}{}})
+	default:
+		return false
+	}
+	return true
 }

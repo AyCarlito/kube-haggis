@@ -20,16 +20,18 @@ type discoveryCacheKey struct {
 	revision    uint64
 }
 
-// discoveryCacheEntry stores normalized discovery and its partial-read error.
+// discoveryCacheEntry stores normalized discovery and explicit partial-read metadata.
 type discoveryCacheEntry struct {
 	definitions []ResourceDefinition
+	issues      []DiscoveryIssue
 	err         error
 }
 
 // discoveryFlight represents one in-progress discovery load shared by callers.
 type discoveryFlight struct {
-	done   chan struct{}
-	result discoveryCacheEntry
+	done       chan struct{}
+	result     discoveryCacheEntry
+	generation uint64
 }
 
 // cloneResourceDefinitions returns an isolated copy of discovery metadata.
@@ -40,12 +42,23 @@ func cloneResourceDefinitions(definitions []ResourceDefinition) []ResourceDefini
 		cloned[index].Verbs = append([]string(nil), definition.Verbs...)
 		cloned[index].ShortNames = append([]string(nil), definition.ShortNames...)
 		cloned[index].Categories = append([]string(nil), definition.Categories...)
+		cloned[index].Subresources = make([]ResourceSubresource, len(definition.Subresources))
+		for subresourceIndex, subresource := range definition.Subresources {
+			cloned[index].Subresources[subresourceIndex] = subresource
+			cloned[index].Subresources[subresourceIndex].Verbs = append([]string(nil), subresource.Verbs...)
+		}
 	}
 	return cloned
 }
 
 // cachedDiscovery loads one context's discovery once for the active kubeconfig revision.
 func (s *Service) cachedDiscovery(ctx context.Context, contextName string, revision uint64, dynamicClient dynamic.Interface, discoveryClient discovery.DiscoveryInterface) ([]ResourceDefinition, error) {
+	catalog, err := s.cachedDiscoveryCatalog(ctx, contextName, revision, dynamicClient, discoveryClient)
+	return catalog.Items, err
+}
+
+// cachedDiscoveryCatalog loads one context's complete catalog once for the active kubeconfig revision.
+func (s *Service) cachedDiscoveryCatalog(ctx context.Context, contextName string, revision uint64, dynamicClient dynamic.Interface, discoveryClient discovery.DiscoveryInterface) (ResourceCatalog, error) {
 	key := discoveryCacheKey{contextName: contextName, revision: revision}
 	s.mu.Lock()
 	if s.discoveryCache == nil {
@@ -54,15 +67,20 @@ func (s *Service) cachedDiscovery(ctx context.Context, contextName string, revis
 	if s.discoveryFlights == nil {
 		s.discoveryFlights = make(map[discoveryCacheKey]*discoveryFlight)
 	}
-	if entry, found := s.discoveryCache[key]; found {
-		definitions := cloneResourceDefinitions(entry.definitions)
-		s.mu.Unlock()
-		return definitions, entry.err
+	if s.discoveryGenerations == nil {
+		s.discoveryGenerations = make(map[discoveryCacheKey]uint64)
 	}
+	if entry, found := s.discoveryCache[key]; found {
+		catalog := resourceCatalogFromEntry(entry)
+		s.mu.Unlock()
+		return catalog, entry.err
+	}
+	generation := s.discoveryGenerations[key]
 	flight, found := s.discoveryFlights[key]
-	if !found {
-		flight = &discoveryFlight{done: make(chan struct{})}
+	if !found || flight.generation != generation {
+		flight = &discoveryFlight{done: make(chan struct{}), generation: generation}
 		s.discoveryFlights[key] = flight
+		found = false
 	}
 	s.mu.Unlock()
 
@@ -71,9 +89,9 @@ func (s *Service) cachedDiscovery(ctx context.Context, contextName string, revis
 	}
 	select {
 	case <-flight.done:
-		return cloneResourceDefinitions(flight.result.definitions), flight.result.err
+		return resourceCatalogFromEntry(flight.result), flight.result.err
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return ResourceCatalog{}, ctx.Err()
 	}
 }
 
@@ -83,17 +101,21 @@ func (s *Service) loadDiscovery(key discoveryCacheKey, flight *discoveryFlight, 
 	defer cancel()
 	resultChannel := make(chan discoveryCacheEntry, 1)
 	go func() {
-		definitions, discoveryErr := discoverDefinitions(discoveryClient)
+		definitions, issues, discoveryErr := discoverCompleteDefinitions(discoveryClient)
 		if loadContext.Err() != nil {
 			resultChannel <- discoveryCacheEntry{err: loadContext.Err()}
 			return
 		}
-		markCustomResourceDefinitions(loadContext, dynamicClient, definitions)
+		if customResourceErr := markCustomResourceDefinitionsWithError(loadContext, dynamicClient, definitions); customResourceErr != nil {
+			issues = append(issues, discoveryIssueForError("apiextensions.k8s.io", "v1", customResourceErr))
+			discoveryErr = errors.Join(discoveryErr, customResourceErr)
+		}
+		issues = deduplicateDiscoveryIssues(issues)
 		if loadContext.Err() != nil {
 			resultChannel <- discoveryCacheEntry{err: loadContext.Err()}
 			return
 		}
-		resultChannel <- discoveryCacheEntry{definitions: cloneResourceDefinitions(definitions), err: discoveryErr}
+		resultChannel <- discoveryCacheEntry{definitions: cloneResourceDefinitions(definitions), issues: cloneDiscoveryIssues(issues), err: discoveryErr}
 	}()
 
 	var entry discoveryCacheEntry
@@ -105,7 +127,7 @@ func (s *Service) loadDiscovery(key discoveryCacheKey, flight *discoveryFlight, 
 
 	s.mu.Lock()
 	flight.result = entry
-	if s.revision == key.revision && !errors.Is(entry.err, context.DeadlineExceeded) && !errors.Is(entry.err, context.Canceled) {
+	if s.revision == key.revision && s.discoveryGenerations[key] == flight.generation && !errors.Is(entry.err, context.DeadlineExceeded) && !errors.Is(entry.err, context.Canceled) {
 		s.discoveryCache[key] = entry
 	}
 	if current, stillLoading := s.discoveryFlights[key]; stillLoading && current == flight {
