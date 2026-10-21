@@ -80,17 +80,24 @@ import {
 import {
   catalogEventResourcePath,
   catalogResourcePath,
-  catalogResourcePathForSlug,
+  catalogStaticNavigationPath,
+  filterResourceCatalog,
   groupResourceCatalog,
   isAmbiguousCatalogRoute,
   parseResourceRoute,
+  relatedResourceDetailPath,
   resolveCatalogDefinition,
 } from './catalog'
-import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchHref, searchQueryEquals, searchResultKey, searchResultResourcePath } from './search'
+import { overviewEventDetailPath, overviewEventsPath, overviewMetricDestination, overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
+import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchGroupOptions, searchHref, searchKindOptions, searchQueryEquals, searchResourceOptions, searchResultKey, searchResultResourcePath, searchDefinitionCandidates } from './search'
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
+import { ComputeReadPackView } from './computeReadPack'
+import { parseSchemaInput, projectSchemaIdentityFields, validateSchemaScalarValue } from './schemaForm'
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
+import { parseWorkloadReplicaInput, workloadReplicaInput, WORKLOAD_REPLICA_VALIDATION_MESSAGE } from './workload'
+import { MetricSample } from './metricSample'
 import type {
   AuditEntry,
   AuditResponse,
@@ -130,6 +137,7 @@ import type {
   StorageClassReadPackData,
   ServiceAccountReadPackData,
   PodReadPackData,
+  ComputeReadPackData,
   OperationalReadPackReference,
   OperationalCondition,
   PodContainerSummary,
@@ -246,6 +254,7 @@ const navGroups = [
     label: 'Configure',
     items: [
       { label: 'Services', resource: 'services', icon: Network },
+      { label: 'Ingress', resource: 'ingresses', icon: Network },
       { label: 'ConfigMaps', resource: 'configmaps', icon: FileCode2 },
       { label: 'Secrets', resource: 'secrets', icon: LockKeyhole },
       { label: 'Storage claims', resource: 'persistentvolumeclaims', icon: HardDrive },
@@ -432,6 +441,8 @@ export default function App() {
     <ResourceCatalogPage catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} onOpen={(definition) => navigate(catalogResourcePath(definition), definition.resource)} />
   ) : contexts.error || contexts.contexts.length === 0 ? (
     <SetupState error={contexts.error} />
+  ) : route.view === 'workloads' ? (
+    <WorkloadsPage context={selectedContext} namespace={selectedNamespace} definitions={definitions} catalogLoading={catalogLoading} catalogError={catalogError} />
   ) : route.resource && catalogLoading && !catalog ? (
     <LoadingState label="Reading the Kubernetes API catalog" />
   ) : route.resource && catalogError && !catalog ? (
@@ -465,7 +476,7 @@ export default function App() {
       onCreate={() => navigate(catalogResourcePath(activeDefinition, 'new'), activeDefinition.resource, 'new')}
     />
   ) : (
-    <OverviewPage context={selectedContext} contexts={contexts} activeContext={activeContext} revision={contextRevision} />
+    <OverviewPage context={selectedContext} namespace={selectedNamespace} definitions={definitions} contexts={contexts} activeContext={activeContext} revision={contextRevision} />
   )
 
   return (
@@ -489,7 +500,7 @@ export default function App() {
               {group.items.map((item) => {
                 const Icon = item.icon
                 const isActive = 'path' in item ? route.path === item.path : item.resource ? route.resource === item.resource : !route.resource && !route.view
-                const destination = 'path' in item && item.path ? item.path : item.resource === 'events' ? catalogEventResourcePath(definitions) : item.resource ? catalogResourcePathForSlug(item.resource, definitions) : '/'
+                const destination = 'path' in item && item.path ? item.path : item.resource ? catalogStaticNavigationPath(item.resource, definitions) : '/'
                 return (
                   <a
                     className={`nav-item ${isActive ? 'nav-item-active' : ''}`}
@@ -520,7 +531,7 @@ export default function App() {
           <div className="crumbs">
             <span className="crumb-muted">KubeHaggis</span>
             <span className="crumb-slash">/</span>
-            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'diagnostics' ? 'Diagnostics' : route.view === 'search' ? 'Global search' : route.view === 'catalog' ? 'API catalog' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
+            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'diagnostics' ? 'Diagnostics' : route.view === 'search' ? 'Global search' : route.view === 'catalog' ? 'API catalog' : route.view === 'workloads' ? 'Workloads' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
           </div>
           <div className="topbar-tools">
             <ContextPicker contexts={contexts?.contexts ?? []} value={selectedContext} onChange={changeContext} />
@@ -552,7 +563,7 @@ export default function App() {
 }
 
 /** Renders the cluster overview and its health summary panels. */
-function OverviewPage({ context, contexts, activeContext, revision }: { context: string; contexts: ContextsResponse | null; activeContext?: ContextSummary; revision: number }) {
+function OverviewPage({ context, namespace, definitions, contexts, activeContext, revision }: { context: string; namespace: string; definitions: ResourceDefinition[]; contexts: ContextsResponse | null; activeContext?: ContextSummary; revision: number }) {
   const [overview, setOverview] = useState<ClusterOverview | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(Boolean(context))
@@ -596,6 +607,10 @@ function OverviewPage({ context, contexts, activeContext, revision }: { context:
   const workloadHealth = overview.workloads.deployments + overview.workloads.statefulSets + overview.workloads.daemonSets
   const workloadReady = overview.workloads.healthyDeployments + overview.workloads.healthyStatefulSets + overview.workloads.healthyDaemonSets
   const warningCount = overview.warnings.length
+  const targets = overviewNavigationTargets(definitions)
+  const eventsPath = overviewEventsPath(definitions)
+  const eventsHref = eventsPath ? routeHref(eventsPath, context, namespace) : undefined
+  const eventScope = namespace === 'all' ? 'all namespaces' : `namespace ${namespace}`
 
   return (
     <div className="dashboard-page">
@@ -613,29 +628,29 @@ function OverviewPage({ context, contexts, activeContext, revision }: { context:
       </section>
 
       <section className="stat-grid">
-        <MetricCard label="Nodes ready" value={`${overview.nodes.ready}/${overview.nodes.total}`} detail={overview.nodes.pressure ? `${overview.nodes.pressure} under pressure` : `${overview.nodes.cordoned} cordoned`} tone={overview.nodes.notReady ? 'warning' : 'good'} icon={<Server size={17} />} />
-        <MetricCard label="Pods running" value={`${overview.pods.running}`} detail={`${overview.pods.pending} pending / ${overview.pods.failed} failed`} tone={overview.pods.failed || overview.pods.pending ? 'warning' : 'good'} icon={<CircleDot size={17} />} />
-        <MetricCard label="Workload health" value={workloadHealth ? `${workloadReady}/${workloadHealth}` : '—'} detail={`${overview.workloads.jobs} jobs / ${overview.workloads.cronJobs} schedules`} tone={workloadHealth && workloadReady < workloadHealth ? 'warning' : 'good'} icon={<Layers3 size={17} />} />
-        <MetricCard label="Storage claims" value={`${overview.storage.bound}/${overview.storage.total}`} detail={`${overview.storage.pending} pending / ${overview.storage.lost} lost`} tone={overview.storage.pending || overview.storage.lost ? 'warning' : 'good'} icon={<HardDrive size={17} />} />
+        <MetricCard label="Nodes ready" value={`${overview.nodes.ready}/${overview.nodes.total}`} detail={overview.nodes.pressure ? `${overview.nodes.pressure} under pressure` : `${overview.nodes.cordoned} cordoned`} tone={overview.nodes.notReady ? 'warning' : 'good'} icon={<Server size={17} />} href={targets.nodes ? routeHref(targets.nodes, context, namespace) : undefined} ariaLabel="Open the canonical Nodes list" />
+        <MetricCard label="Pods running" value={`${overview.pods.running}`} detail={`${overview.pods.pending} pending / ${overview.pods.failed} failed`} tone={overview.pods.failed || overview.pods.pending ? 'warning' : 'good'} icon={<CircleDot size={17} />} href={targets.pods ? routeHref(targets.pods, context, namespace) : undefined} ariaLabel="Open the canonical Pods list" />
+        <MetricCard label="Workload health" value={workloadHealth ? `${workloadReady}/${workloadHealth}` : '—'} detail={`${overview.workloads.jobs} jobs / ${overview.workloads.cronJobs} schedules`} tone={workloadHealth && workloadReady < workloadHealth ? 'warning' : 'good'} icon={<Layers3 size={17} />} href={targets.workloads ? routeHref(targets.workloads, context, namespace) : undefined} ariaLabel="Open the aggregate workload view for Deployments, StatefulSets, and DaemonSets" />
+        <MetricCard label="Storage claims" value={`${overview.storage.bound}/${overview.storage.total}`} detail={`${overview.storage.pending} pending / ${overview.storage.lost} lost`} tone={overview.storage.pending || overview.storage.lost ? 'warning' : 'good'} icon={<HardDrive size={17} />} href={targets.storageClaims ? routeHref(targets.storageClaims, context, namespace) : undefined} ariaLabel="Open the canonical PersistentVolumeClaim list" />
       </section>
 
       <section className="dashboard-grid">
         <div className="panel signal-panel">
-          <PanelHeading eyebrow="Signal check" title="What needs your eye" action={warningCount ? `${warningCount} warnings` : 'No warnings'} tone={warningCount ? 'warning' : 'good'} />
-          {overview.warnings.length ? <WarningList warnings={overview.warnings} /> : <QuietState icon={<ShieldCheck size={22} />} title="Nothing shouting" detail="No recent Warning Events were reported." />}
+          <PanelHeading eyebrow="Signal check" title="What needs your eye" action={eventsPath ? (warningCount ? `${warningCount} warnings` : 'No warnings') : 'Events unavailable'} actionHref={eventsHref} actionAriaLabel={eventsPath ? `Open Events list for ${eventScope}` : 'Events list unavailable because the exact core v1 Events resource is not in the current catalog'} tone={eventsPath ? (warningCount ? 'warning' : 'good') : 'neutral'} />
+          {overview.warnings.length ? <WarningList warnings={overview.warnings} definitions={definitions} eventsPath={eventsPath} context={context} namespace={namespace} /> : <QuietState icon={<ShieldCheck size={22} />} title="Nothing shouting" detail={eventsPath ? 'No recent Warning Events were reported.' : 'The exact core v1 Events resource is unavailable in the current API catalog.'} />}
         </div>
         <div className="panel posture-panel">
           <PanelHeading eyebrow="Cluster posture" title="Capacity & coverage" action={metricsStateLabel(overview.metricsAvailable, overview.metrics.state)} tone={metricsStateTone(overview.metricsAvailable, overview.metrics.state)} />
           <div className="posture-stack">
-            <PostureRow icon={<Layers3 size={16} />} label="Namespaces" value={String(overview.namespaces)} note="scoped workspaces" />
-            <PostureRow icon={<Activity size={16} />} label="Restarts" value={String(overview.pods.restarting)} note="Pods with restarts" tone={overview.pods.restarting ? 'warning' : 'good'} />
-            <PostureRow icon={<HardDrive size={16} />} label="Bound claims" value={String(overview.storage.bound)} note="PersistentVolumeClaims" />
+            <PostureRow icon={<Layers3 size={16} />} label="Namespaces" value={String(overview.namespaces)} note="scoped workspaces" href={targets.namespaces ? routeHref(targets.namespaces, context, namespace) : undefined} ariaLabel="Open the canonical Namespaces list" />
+            <PostureRow icon={<Activity size={16} />} label="Restarts" value={String(overview.pods.restarting)} note="Pods with restarts" tone={overview.pods.restarting ? 'warning' : 'good'} href={targets.podRestarts ? routeHref(targets.podRestarts, context, namespace) : undefined} ariaLabel="Open the canonical Pods list to inspect restarts" />
+            <PostureRow icon={<HardDrive size={16} />} label="Bound claims" value={String(overview.storage.bound)} note="PersistentVolumeClaims" href={targets.boundClaims ? routeHref(targets.boundClaims, context, namespace) : undefined} ariaLabel="Open the canonical PersistentVolumeClaim list" />
           </div>
           <div className="panel-note"><Gauge size={14} /> Native usage stays read-only and follows Kubernetes RBAC.</div>
         </div>
       </section>
 
-      <MetricsPanel metrics={overview.metrics} metricsAvailable={overview.metricsAvailable} loading={loading} />
+      <MetricsPanel metrics={overview.metrics} metricsAvailable={overview.metricsAvailable} loading={loading} definitions={definitions} context={context} namespace={namespace} />
 
       <section className="dashboard-footer-line">
         <span><RefreshCw size={13} /> Refreshed {relativeTime(overview.updatedAt)}</span>
@@ -646,8 +661,55 @@ function OverviewPage({ context, contexts, activeContext, revision }: { context:
   )
 }
 
+/** Renders the aggregate workload landing view without collapsing health into one controller kind. */
+function WorkloadsPage({ context, namespace, definitions, catalogLoading, catalogError }: { context: string; namespace: string; definitions: ResourceDefinition[]; catalogLoading: boolean; catalogError: string }) {
+  const targets = workloadNavigationTargets(definitions)
+  const controllerTargets = targets.slice(0, 3)
+  const taskTargets = targets.slice(3)
+  const availableCount = targets.filter((target) => target.path).length
+  const catalogLabel = catalogLoading && !definitions.length ? 'Reading catalog' : catalogError ? 'Catalog needs attention' : `${availableCount}/${targets.length} destinations`
+
+  return (
+    <div className="workload-page">
+      <section className="workload-intro">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-mark" /> Workload field / aggregate health</div>
+          <h1>Workloads</h1>
+          <p className="intro-copy">The overview health figure combines Deployments, StatefulSets, and DaemonSets. Use the exact resource destinations below to inspect each controller kind without losing the current context or namespace scope.</p>
+        </div>
+        <div className="context-stamp workload-stamp">
+          <span className="stamp-label">Navigation scope</span>
+          <code>{namespace === 'all' ? 'all namespaces' : namespace}</code>
+          <span className="stamp-status"><span className="signal-dot signal-dot-good" /> {catalogLabel}</span>
+        </div>
+      </section>
+      {catalogError && <div className="workload-catalog-notice"><AlertTriangle size={15} /><span>Some exact workload destinations are unavailable until API discovery succeeds: {catalogError}</span></div>}
+      <section className="workload-panel-grid">
+        <section className="panel workload-panel">
+          <div className="panel-heading"><div><span className="panel-eyebrow">Overview health sources</span><h2>Controller kinds</h2></div><span className="panel-action panel-action-good"><span />{controllerTargets.filter((target) => target.path).length}/3 available</span></div>
+          <p className="workload-panel-copy">These three Kubernetes workload kinds make up the aggregate Workload health card.</p>
+          <div className="workload-target-grid">{controllerTargets.map((target) => <WorkloadDestination key={target.key} target={target} context={context} namespace={namespace} />)}</div>
+        </section>
+        <section className="panel workload-panel">
+          <div className="panel-heading"><div><span className="panel-eyebrow">Adjacent task context</span><h2>Jobs &amp; schedules</h2></div><span className="panel-action panel-action-neutral"><span />{taskTargets.filter((target) => target.path).length}/2 available</span></div>
+          <p className="workload-panel-copy">Finite Jobs and scheduled CronJobs remain available beside the controller view.</p>
+          <div className="workload-target-grid">{taskTargets.map((target) => <WorkloadDestination key={target.key} target={target} context={context} namespace={namespace} />)}</div>
+        </section>
+      </section>
+    </div>
+  )
+}
+
+/** Renders one canonical workload destination or an explicit unavailable state. */
+function WorkloadDestination({ target, context, namespace }: { target: WorkloadNavigationTarget; context: string; namespace: string }) {
+  const icon = target.key === 'deployments' ? <Layers3 size={16} /> : target.key === 'statefulsets' ? <Database size={16} /> : target.key === 'daemonsets' ? <Zap size={16} /> : <Clock3 size={16} />
+  const content = <><span className="workload-target-icon">{icon}</span><span className="workload-target-copy"><strong>{target.label}</strong><span>{target.description}</span>{!target.path && <small>Unavailable in the current API catalog</small>}</span>{target.path ? <ArrowUpRight size={15} className="workload-target-arrow" /> : <span className="workload-target-state">Unavailable</span>}</>
+  if (!target.path) return <div className="workload-target workload-target-unavailable" aria-disabled="true">{content}</div>
+  return <a className="workload-target" href={routeHref(target.path, context, namespace)} aria-label={`Open the canonical ${target.label} list`}>{content}</a>
+}
+
 /** Renders native node and Pod usage charts with explicit source states. */
-function MetricsPanel({ metrics, metricsAvailable, loading }: { metrics: MetricsOverview; metricsAvailable: boolean; loading: boolean }) {
+function MetricsPanel({ metrics, metricsAvailable, loading, definitions, context, namespace }: { metrics: MetricsOverview; metricsAvailable: boolean; loading: boolean; definitions: ResourceDefinition[]; context: string; namespace: string }) {
   const hasNodeSamples = metrics.nodes.length > 0
   const hasPodSamples = metrics.pods.length > 0
   const hasSamples = hasNodeSamples || hasPodSamples
@@ -667,8 +729,8 @@ function MetricsPanel({ metrics, metricsAvailable, loading }: { metrics: Metrics
       {!hasSamples ? <MetricStateNotice state={displayState} message={displayState === 'loading' ? undefined : metrics.message} /> : null}
       {hasSamples ? (
         <div className="metrics-chart-grid">
-          <NodeUsageChart state={metrics.nodeState} message={metrics.nodeMessage} count={metrics.nodeCount} items={metrics.nodes} />
-          <PodUsageChart state={metrics.podState} message={metrics.podMessage} count={metrics.podCount} items={metrics.pods} />
+          <NodeUsageChart state={metrics.nodeState} message={metrics.nodeMessage} count={metrics.nodeCount} items={metrics.nodes} definitions={definitions} context={context} namespace={namespace} />
+          <PodUsageChart state={metrics.podState} message={metrics.podMessage} count={metrics.podCount} items={metrics.pods} definitions={definitions} context={context} />
         </div>
       ) : null}
       {hasMetricTimestamp(metrics.updatedAt) && <div className="metrics-panel-footer"><span><Activity size={13} /> Latest sample {relativeTime(metrics.updatedAt)}</span><span>{metrics.message || 'Native metrics are read through the local Go backend.'}</span></div>}
@@ -680,7 +742,7 @@ function MetricsPanel({ metrics, metricsAvailable, loading }: { metrics: Metrics
 type MetricsDisplayState = MetricsState | 'loading'
 
 /** Renders a node usage chart with CPU and memory capacity bars. */
-function NodeUsageChart({ state, message, count, items }: { state: MetricsState; message?: string; count: number; items: NodeMetric[] }) {
+function NodeUsageChart({ state, message, count, items, definitions, context, namespace }: { state: MetricsState; message?: string; count: number; items: NodeMetric[]; definitions: ResourceDefinition[]; context: string; namespace: string }) {
   const maxCpu = Math.max(...items.map((item) => item.usage.cpuCores), 0)
   const maxMemory = Math.max(...items.map((item) => item.usage.memoryBytes), 0)
   const showNotice = state !== 'available' && state !== 'stale'
@@ -692,13 +754,13 @@ function NodeUsageChart({ state, message, count, items }: { state: MetricsState;
       </div>
       {showNotice || !items.length ? <MetricStateNotice state={state} message={message} compact /> : null}
       {state === 'stale' && items.length ? <div className="metrics-stale-note"><AlertTriangle size={14} />{message || 'Node samples may be stale.'}</div> : null}
-      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <NodeUsageRow key={item.name} item={item} maxCpu={maxCpu} maxMemory={maxMemory} />)}</div> : null}
+      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <NodeUsageRow key={item.name} item={item} maxCpu={maxCpu} maxMemory={maxMemory} definitions={definitions} context={context} namespace={namespace} />)}</div> : null}
     </article>
   )
 }
 
 /** Renders a Pod usage chart with relative CPU and memory bars. */
-function PodUsageChart({ state, message, count, items }: { state: MetricsState; message?: string; count: number; items: PodMetric[] }) {
+function PodUsageChart({ state, message, count, items, definitions, context }: { state: MetricsState; message?: string; count: number; items: PodMetric[]; definitions: ResourceDefinition[]; context: string }) {
   const maxCpu = Math.max(...items.map((item) => item.usage.cpuCores), 0)
   const maxMemory = Math.max(...items.map((item) => item.usage.memoryBytes), 0)
   const showNotice = state !== 'available' && state !== 'stale'
@@ -710,22 +772,26 @@ function PodUsageChart({ state, message, count, items }: { state: MetricsState; 
       </div>
       {showNotice || !items.length ? <MetricStateNotice state={state} message={message} compact /> : null}
       {state === 'stale' && items.length ? <div className="metrics-stale-note"><AlertTriangle size={14} />{message || 'Pod samples may be stale.'}</div> : null}
-      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <PodUsageRow key={`${item.namespace}/${item.name}`} item={item} maxCpu={maxCpu} maxMemory={maxMemory} />)}</div> : null}
+      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <PodUsageRow key={`${item.namespace}/${item.name}`} item={item} maxCpu={maxCpu} maxMemory={maxMemory} definitions={definitions} context={context} />)}</div> : null}
     </article>
   )
 }
 
 /** Renders one node's CPU and memory utilization bars. */
-function NodeUsageRow({ item, maxCpu, maxMemory }: { item: NodeMetric; maxCpu: number; maxMemory: number }) {
+function NodeUsageRow({ item, maxCpu, maxMemory, definitions, context, namespace }: { item: NodeMetric; maxCpu: number; maxMemory: number; definitions: ResourceDefinition[]; context: string; namespace: string }) {
   const cpuWidth = usageBarWidth(item.cpuPercent, item.usage.cpuCores, maxCpu)
   const memoryWidth = usageBarWidth(item.memoryPercent, item.usage.memoryBytes, maxMemory)
-  return <div className="metrics-row"><div className="metrics-row-label"><strong>{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={cpuWidth} value={item.cpuPercent > 0 ? `${formatMetricPercent(item.cpuPercent)}` : formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={memoryWidth} value={item.memoryPercent > 0 ? `${formatMetricPercent(item.memoryPercent)}` : formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></div>
+  const destination = overviewMetricDestination(definitions, 'node', item.name)
+  const href = destination ? routeHref(destination.path, context, namespace) : undefined
+  return <MetricSample href={href} ariaLabel={`Open Node ${item.name} resource detail`}><div className="metrics-row-label"><strong>{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={cpuWidth} value={item.cpuPercent > 0 ? `${formatMetricPercent(item.cpuPercent)}` : formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={memoryWidth} value={item.memoryPercent > 0 ? `${formatMetricPercent(item.memoryPercent)}` : formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></MetricSample>
 }
 
 /** Renders one Pod's aggregated CPU and memory bars. */
-function PodUsageRow({ item, maxCpu, maxMemory }: { item: PodMetric; maxCpu: number; maxMemory: number }) {
-  const namespace = item.namespace ? `${item.namespace}/` : ''
-  return <div className="metrics-row"><div className="metrics-row-label"><strong>{namespace}{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={usageBarWidth(0, item.usage.cpuCores, maxCpu)} value={formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={usageBarWidth(0, item.usage.memoryBytes, maxMemory)} value={formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></div>
+function PodUsageRow({ item, maxCpu, maxMemory, definitions, context }: { item: PodMetric; maxCpu: number; maxMemory: number; definitions: ResourceDefinition[]; context: string }) {
+  const podPrefix = item.namespace ? `${item.namespace}/` : ''
+  const destination = overviewMetricDestination(definitions, 'pod', item.name, item.namespace)
+  const href = destination?.namespace ? routeHref(destination.path, context, destination.namespace) : undefined
+  return <MetricSample href={href} ariaLabel={item.namespace ? `Open Pod ${item.name} in namespace ${item.namespace} resource detail` : `Pod ${item.name} resource detail unavailable without a namespace`}><div className="metrics-row-label"><strong>{podPrefix}{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={usageBarWidth(0, item.usage.cpuCores, maxCpu)} value={formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={usageBarWidth(0, item.usage.memoryBytes, maxMemory)} value={formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></MetricSample>
 }
 
 /** Renders one labeled usage bar shared by node and Pod rows. */
@@ -820,44 +886,56 @@ function hasMetricTimestamp(value?: string): value is string {
 }
 
 /** Renders a reusable numeric health card. */
-function MetricCard({ label, value, detail, tone, icon }: { label: string; value: string; detail: string; tone: 'good' | 'warning' | 'neutral'; icon: ReactNode }) {
-  return (
-    <article className={`metric-card metric-${tone}`}>
-      <div className="metric-top"><span className="metric-icon">{icon}</span><span className="metric-kicker">{label}</span><ArrowUpRight size={14} className="metric-arrow" /></div>
-      <div className="metric-value">{value}</div>
-      <div className="metric-detail">{detail}</div>
-    </article>
-  )
+function MetricCard({ label, value, detail, tone, icon, href, ariaLabel }: { label: string; value: string; detail: string; tone: 'good' | 'warning' | 'neutral'; icon: ReactNode; href?: string; ariaLabel?: string }) {
+  const content = <><div className="metric-top"><span className="metric-icon">{icon}</span><span className="metric-kicker">{label}</span>{href && <ArrowUpRight size={14} className="metric-arrow" />}</div><div className="metric-value">{value}</div><div className="metric-detail">{detail}</div></>
+  if (!href) return <article className={`metric-card metric-${tone}`}>{content}</article>
+  return <a className={`metric-card metric-card-link metric-${tone}`} href={href} aria-label={ariaLabel || `Open ${label}`}>{content}</a>
 }
 
 /** Renders a section heading with a compact state marker. */
-function PanelHeading({ eyebrow, title, action, tone }: { eyebrow: string; title: string; action: string; tone: 'good' | 'warning' | 'neutral' }) {
+function PanelHeading({ eyebrow, title, action, tone, actionHref, actionAriaLabel }: { eyebrow: string; title: string; action: string; tone: 'good' | 'warning' | 'neutral'; actionHref?: string; actionAriaLabel?: string }) {
+  const actionContent = <><span aria-hidden="true" />{action}</>
   return (
     <div className="panel-heading">
       <div><span className="panel-eyebrow">{eyebrow}</span><h2>{title}</h2></div>
-      <span className={`panel-action panel-action-${tone}`}><span />{action}</span>
+      {actionHref ? <a className={`panel-action panel-action-${tone} panel-action-link`} href={actionHref} aria-label={actionAriaLabel || action}>{actionContent}</a> : <span className={`panel-action panel-action-${tone}`}>{actionContent}</span>}
     </div>
   )
 }
 
 /** Renders recent warning Events in a readable dashboard list. */
-function WarningList({ warnings }: { warnings: ClusterOverview['warnings'] }) {
+function WarningList({ warnings, definitions, eventsPath, context, namespace }: { warnings: ClusterOverview['warnings']; definitions: ResourceDefinition[]; eventsPath?: string; context: string; namespace: string }) {
   return (
     <div className="warning-list">
       {warnings.map((warning, index) => (
-        <div className="warning-row" key={`${warning.reason}-${warning.object}-${index}`}>
-          <span className="warning-index">{String(index + 1).padStart(2, '0')}</span>
-          <div className="warning-main"><strong>{warning.reason || 'Warning Event'}</strong><span>{warning.message}</span></div>
-          <div className="warning-meta"><code>{warning.object || 'cluster'}</code><span>{relativeTime(warning.lastSeen)}</span></div>
-        </div>
+        <WarningEventRow key={`${warning.namespace || ''}/${warning.name || ''}/${warning.reason}-${warning.object}-${index}`} warning={warning} definitions={definitions} eventsPath={eventsPath} context={context} namespace={namespace} index={index} />
       ))}
     </div>
   )
 }
 
+/** Renders one warning Event as an exact detail link, a bounded list fallback, or an unavailable state. */
+function WarningEventRow({ warning, definitions, eventsPath, context, namespace, index }: { warning: EventSummary; definitions: ResourceDefinition[]; eventsPath?: string; context: string; namespace: string; index: number }) {
+  const detailPath = overviewEventDetailPath(definitions, warning)
+  const targetPath = detailPath || eventsPath
+  const targetNamespace = warning.namespace || namespace
+  const targetHref = targetPath ? routeHref(targetPath, context, targetNamespace) : undefined
+  const targetLabel = detailPath
+    ? `Open Warning Event ${warning.name} in namespace ${warning.namespace}`
+    : eventsPath
+      ? `Open Events list for ${targetNamespace === 'all' ? 'all namespaces' : `namespace ${targetNamespace}`}; this Event identity is incomplete`
+      : 'Warning Event detail unavailable because the exact core v1 Events resource is not in the current catalog'
+  const targetNote = detailPath ? undefined : eventsPath ? 'Event identity incomplete; open the bounded Events list' : 'Event detail unavailable'
+  const content = <><span className="warning-index">{String(index + 1).padStart(2, '0')}</span><div className="warning-main"><strong>{warning.reason || 'Warning Event'}</strong><span>{warning.message || 'No message provided.'}</span>{targetNote && <small className="warning-target-note">{targetNote}</small>}</div><div className="warning-meta"><code>{warning.object || 'cluster'}</code><span>{relativeTime(warning.lastSeen)}</span></div></>
+  if (!targetHref) return <div className="warning-row warning-row-unavailable" aria-disabled="true" aria-label={targetLabel}>{content}</div>
+  return <a className={`warning-row warning-row-link ${detailPath ? '' : 'warning-row-fallback'}`} href={targetHref} aria-label={targetLabel}>{content}</a>
+}
+
 /** Renders a single posture statistic row. */
-function PostureRow({ icon, label, value, note, tone = 'neutral' }: { icon: ReactNode; label: string; value: string; note: string; tone?: 'good' | 'warning' | 'neutral' }) {
-  return <div className="posture-row"><span className={`posture-icon posture-${tone}`}>{icon}</span><div><strong>{label}</strong><span>{note}</span></div><b>{value}</b></div>
+function PostureRow({ icon, label, value, note, tone = 'neutral', href, ariaLabel }: { icon: ReactNode; label: string; value: string; note: string; tone?: 'good' | 'warning' | 'neutral'; href?: string; ariaLabel?: string }) {
+  const content = <><span className={`posture-icon posture-${tone}`}>{icon}</span><div><strong>{label}</strong><span>{note}</span></div><b>{value}</b>{href && <ArrowUpRight size={14} className="posture-arrow" />}</>
+  if (!href) return <div className="posture-row">{content}</div>
+  return <a className="posture-row posture-row-link" href={href} aria-label={ariaLabel || `Open ${label}`}>{content}</a>
 }
 
 /** Renders a cluster setup state when no kubeconfig contexts are available. */
@@ -948,17 +1026,43 @@ function DiscoveryNotice({ catalog, loading, error, onRetry }: { catalog: Resour
 
 /** Renders the complete grouped API resource catalog without truncating large CRD sets. */
 function ResourceCatalogPage({ catalog, loading, error, onRetry, onOpen }: { catalog: ResourceCatalogResponse | null; loading: boolean; error: string; onRetry: () => void; onOpen: (definition: ResourceDefinition) => void }) {
+  const [filter, setFilter] = useState('')
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
+
   if (loading && !catalog) return <LoadingState label="Reading the Kubernetes API catalog" />
   if (error && !catalog) return <CatalogState title="Resource catalog unavailable" detail={error} onRetry={onRetry} />
   if (!catalog) return <CatalogState title="No API catalog loaded" detail="Choose a cluster context to read its discoverable resources." onRetry={onRetry} />
-  const groups = groupResourceCatalog(catalog.items)
+  const filteredDefinitions = filterResourceCatalog(catalog.items, filter)
+  const groups = groupResourceCatalog(filteredDefinitions)
+  const filterActive = filter.trim().length > 0
+
+  /** Toggles one API group's local expanded state without persisting it. */
+  function toggleGroup(group: string) {
+    setCollapsedGroups((current) => ({ ...current, [group]: current[group] === false }))
+  }
+
   return <div className="catalog-page">
     <section className="catalog-intro">
       <div><div className="eyebrow"><span className="eyebrow-mark" /> Kubernetes API / discovery</div><h1>Resource catalog</h1><p className="intro-copy">Every discovered top-level resource, served version, namespace scope, and subresource capability in this cluster. Short links are only retained when their resource name is unambiguous.</p></div>
       <div className="catalog-stamp"><span className="stamp-label">Catalog coverage</span><strong>{catalog.items.length}</strong><code>{catalog.state === 'available' ? 'all discovery sources online' : `${catalog.issues?.length ?? 0} source issues`}</code></div>
     </section>
     {catalog.issues?.length ? <div className="catalog-issues">{catalog.issues.map((issue, index) => <div className={`catalog-issue catalog-issue-${issue.state}`} key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={14} /><div><strong>{issue.group ? `${issue.group}/${issue.version}` : issue.version || 'API discovery'}</strong><span>{issue.message}</span></div><button type="button" className="text-button" onClick={onRetry}>Retry</button></div>)}</div> : null}
-    {!groups.length ? <div className="catalog-empty"><Box size={22} /><strong>No top-level resources were discovered</strong><span>Retry discovery when the Kubernetes API is reachable.</span><button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={14} /> Refresh catalog</button></div> : <div className="catalog-groups">{groups.map(({ group, versions }) => <section className="catalog-group" key={group}><div className="catalog-group-heading"><span className="panel-eyebrow">API group</span><h2>{group || 'Core'}</h2><code>{versions.reduce((total, version) => total + version.definitions.length, 0)} resources</code></div>{versions.map(({ version, definitions }) => <div className="catalog-version" key={`${group}/${version}`}><div className="catalog-version-heading"><strong>{version}</strong><span>{definitions.length} top-level resource{definitions.length === 1 ? '' : 's'}</span></div><div className="catalog-table"><div className="catalog-table-heading"><span>Resource</span><span>Kind</span><span>Scope</span><span>Discovery</span><span>Capabilities</span></div>{definitions.map((definition) => <CatalogResourceRow key={`${definition.group}/${definition.version}/${definition.resource}`} definition={definition} onOpen={onOpen} />)}</div></div>)}</section>)}</div>}
+    <div className="catalog-filter-bar">
+      <label className="catalog-filter-field" htmlFor="catalog-resource-filter">
+        <Search size={14} aria-hidden="true" />
+        <span className="sr-only">Filter API resource catalog</span>
+        <input id="catalog-resource-filter" type="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Search group, version, resource, kind..." />
+      </label>
+      {filterActive ? <button type="button" className="catalog-clear-filter" onClick={() => setFilter('')}><X size={13} /> Clear filter</button> : null}
+      <span className="catalog-filter-count" role="status" aria-live="polite"><strong>{filteredDefinitions.length}</strong>{filterActive ? ` of ${catalog.items.length} resources match` : ` resource${catalog.items.length === 1 ? '' : 's'}`}<small>{groups.length} API group{groups.length === 1 ? '' : 's'} shown</small></span>
+    </div>
+    {!groups.length ? <div className="catalog-empty catalog-filter-empty" role={filterActive ? 'status' : undefined}>{filterActive ? <Search size={22} /> : <Box size={22} />}<strong>{filterActive ? `No resources match “${filter}”` : 'No top-level resources were discovered'}</strong><span>{filterActive ? 'Try a group, version, resource name, kind, alias, or category.' : 'Retry discovery when the Kubernetes API is reachable.'}</span>{filterActive ? <button type="button" className="secondary-button" onClick={() => setFilter('')}><X size={14} /> Clear filter</button> : <button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={14} /> Refresh catalog</button>}</div> : <div className="catalog-groups" id="catalog-groups">{groups.map(({ group, versions }, groupIndex) => {
+      const groupLabel = group || 'Core'
+      const expanded = filterActive || collapsedGroups[group] !== false
+      const headingID = `catalog-group-heading-${groupIndex}`
+      const contentID = `catalog-group-content-${groupIndex}`
+      return <section className="catalog-group" key={group} aria-labelledby={headingID}><div className="catalog-group-heading"><span className="panel-eyebrow">API group</span><h2 id={headingID}>{groupLabel}</h2><code>{versions.reduce((total, version) => total + version.definitions.length, 0)} resources</code><button type="button" className="catalog-group-toggle" aria-expanded={expanded} aria-controls={contentID} aria-label={filterActive ? `${groupLabel} API group is expanded while filtering` : `${expanded ? 'Collapse' : 'Expand'} ${groupLabel} API group`} disabled={filterActive} onClick={() => toggleGroup(group)}><ChevronDown size={16} aria-hidden="true" /></button></div><div id={contentID} hidden={!expanded}>{versions.map(({ version, definitions }) => <div className="catalog-version" key={`${group}/${version}`}><div className="catalog-version-heading"><strong>{version}</strong><span>{definitions.length} top-level resource{definitions.length === 1 ? '' : 's'}</span></div><div className="catalog-table"><div className="catalog-table-heading"><span>Resource</span><span>Kind</span><span>Scope</span><span>Discovery</span><span>Capabilities</span></div>{definitions.map((definition) => <CatalogResourceRow key={`${definition.group}/${definition.version}/${definition.resource}`} definition={definition} onOpen={onOpen} />)}</div></div>)}</div></section>
+    })}</div>}
   </div>
 }
 
@@ -1114,7 +1218,15 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setViewNotice(`Deleted “${view.name}”.`)
   }
 
-  const groupOptions = Array.from(new Set(definitions.map((definition) => definition.group || 'core'))).sort((left, right) => left.localeCompare(right))
+  const groupOptions = searchGroupOptions(definitions)
+  const kindOptions = searchKindOptions(definitions, query.group)
+  const resourceOptions = searchResourceOptions(definitions, query.group, query.kind)
+  const kindMatchesCatalog = !query.kind || searchDefinitionCandidates(definitions, { ...emptySearchQuery(namespace), group: query.group, kind: query.kind }).length > 0
+  const resourceMatchesCatalog = !query.resource || searchDefinitionCandidates(definitions, { ...emptySearchQuery(namespace), group: query.group, kind: query.kind, resource: query.resource }).length > 0
+  const kindNoMatch = Boolean(query.kind && definitions.length && !kindMatchesCatalog)
+  const resourceNoMatch = Boolean(query.resource && definitions.length && !resourceMatchesCatalog)
+  const kindHint = catalogLoading && !definitions.length ? 'Catalog suggestions are loading.' : kindNoMatch ? 'No loaded Kind matches this API group. Your free-form value stays unchanged.' : kindOptions.length ? `${kindOptions.length} catalog suggestion${kindOptions.length === 1 ? '' : 's'}; group/version context is shown.` : definitions.length ? 'No Kind suggestions for this group. Custom kinds remain allowed.' : 'No catalog suggestions loaded. Custom kinds remain allowed.'
+  const resourceHint = catalogLoading && !definitions.length ? 'Catalog suggestions are loading.' : resourceNoMatch ? 'No loaded Resource matches this API group and Kind. Your free-form value stays unchanged.' : resourceOptions.length ? `${resourceOptions.length} catalog suggestion${resourceOptions.length === 1 ? '' : 's'}; group/version/Kind context is shown.` : definitions.length ? 'No Resource suggestions match these filters. Custom resources remain allowed.' : 'No catalog suggestions loaded. Custom resources remain allowed.'
   return (
     <div className="search-page">
       <section className="search-intro">
@@ -1138,9 +1250,9 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
             <form className="search-form" onSubmit={(event) => { event.preventDefault(); submitSearch() }}>
               <label className="search-primary-field"><Search size={17} /><span className="sr-only">Search text</span><input value={query.query} onChange={(event) => updateQuery('query', event.target.value)} placeholder="Search kind, resource, namespace, or object name" /><kbd>submit</kbd></label>
               <div className="search-filter-grid">
-                <label className="search-control"><span>API group</span><select value={query.group} onChange={(event) => updateQuery('group', event.target.value)}><option value="">All groups</option>{groupOptions.map((group) => <option value={group} key={group}>{group === 'core' ? 'Core API' : group}</option>)}</select></label>
-                <label className="search-control"><span>Kind</span><input value={query.kind} onChange={(event) => updateQuery('kind', event.target.value)} placeholder="Deployment" /></label>
-                <label className="search-control"><span>Resource</span><input value={query.resource} onChange={(event) => updateQuery('resource', event.target.value)} placeholder="deployments" /></label>
+                <label className="search-control"><span>API group</span><select value={query.group} onChange={(event) => updateQuery('group', event.target.value)}><option value="">All groups</option>{groupOptions.map((group) => <option value={group.value} key={group.value}>{group.label}</option>)}</select></label>
+                <label className={`search-control search-control-autocomplete${kindNoMatch ? ' search-control-invalid' : ''}`}><span>Kind</span><input list="global-search-kind-options" aria-describedby="global-search-kind-help" aria-autocomplete="list" autoComplete="off" value={query.kind} onChange={(event) => updateQuery('kind', event.target.value)} placeholder="Deployment" /><datalist id="global-search-kind-options">{kindOptions.map((option) => <option key={option.value} value={option.value} label={option.label} />)}</datalist><small id="global-search-kind-help" className={kindNoMatch ? 'search-control-hint search-control-hint-warning' : 'search-control-hint'} role="status">{kindHint}</small></label>
+                <label className={`search-control search-control-autocomplete${resourceNoMatch ? ' search-control-invalid' : ''}`}><span>Resource</span><input list="global-search-resource-options" aria-describedby="global-search-resource-help" aria-autocomplete="list" autoComplete="off" value={query.resource} onChange={(event) => updateQuery('resource', event.target.value)} placeholder="deployments" /><datalist id="global-search-resource-options">{resourceOptions.map((option) => <option key={option.value} value={option.value} label={option.label} />)}</datalist><small id="global-search-resource-help" className={resourceNoMatch ? 'search-control-hint search-control-hint-warning' : 'search-control-hint'} role="status">{resourceHint}</small></label>
                 <label className="search-control"><span>Namespace scope</span><input value={query.namespace === 'all' ? '' : query.namespace} onChange={(event) => updateQuery('namespace', event.target.value || 'all')} placeholder="all namespaces" /></label>
                 <label className="search-control"><span>Name / exact field selector</span><input value={query.name} onChange={(event) => updateQuery('name', event.target.value)} placeholder="api-server" /></label>
                 <label className="search-control search-control-wide"><span>Label selector / sent to Kubernetes</span><input value={query.labelSelector} onChange={(event) => updateQuery('labelSelector', event.target.value)} placeholder="app=api,track=stable" /></label>
@@ -2288,7 +2400,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const [draftKept, setDraftKept] = useState(false)
   const isSecret = definition.resource === 'secrets'
   const isNew = name === 'new'
-  const schemaCandidate = !isSecret && isCustomResourceDefinition(definition)
+  const schemaCandidate = !isSecret
   const [resourceSchema, setResourceSchema] = useState<ResourceSchemaResponse | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(false)
 
@@ -2556,7 +2668,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
      <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
      {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
         {conflict && <ConflictResolutionPanel conflict={conflict} currentYaml={conflictCurrentYaml} isSecret={isSecret} draftKept={draftKept} reviewed={conflictReviewed} onReviewed={setConflictReviewed} onKeepDraft={keepConflictDraft} onReload={reloadConflictObject} onExport={exportConflictDraft} onPrepareRetry={prepareConflictRetry} />}
-         {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
+           {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel detail-panel-wide"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div></div>}
           {tab === 'read-pack' && isOperationalReadPackResource(definition) && <OperationalReadPackView context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} revision={revision} reloadEpoch={reloadEpoch} />}
           {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
           {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
@@ -2624,6 +2736,7 @@ function OperationalReadPackCard({ panel }: { panel: OperationalReadPackPanelMod
   if (panel.key === 'storage-class' && data) content = <StorageClassReadPackView data={data as StorageClassReadPackData} />
   if (panel.key === 'service-account' && data) content = <ServiceAccountReadPackView data={data as ServiceAccountReadPackData} />
   if (panel.key === 'pod' && data) content = <PodReadPackView data={data as PodReadPackData} />
+  if (panel.key === 'compute' && data) content = <ComputeReadPackView data={data as ComputeReadPackData} />
   return <section className={`read-pack-card read-pack-card-${panel.state}`}><div className="read-pack-card-heading"><div><span className="panel-eyebrow">Built-in view</span><h2>{panel.title}</h2></div><ReadPackStateChip state={panel.state} /></div><p className="read-pack-card-message">{panel.message}</p>{panel.truncated && <div className="read-pack-truncated"><AlertTriangle size={14} /><span>Results are capped. The generic related-resource view remains available for broader navigation.</span></div>}{content}</section>
 }
 
@@ -2755,13 +2868,13 @@ function ConflictResolutionPanel({ conflict, currentYaml, isSecret, draftKept, r
   </section>
 }
 
-/** Renders a structural CRD form while keeping YAML as the complete editing fallback. */
+/** Renders a normalized Kubernetes resource form while keeping YAML as the complete editing fallback. */
 function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespace, writeEnabled, reviewReady, onChange, onOpenYaml }: { response: ResourceSchemaResponse | null; loading: boolean; object: ResourceObject; isNew: boolean; namespaced: boolean; namespace: string; writeEnabled: boolean; reviewReady: boolean; onChange: (object: ResourceObject) => void; onOpenYaml: () => void }) {
   if (loading && !response) {
-    return <div className="schema-form-panel"><div className="schema-form-loading"><LoaderCircle size={18} className="spin" /> Reading structural OpenAPI v3 schema</div></div>
+    return <div className="schema-form-panel"><div className="schema-form-loading"><LoaderCircle size={18} className="spin" /> Reading the version-specific OpenAPI schema</div></div>
   }
   if (!response || response.state !== 'available' || !response.schema) {
-    return <div className="schema-form-panel"><div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>Schema form unavailable</strong><span>YAML remains complete</span></div><span className="schema-state-chip schema-state-warning">{schemaStateLabel(response?.state)}</span></div><div className="schema-form-fallback"><AlertTriangle size={18} /><div><strong>{schemaStateTitle(response?.state)}</strong><span>{response?.message || 'The cluster did not provide a usable structural schema for this custom resource.'}</span></div></div><div className="schema-form-footer"><span>Generic CRUD and deep links remain available.</span><button type="button" className="secondary-button" onClick={onOpenYaml}><FileCode2 size={14} /> Open YAML editor</button></div></div>
+    return <div className="schema-form-panel"><div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>Schema form unavailable</strong><span>YAML remains complete</span></div><span className="schema-state-chip schema-state-warning">{schemaStateLabel(response?.state)}</span></div><div className="schema-form-fallback"><AlertTriangle size={18} /><div><strong>{schemaStateTitle(response?.state)}</strong><span>{response?.message || 'The Kubernetes API server did not provide a usable schema for this resource.'}</span></div></div><div className="schema-form-footer"><span>Generic CRUD and deep links remain available.</span><button type="button" className="secondary-button" onClick={onOpenYaml}><FileCode2 size={14} /> Open YAML editor</button></div></div>
   }
 
   const validationErrors = validateSchemaDocument(response.schema, object)
@@ -2770,10 +2883,11 @@ function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespa
   const metadataNamespace = typeof metadata.namespace === 'string' ? metadata.namespace : namespace === 'all' ? '' : namespace
   const fallbackText = response.fallbacks?.length ? schemaFallbackSummary(response.fallbacks, response.fallbacksTruncated) : ''
   const statusNotice = schemaStatusNotice(response)
+  const formSchema = projectSchemaIdentityFields(response.schema)
   const updatePath = (path: string[], value: unknown) => onChange(updateSchemaObject(object, path, value))
   return <div className="schema-form-panel">
-    <div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>{isNew ? 'Create from schema' : 'Edit from schema'}</strong><span>structural OpenAPI v3</span></div><div className="schema-form-header-meta">{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}<span className="schema-state-chip schema-state-good">Form ready</span></div></div>
-    <div className="schema-form-intro"><strong>Fields are generated from the cluster CRD.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span>{response.message && <span>{response.message}</span>}</div>
+     <div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>{isNew ? 'Create from schema' : 'Edit from schema'}</strong><span>{schemaSourceLabel(response.source)}</span></div><div className="schema-form-header-meta">{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}<span className="schema-state-chip schema-state-good">Form ready</span></div></div>
+     <div className="schema-form-intro"><strong>Fields are generated from the Kubernetes API schema.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span><span>Identity fields are controlled above while metadata details are generated from the API schema; labels, annotations, generateName, and other metadata fields appear here when exposed.</span>{response.message && <span>{response.message}</span>}</div>
     {statusNotice && <div className="schema-readonly-notice"><LockKeyhole size={15} /><span>{statusNotice}</span></div>}
     {fallbackText && <div className="schema-partial-fallback"><AlertTriangle size={15} /><div><strong>Some fields use the YAML fallback</strong><span>{fallbackText}</span></div><button type="button" className="text-button" onClick={onOpenYaml}>Open YAML</button></div>}
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to edit this form. Review still performs the existing Kubernetes server-side dry-run.</div>}
@@ -2785,7 +2899,7 @@ function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespa
           {namespaced && <label className="schema-field"><span>Namespace {isNew && namespace === 'all' && <b>required</b>}</span><input value={metadataNamespace} onChange={(event) => updatePath(['metadata', 'namespace'], event.target.value || undefined)} readOnly={!isNew} required={isNew && namespace === 'all'} /></label>}
         </div>
       </fieldset>
-      <SchemaFieldEditor field={response.schema} value={object} path={[]} writeEnabled={writeEnabled} onChange={updatePath} />
+      <SchemaFieldEditor field={formSchema} value={object} path={[]} writeEnabled={writeEnabled} onChange={updatePath} />
     </form>
     {validationErrors.length > 0 && <div className="schema-validation"><AlertTriangle size={15} /><div><strong>Form needs attention</strong><span>{validationErrors.slice(0, 4).join(' ')}</span></div></div>}
     <div className="schema-form-footer"><span><ShieldCheck size={14} /> Full-object update / resource-version concurrency</span><button type="button" className="secondary-button" onClick={onOpenYaml}><FileCode2 size={14} /> Use YAML fallback</button></div>
@@ -2816,12 +2930,13 @@ function SchemaFieldEditor({ field, value, path, writeEnabled, onChange }: { fie
   }
 
   const enumValues = field.enum || []
+  const scalarUnion = Boolean(field.scalarTypes?.length)
   const valueKey = displayValue === undefined ? '' : schemaValueKey(displayValue)
   const stringValue = typeof displayValue === 'string' ? displayValue : displayValue === undefined || displayValue === null ? '' : String(displayValue)
   return <label className={`schema-field schema-field-${field.type}`}>
     <span>{label} {field.required && <b>required</b>}{field.readOnly && <em>read-only</em>}{present && !field.required && <button type="button" className="schema-clear" onClick={(event) => { event.preventDefault(); clear() }} disabled={!writeEnabled || field.readOnly}>Clear</button>}</span>
     {field.description && <small>{field.description}</small>}
-    {enumValues.length > 0 ? <select value={valueKey} onChange={(event) => onChange(path, event.target.value ? parseSchemaValue(event.target.value) : undefined)} disabled={!writeEnabled || field.readOnly} required={field.required}><option value="">{field.required ? 'Choose a value' : 'Not set'}</option>{enumValues.map((item) => <option key={schemaValueKey(item)} value={schemaValueKey(item)}>{String(item)}</option>)}</select> : field.type === 'boolean' ? <input type="checkbox" checked={displayValue === true} onChange={(event) => onChange(path, event.target.checked)} disabled={!writeEnabled || field.readOnly} /> : <input type={field.type === 'number' || field.type === 'integer' ? 'number' : 'text'} value={stringValue} onChange={(event) => onChange(path, parseSchemaInput(field, event.target.value))} disabled={!writeEnabled || field.readOnly} required={field.required} min={field.minimum} max={field.maximum} minLength={field.minLength} maxLength={field.maxLength} pattern={field.pattern} step={field.type === 'integer' ? 1 : field.multipleOf || 'any'} inputMode={field.type === 'number' || field.type === 'integer' ? 'decimal' : undefined} />}
+     {enumValues.length > 0 && !scalarUnion ? <select value={valueKey} onChange={(event) => onChange(path, event.target.value ? parseSchemaValue(event.target.value) : undefined)} disabled={!writeEnabled || field.readOnly} required={field.required}><option value="">{field.required ? 'Choose a value' : 'Not set'}</option>{enumValues.map((item) => <option key={schemaValueKey(item)} value={schemaValueKey(item)}>{String(item)}</option>)}</select> : field.type === 'boolean' ? <input type="checkbox" checked={displayValue === true} onChange={(event) => onChange(path, event.target.checked)} disabled={!writeEnabled || field.readOnly} /> : <input type={field.type === 'number' || field.type === 'integer' ? 'number' : 'text'} value={stringValue} onChange={(event) => onChange(path, parseSchemaInput(field, event.target.value))} disabled={!writeEnabled || field.readOnly} required={field.required} min={field.minimum} max={field.maximum} minLength={field.minLength} maxLength={field.maxLength} pattern={field.pattern} step={field.type === 'integer' ? 1 : field.multipleOf || 'any'} inputMode={field.type === 'number' || field.type === 'integer' ? 'decimal' : undefined} />}
     {field.format && <i className="schema-format">format / {field.format}</i>}
   </label>
 }
@@ -2852,18 +2967,29 @@ function schemaStateLabel(state?: ResourceSchemaResponse['state']): string {
   if (state === 'non-structural') return 'Non-structural'
   if (state === 'unsupported') return 'Unsupported'
   if (state === 'missing') return 'Schema missing'
+  if (state === 'unavailable') return 'API unavailable'
+  if (state === 'malformed') return 'Malformed schema'
   if (state === 'error') return 'Read failed'
   return state === 'available' ? 'Available' : 'Reading'
 }
 
 /** Returns a direct explanation for one schema fallback state. */
 function schemaStateTitle(state?: ResourceSchemaResponse['state']): string {
-  if (state === 'permission-denied') return 'CRD schema access is denied'
-  if (state === 'non-structural') return 'This CRD is not structural'
+  if (state === 'permission-denied') return 'Schema access is denied by Kubernetes RBAC'
+  if (state === 'non-structural') return 'This resource has no structural schema'
   if (state === 'unsupported') return 'This schema needs YAML'
-  if (state === 'missing') return 'No matching CRD schema'
-  if (state === 'error') return 'CRD schema could not be read'
+  if (state === 'missing') return 'No matching OpenAPI schema'
+  if (state === 'unavailable') return 'The OpenAPI API is unavailable'
+  if (state === 'malformed') return 'The API returned a malformed schema'
+  if (state === 'error') return 'The resource schema could not be read'
   return 'Schema form is loading'
+}
+
+/** Returns the authenticated schema source shown beside a ready form. */
+function schemaSourceLabel(source?: ResourceSchemaResponse['source']): string {
+  if (source === 'openapi-v2') return 'OpenAPI v2 compatibility'
+  if (source === 'crd') return 'CRD schema fallback'
+  return 'OpenAPI v3 / version-specific'
 }
 
 /** Returns a safe immutable update of one resource object path. */
@@ -2935,13 +3061,6 @@ function createSchemaValue(field?: ResourceSchemaField): unknown {
   }
 }
 
-/** Converts one primitive input string into the JSON value described by a field. */
-function parseSchemaInput(field: ResourceSchemaField, value: string): unknown {
-  if (value === '') return undefined
-  if (field.type === 'integer' || field.type === 'number') return Number(value)
-  return value
-}
-
 /** Encodes one enum or select value without losing booleans and numbers. */
 function schemaValueKey(value: unknown): string {
   return JSON.stringify(value) ?? ''
@@ -2973,30 +3092,10 @@ function validateSchemaValue(field: ResourceSchemaField, value: unknown, path: s
   if (field.enum?.length && !field.enum.some((candidate) => schemaValuesEqual(candidate, value))) errors.push(`${path} must match one of the listed enum values.`)
   switch (field.type) {
     case 'string':
-      if (typeof value !== 'string') errors.push(`${path} must be a string.`)
-      else {
-        if (field.minLength !== undefined && value.length < field.minLength) errors.push(`${path} must contain at least ${field.minLength} characters.`)
-        if (field.maxLength !== undefined && value.length > field.maxLength) errors.push(`${path} must contain at most ${field.maxLength} characters.`)
-        if (field.pattern) {
-          try {
-            if (!new RegExp(field.pattern).test(value)) errors.push(`${path} does not match the required pattern.`)
-          } catch {
-            errors.push(`${path} uses an invalid validation pattern.`)
-          }
-        }
-      }
-      break
     case 'integer':
-    case 'number': {
-      if (typeof value !== 'number' || !Number.isFinite(value) || (field.type === 'integer' && !Number.isInteger(value))) {
-        errors.push(`${path} must be a ${field.type}.`)
-        break
-      }
-      if (field.minimum !== undefined && (field.exclusiveMinimum ? value <= field.minimum : value < field.minimum)) errors.push(`${path} is below the minimum.`)
-      if (field.maximum !== undefined && (field.exclusiveMaximum ? value >= field.maximum : value > field.maximum)) errors.push(`${path} is above the maximum.`)
-      if (field.multipleOf !== undefined && Math.abs(value / field.multipleOf - Math.round(value / field.multipleOf)) > 1e-9) errors.push(`${path} must be a multiple of ${field.multipleOf}.`)
+    case 'number':
+      errors.push(...validateSchemaScalarValue(field, value, path))
       break
-    }
     case 'boolean':
       if (typeof value !== 'boolean') errors.push(`${path} must be a boolean.`)
       break
@@ -3146,6 +3245,7 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
   const [error, setError] = useState('')
   const [reverseError, setReverseError] = useState('')
   const reverseRequestID = useRef(0)
+  const reverseSupported = !(definition.group === '' && definition.version === 'v1' && definition.resource === 'events')
 
   useEffect(() => {
     setResponse(null)
@@ -3174,8 +3274,9 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
     }
   }, [context, definition, namespace, name, isNew])
 
-  /** Loads broad reverse-owner relationships without delaying the direct relationship response. */
+  /** Loads supported reverse-owner relationships without delaying the direct relationship response. */
   async function loadReverseRelationships() {
+    if (!reverseSupported) return
     const requestID = reverseRequestID.current + 1
     reverseRequestID.current = requestID
     setReverseLoading(true)
@@ -3198,13 +3299,13 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
   const displayedResponse = response && reverseResponse ? mergeRelatedResponses(response, reverseResponse) : response
   const items = displayedResponse?.items ?? []
   const notices = displayedResponse?.notices ?? []
-  const reverseDeferred = Boolean(response?.notices?.some((notice) => notice.deferred)) && !reverseResponse
+  const reverseDeferred = reverseSupported && Boolean(response?.notices?.some((notice) => notice.deferred)) && !reverseResponse
   return <div className="relationship-panel">
     <div className="panel relationship-summary-panel">
       <PanelHeading eyebrow="Relationships" title="Related resources" action={relatedAggregateLabel(displayedResponse?.state || 'empty', items.length)} tone={relatedAggregateTone(displayedResponse?.state || 'empty')} />
       <p className="relationship-copy">Links are derived from Kubernetes owner metadata, native selectors, binding fields, and explicit PodSpec references. Only sanitized resource coordinates are returned; Secret values are never read into this view.</p>
       {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
-      {reverseDeferred && <button type="button" className="secondary-button" onClick={() => void loadReverseRelationships()} disabled={reverseLoading}>{reverseLoading ? <><LoaderCircle size={14} className="spin" /> Scanning reverse owners</> : <><Network size={14} /> Load owned descendants</>}</button>}
+      {reverseDeferred && <button type="button" className="secondary-button" onClick={() => void loadReverseRelationships()} disabled={reverseLoading}>{reverseLoading ? <><LoaderCircle size={14} className="spin" /> Reading supported descendants</> : <><Network size={14} /> Load supported descendants</>}</button>}
       {reverseError && <div className="inline-error"><AlertTriangle size={15} />{reverseError}</div>}
       {displayedResponse?.diagnostics && <div className="panel-note"><Activity size={13} /> {displayedResponse.diagnostics.queryCount}/{displayedResponse.diagnostics.queryBudget} relationship reads · {displayedResponse.diagnostics.durationMilliseconds} ms · {displayedResponse.diagnostics.concurrentLimit} concurrent max</div>}
     </div>
@@ -3273,7 +3374,7 @@ type WorkloadActionOption = {
 function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
   const options = workloadActionOptions(definition.resource)
   const [action, setAction] = useState<WorkloadAction>(options[0]?.action || 'restart')
-  const [replicas, setReplicas] = useState(workloadReplicaCount(object))
+  const [replicas, setReplicas] = useState(workloadReplicaInput(object))
   const [container, setContainer] = useState(workloadContainerNames(definition.resource, object)[0] || '')
   const [image, setImage] = useState(workloadContainerImage(definition.resource, object, container))
   const [revision, setRevision] = useState('')
@@ -3286,6 +3387,8 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
   const [success, setSuccess] = useState('')
   const containers = workloadContainerNames(definition.resource, object)
   const selectedOption = options.find((option) => option.action === action) || options[0]
+  const parsedReplicas = parseWorkloadReplicaInput(replicas)
+  const scaleInputInvalid = action === 'scale' && parsedReplicas === undefined
 
   useEffect(() => {
     const nextOptions = workloadActionOptions(definition.resource)
@@ -3297,7 +3400,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     const nextContainer = nextContainers.includes(container) ? container : nextContainers[0] || ''
     setContainer(nextContainer)
     setImage(workloadContainerImage(definition.resource, object, nextContainer))
-    setReplicas(workloadReplicaCount(object))
+    setReplicas(workloadReplicaInput(object))
     setSchedule(workloadSchedule(object))
     setReview(null)
     setReviewToken(undefined)
@@ -3333,11 +3436,12 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     const expectedResourceVersion = metadataString(object, 'resourceVersion')
     const request: WorkloadActionRequest = { action, dryRun, expectedResourceVersion }
     if (action === 'scale') {
-      if (!Number.isInteger(replicas) || replicas < 0) {
-        setError('Replica count must be a whole number of zero or greater.')
+      const validatedReplicas = parseWorkloadReplicaInput(replicas)
+      if (validatedReplicas === undefined) {
+        setError(WORKLOAD_REPLICA_VALIDATION_MESSAGE)
         return null
       }
-      request.replicas = replicas
+      request.replicas = validatedReplicas
     }
     if (action === 'image') {
       if (!container) {
@@ -3449,11 +3553,11 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to review and apply workload actions. Kubernetes RBAC still authorizes the final operation.</div>}
     <form className="workload-operation-form" onSubmit={(event) => { event.preventDefault(); void reviewAction() }}>
       <div className="workload-action-picker"><label className="workload-operation-field"><span>Action</span><select value={action} onChange={(event) => changeAction(event.target.value as WorkloadAction)} disabled={disabled}>{options.map((option) => <option key={option.action} value={option.action}>{option.label}</option>)}</select></label><div className="workload-action-detail">{selectedOption?.detail}</div></div>
-      {action === 'scale' && <label className="workload-operation-field"><span>Desired replicas</span><input type="number" min="0" step="1" value={replicas} onChange={(event) => setReplicas(Number(event.target.value))} disabled={disabled} /></label>}
+      {action === 'scale' && <label className="workload-operation-field"><span>Desired replicas</span><input type="text" inputMode="numeric" value={replicas} onChange={(event) => setReplicas(event.target.value)} disabled={disabled} aria-invalid={scaleInputInvalid} aria-describedby={scaleInputInvalid ? 'workload-replica-guidance' : undefined} />{scaleInputInvalid && <small id="workload-replica-guidance" className="workload-field-error">{WORKLOAD_REPLICA_VALIDATION_MESSAGE}</small>}</label>}
       {action === 'image' && <div className="workload-operation-grid"><label className="workload-operation-field"><span>Container</span><select value={container} onChange={(event) => { setContainer(event.target.value); setImage(workloadContainerImage(definition.resource, object, event.target.value)) }} disabled={disabled}><option value="">Choose container</option>{containers.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label className="workload-operation-field"><span>New image</span><input value={image} onChange={(event) => setImage(event.target.value)} disabled={disabled} placeholder="registry.example/app:tag" /></label></div>}
       {action === 'rollback' && <label className="workload-operation-field"><span>Revision <em>blank = previous</em></span><input type="number" min="1" step="1" value={revision} onChange={(event) => setRevision(event.target.value)} disabled={disabled} placeholder="previous" /></label>}
       {action === 'schedule' && <label className="workload-operation-field"><span>Cron schedule</span><input value={schedule} onChange={(event) => setSchedule(event.target.value)} disabled={disabled} placeholder="*/15 * * * *" /></label>}
-      <div className="workload-operation-actions"><span>{selectedOption?.detail}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review)}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review action'}</button></div>
+      <div className="workload-operation-actions"><span>{selectedOption?.detail}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review) || scaleInputInvalid}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review action'}</button></div>
     </form>
     {review && <div className="workload-review"><div className="workload-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{workloadActionLabel(action)} is ready</strong></div><p>Kubernetes accepted this exact resource-versioned operation for server-side dry-run. No cluster state has changed; the final request can still change live workload behavior.</p><label className="workload-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the exact action and authorize the final request to change workload state.</span></label><div className="workload-review-actions"><button type="button" className="secondary-button" onClick={editAction} disabled={Boolean(busy)}>Change action</button><button type="button" className="primary-button" onClick={() => void applyReviewedAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
@@ -4018,12 +4122,6 @@ function workloadContainerImage(resource: string, object: ResourceObject, contai
   return ''
 }
 
-/** Returns the current desired replica count for a scalable workload. */
-function workloadReplicaCount(object: ResourceObject): number {
-  const replicas = nestedObjectValue(object, ['spec', 'replicas'])
-  return typeof replicas === 'number' && Number.isFinite(replicas) ? replicas : 1
-}
-
 /** Returns the current CronJob schedule expression. */
 function workloadSchedule(object: ResourceObject): string {
   const schedule = nestedObjectValue(object, ['spec', 'schedule'])
@@ -4059,7 +4157,8 @@ function pvcRequestedStorage(object: ResourceObject): string {
 
 /** Renders one related-resource target as a deep-link when it is verified and discovered. */
 function RelatedResourceRow({ item, onOpenResource }: { item: RelatedResource; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
-  const canOpen = item.state === 'resolved' && Boolean(item.definition && item.name)
+  const targetPath = relatedResourceDetailPath(item)
+  const canOpen = Boolean(targetPath)
   const kind = item.kind || item.definition?.kind || 'Resource'
   const name = item.name || 'Unnamed target'
   const row = <>
@@ -4103,11 +4202,15 @@ function relatedTypeLabel(type: string): string {
   const labels: Record<string, string> = {
     owner: 'Owner reference',
     'owned-descendant': 'Owned descendant',
+    'involved-object': 'Event involved object',
     'selector-match': 'Selector match',
     'selected-by': 'Selected by Service',
     'bound-volume': 'Bound volume',
     'bound-claim': 'Bound claim',
     reference: 'Native reference',
+    'ingress-backend': 'Ingress backend',
+    'endpoint-slice': 'EndpointSlice',
+    'endpoint-pod': 'Endpoint Pod',
     aggregation: 'Relationship scan',
     discovery: 'API discovery',
   }
@@ -4758,13 +4861,6 @@ function metadataString(object: ResourceObject, field: string): string {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return ''
   const value = (metadata as Record<string, unknown>)[field]
   return typeof value === 'string' ? value : ''
-}
-
-/** Identifies custom-resource candidates without probing built-in API groups for CRD schemas. */
-function isCustomResourceDefinition(definition: ResourceDefinition): boolean {
-  if (definition.customResource) return true
-  if (!definition.group) return false
-  return !['admissionregistration.k8s.io', 'apiextensions.k8s.io', 'authentication.k8s.io', 'authorization.k8s.io', 'autoscaling', 'batch', 'certificates.k8s.io', 'coordination.k8s.io', 'discovery.k8s.io', 'events.k8s.io', 'extensions', 'flowcontrol.apiserver.k8s.io', 'gateway.networking.k8s.io', 'metrics.k8s.io', 'networking.k8s.io', 'node.k8s.io', 'policy', 'rbac.authorization.k8s.io', 'resource.k8s.io', 'scheduling.k8s.io', 'snapshot.storage.k8s.io', 'storage.k8s.io'].includes(definition.group)
 }
 
 /** Returns the browser storage key used for one context namespace selection. */

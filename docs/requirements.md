@@ -8,7 +8,7 @@ The application is desktop-first and responsive. The application name is `KubeHa
 
 ## Implementation Status
 
-The repository contains the completed agreed first-release operation set. The backend and browser UI are real Kubernetes integrations, not mock data. Planned follow-on requirements are documented separately below and are not yet implemented.
+The repository contains the completed agreed first-release operation set. The backend and browser UI are real Kubernetes integrations, not mock data. Implemented follow-on requirements are documented below, and implemented UX improvements are documented separately at the end of this file.
 
 ### Implemented
 
@@ -273,3 +273,151 @@ Provide safe, local-only diagnostics for discovery, watches, API latency, stream
 - Add a diagnostics endpoint and UI panel showing kubeconfig revision, selected context, discovery-cache age, watch status, recent safe error categories, active native sessions, and audit-store availability.
 - Show correlation IDs and safe retry classifications in UI failures.
 - Distinguish liveness from dependency/readiness state for local health checks.
+
+## Implemented UX Requirements
+
+The following requirements improve navigation, discoverability, readability, form coverage, and input behavior without changing the native Kubernetes safety model. They are completed and implemented.
+
+### U1. Actionable overview navigation (Implemented)
+
+Make overview summaries useful starting points rather than static status readouts.
+
+- Make each overview metric card keyboard-accessible and clickable when it has a stable resource destination.
+- Navigate `Nodes ready` to the canonical Nodes resource list, `Pods running` to the canonical Pods resource list, and `Storage claims` to the canonical PersistentVolumeClaim resource list.
+- Do not route the aggregate `Workload health` card to one misleading kind. Open a workload-focused view that covers the represented Deployments, StatefulSets, and DaemonSets, with the existing jobs and schedules context available from the same view or an explicit adjacent destination.
+- Preserve the selected kubeconfig context and namespace scope when navigating from an overview card. Use complete group/version/resource routes rather than guessed short routes.
+- Show an obvious hover and focus treatment, an action affordance, and an accessible label that describes the destination. Do not make a card appear interactive when its target is unavailable.
+- Apply the same navigation rule to overview posture rows and other summary values when an exact target exists, including Namespaces, bound claims, and Pod restart views. Keep aggregate or unresolved values static or provide an explicit aggregate destination rather than guessing.
+- Keep loading, permission-denied, unavailable, and empty states visible; a missing destination must not become a dead click or a guessed resource route.
+
+### U2. Signal check and Event navigation (Implemented)
+
+Turn the landing-page warning panel into a reliable path to Event investigation.
+
+- Make the Signal check panel action open the Events resource list in the active context and namespace scope.
+- Make each warning Event row keyboard-accessible and open the exact Event detail route when its name and namespace are available.
+- Preserve the Event identity as core `v1/events` coordinates, including namespace and name, so a warning cannot open a same-named object from the wrong namespace or API version.
+- If an overview summary lacks enough identity for an individual route, open the bounded Events list with the available context rather than navigating to an incorrect detail page.
+- Retain the existing Event watch, stale/reconnecting states, and RBAC/unavailable messaging after navigation.
+- Use consistent link/button semantics, focus states, and labels for the panel action and individual Event rows.
+
+### U3. Searchable and collapsible resource catalog (Implemented)
+
+Make large discovery catalogs navigable without losing complete discovery coverage.
+
+- Add a client-side catalog filter that searches API group, version, kind, resource name, short names, and categories; API group and kind are required search dimensions.
+- Filter without making additional Kubernetes requests. Preserve partial discovery notices and do not hide an unavailable or RBAC-denied source without explaining why.
+- Display the number of matching resources and an explicit no-match state. Provide a clear action that returns to the complete catalog.
+- Allow each API group section to be collapsed or expanded independently with an accessible control and `aria-expanded` state.
+- When a filter is active, automatically reveal groups containing matches so collapsing a section cannot conceal a search result. A cleared filter may restore the previous local expansion state.
+- Keep catalog row navigation unchanged: selecting a row opens its exact group/version/resource route.
+- Key any remembered expansion state by active context and catalog revision if it is persisted; stale expansion state must not affect catalog contents.
+
+### U4. Contextual autocomplete for operator inputs (Implemented)
+
+Use the already loaded discovery catalog to make structured inputs easier to complete without turning typing into unbounded Kubernetes activity.
+
+- Add accessible combobox or datalist-style suggestions to Global Search for API group, Kind, and Resource.
+- Populate API group suggestions from the discovered catalog and display the core API using a clear `Core API` label while retaining its empty group value internally.
+- Constrain Kind suggestions by the selected API group. When no group is selected, show the group and version context alongside each suggestion so duplicate kinds are not ambiguous.
+- Constrain Resource suggestions by the selected API group and Kind. Show enough group/version/kind context to distinguish duplicate resource names across served APIs.
+- Refresh downstream suggestions when a parent filter changes. Do not silently substitute a different resource identity; preserve free-form text with a clear incompatible or no-match state, or provide an explicit clear action before submission.
+- Offer bounded namespace suggestions from the selected context when that list is already available or can be loaded once and cached. Keep `All namespaces` and arbitrary namespace entry available for namespaces the current identity cannot enumerate.
+- Keep the primary search text, object name, and label selector free-form. Do not query Kubernetes on every keystroke or build an unbounded object-name index.
+- For label selectors, prefer syntax guidance and bounded key/value suggestions from currently loaded result data over cluster-wide live suggestions. Never rewrite an operator's selector without an explicit selection.
+- Support keyboard navigation, selection, dismissal, screen-reader labels, and mobile touch targets. Suggestions assist entry but do not prevent valid custom-resource or namespace values.
+- Reuse the same discovery-backed suggestion model in catalog filters and other structured resource selectors where an exact catalog identity is available.
+- Candidate follow-on uses include resource-list label-selector assistance, bounded namespace/resource filters, and known container or revision choices in operational forms. Container selectors already provided as native selects should not be replaced merely to add autocomplete.
+
+### U5. Readable and consistent typography (Implemented)
+
+Increase legibility while preserving the dense field-console character and desktop-first layout.
+
+- Establish a small, centralized typography scale using relative units so browser zoom and platform text settings work predictably.
+- Target approximately 14-15px for normal body and reading copy, 13-14px for standard controls and table body text, and 11-12px for secondary metadata and compact monospace values.
+- Do not use 9px text for essential labels, instructions, errors, form values, table content, or status explanations. Decorative uppercase eyebrows may remain compact only when the same information is available in a readable heading or control label.
+- Increase line height for descriptions, warnings, errors, Event messages, schema descriptions, and other text that can wrap. Avoid truncating essential names, messages, or validation guidance solely to preserve density.
+- Increase form controls and interactive rows enough to support comfortable mouse and keyboard use, with at least a 36px control height on desktop and a 40px target on smaller screens where practical.
+- Preserve the dark peat/ink, copper, moss, and dense-table visual language; improve contrast and spacing before increasing every decorative element.
+- Review sidebar navigation, top-bar controls, overview cards, catalog rows, search controls, tables, Events, schema forms, operations, diagnostics, and mobile layouts together so the scale is consistent across views.
+- Verify readability at normal desktop zoom, browser zoom through 200%, and the existing narrow responsive breakpoint without horizontal clipping of essential content.
+
+### U6. Schema-generated forms for built-in resources (Implemented)
+
+Extend the existing schema form beyond CRDs by using the Kubernetes API server's published type schema and field descriptions.
+
+- Allow the schema endpoint and form eligibility check to accept any discovered built-in or custom-resource GVR; do not reject core or other built-in API groups solely because they are not CRDs.
+- Prefer the authenticated Kubernetes API server's version-specific OpenAPI v3 schema for the requested group, version, and kind. Use the server's OpenAPI v2 document as a compatibility fallback for clusters that do not serve the required v3 document.
+- Keep schema retrieval in the Go backend. The browser must receive only the bounded, normalized form model and must never fetch OpenAPI documents with kubeconfig credentials.
+- Normalize built-in and custom-resource schemas into the existing bounded form model, preserving field descriptions/comments, titles, types, formats, defaults, enums, required fields, validation limits, and read-only markers where the source schema provides them.
+- Use schema descriptions as the source for the field help text users recognize from `kubectl explain`; do not shell out to `kubectl` or maintain a separate hand-written form for every built-in kind.
+- Respect Kubernetes identity and server-managed fields. Existing object name, namespace, resource version, UID, managed fields, and status fields must remain read-only or be omitted from editable controls according to the schema and current mutation-safety rules.
+- Treat unions, recursive or preserve-unknown fields, unsupported map/array shapes, and schema traversal limits as field-level YAML fallbacks where possible. A schema-level failure must retain the complete YAML editor and state why the form is unavailable.
+- Distinguish missing OpenAPI support, malformed schema, unavailable API, and RBAC failures in the form state. Do not show the current custom-resource-only message for built-in resources.
+- Cache normalized schemas by kubeconfig context, revision, and exact GVR with bounded size and safe invalidation after kubeconfig or discovery changes.
+- Add deterministic tests for built-in OpenAPI v3 descriptions, OpenAPI v2 fallback, version/kind matching, read-only status fields, bounded unsupported constructs, permission failures, and YAML fallback behavior.
+
+### U7. Editable scale replica input (Implemented)
+
+Allow operators to replace a scale value rather than being forced to edit around a coerced numeric value.
+
+- Keep the scale field's in-progress value as a raw editable string so deleting `0` produces an empty field instead of immediately becoming numeric zero.
+- Permit the field to be temporarily empty while typing. Validate on review and before apply that the final value is a whole number greater than or equal to zero.
+- Preserve an explicit `0` as a valid value and do not convert blank, invalid, decimal, negative, or non-finite input into zero or `NaN`.
+- Keep the existing write-mode requirement, server-side dry-run review, resource-version binding, confirmation, and post-apply refresh unchanged.
+- Show an inline validation message and keep review disabled until the value is valid; allow the operator to clear and retype the complete value with normal keyboard editing and mobile numeric input behavior.
+- Add focused tests covering initial zero, delete-and-type, blank validation, invalid input, and a valid transition from zero to one.
+
+## Additional Planned Requirements
+
+The following requirements are newly captured follow-on work and are not yet implemented.
+
+### U8. Ingress in Configure navigation (Planned)
+
+Make Ingress objects directly available from the Configure section of the navigation sidebar.
+
+- Add `Ingress` to the Configure section alongside `Services` and `ConfigMaps`.
+- Resolve the entry through discovery to the canonical `networking.k8s.io` Ingress group/version/resource identity rather than a guessed short route.
+- Preserve the active kubeconfig context and namespace behavior when opening the Ingress resource list.
+- Keep the entry and its unavailable or permission-denied state consistent with the discovery-backed resource catalog.
+
+### U9. Clickable landing-page resource metrics (Planned)
+
+Make the Node and Pod samples in the landing-page CPU and memory metrics panel useful navigation targets.
+
+- Make each Node metric sample keyboard-accessible and clickable to the exact Node resource detail view.
+- Make each Pod metric sample keyboard-accessible and clickable to the exact namespaced Pod resource detail view.
+- Preserve the active kubeconfig context and the Pod sample's namespace when navigating.
+- Use the complete discovered group/version/resource identity and do not infer a destination from an ambiguous resource name.
+- Keep samples clickable when their data is stale but still visible; retain explicit loading, empty, unavailable, permission-denied, and error states when no safe destination exists.
+- Provide accessible labels that identify the target kind, namespace where applicable, and name without requiring the operator to infer that a metric row is interactive.
+
+### U10. Compute read pack for Nodes and Pods (Planned)
+
+Extend the resource detail Read Pack with a `Compute` heading for Node and Pod resources.
+
+- Show CPU and memory values for requests, limits, and actual usage in a compact, consistently labeled view.
+- Render actual CPU and memory usage in the same display units as the corresponding request when a request value exists; fall back to the limit, capacity, or allocatable unit only when the request unit is absent, and never expose raw nanocore or mismatched memory-unit values beside the object-side quantity.
+- For Pods, derive request and limit values from the resource's container specifications using standard Kubernetes resource quantities, and make it clear when values are absent or partial.
+- For Nodes, show the native capacity and allocatable values for the node-side capacity fields; do not invent request or limit values when Kubernetes does not provide a safe node-level equivalent.
+- Read actual Node and Pod usage from the authenticated backend metrics path already used by the landing page (`metrics.k8s.io`); do not fetch metrics documents or credentials from the browser and do not add an external metrics integration.
+- Keep usage identity exact: Node usage is keyed by Node name, and Pod usage is keyed by namespace and name. Do not display usage from a same-named object in another namespace or API identity.
+- Show the metrics sample time and preserve explicit available, stale, permission-denied, unavailable, empty, and partial states without hiding the object-side requests, limits, capacity, or allocatable data.
+- Keep the generic YAML, Events, and related-resource views available when the Compute panel cannot be populated.
+- Bound the additional metrics reads and reuse the existing metrics freshness and cancellation behavior so a resource detail page cannot hang on telemetry.
+
+### U11. Event involved-object relationship (Planned)
+
+Replace the Event related-resource reverse-owner action with a direct relationship to the object named by the Event's `involvedObject` field.
+
+- Do not offer `Load owned descendants` from an Event detail page. Events are not owner controllers, so broad reverse-owner discovery provides no useful relationship and creates avoidable read errors and call-budget exhaustion.
+- Always include an Event's `involvedObject` as the primary related-resource relationship when the field is present.
+- Preserve and use the involved object's `apiVersion`, `kind`, `name`, `namespace`, `uid`, and other safe identity fields needed to resolve and verify the target. Resolve the target through discovery using the full API version and kind rather than guessing a resource slug.
+- Make a resolved involved-object relationship clickable to the exact resource detail route, including namespace for namespaced targets. If discovery, RBAC, or object existence prevents safe resolution, show the relationship and an explicit unresolved state instead of creating an incorrect link.
+- Do not require the Event target to have an owner reference, and do not replace an involved-object relationship with a same-named lookup from another API version or namespace.
+- Do not implement owned-descendant loading as a reverse scan across all discovered listable resources. An unrelated custom resource must never be queried merely because it is present in discovery.
+- Treat the current object's `metadata.ownerReferences` as its direct-owner data. Resolve those declared owners directly; do not perform a broad list operation to discover owners that are already named by the object.
+- For descendants, query only explicitly supported controller-to-child relationships for the current kind and exact owner UID. The initial native relationship map must cover the known Kubernetes chains, including Deployment to ReplicaSet, ReplicaSet to Pod, StatefulSet to Pod, DaemonSet to Pod, Job to Pod, and CronJob to Job where the relevant APIs are available.
+- Limit descendant list requests to the supported child group/version/resource identities and the safe namespace scope for the current object. Filter returned objects by their `metadata.ownerReferences` rather than treating same-name or label-matching objects as owned.
+- Do not infer a generic descendant relationship for arbitrary CRDs or offer `Load owned descendants` when no supported child relationship exists. Show direct owners and other explicit relationships without performing an unrelated reverse scan.
+- Keep supported descendant loading optional, bounded, and explicitly partial when a supported child API is unavailable, forbidden, times out, or reaches its limit. Report one relationship-level limitation for the affected supported child query rather than exposing a list of unrelated resource read errors.

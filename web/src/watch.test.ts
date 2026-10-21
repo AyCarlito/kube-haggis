@@ -1,5 +1,6 @@
 import {
   ReliableWatchController,
+  WATCH_EVENT_DEBOUNCE_MS,
   WATCH_STABLE_DELAY_MS,
   type WatchConnection,
   type WatchConnectionHandlers,
@@ -41,7 +42,7 @@ function fakeWatchConnection(): WatchConnection & { emitOpen: () => void; emitMe
   return connection
 }
 
-/** Creates a manually advanced timer scheduler for cancellation and backoff tests. */
+/** Creates a manually advanced timer scheduler for cancellation, debounce, and backoff tests. */
 function fakeScheduler() {
   const timers = new Map<number, { callback: () => void; delay: number }>()
   let nextTimer = 1
@@ -53,8 +54,10 @@ function fakeScheduler() {
       return id
     },
     cancel: (id: number) => { timers.delete(id) },
-    runNext: () => {
-      const next = timers.entries().next().value as [number, { callback: () => void; delay: number }] | undefined
+    runNext: (expectedDelay?: number) => {
+      const next = expectedDelay === undefined
+        ? timers.entries().next().value as [number, { callback: () => void; delay: number }] | undefined
+        : Array.from(timers.entries()).find(([, timer]) => timer.delay === expectedDelay)
       if (!next) return undefined
       timers.delete(next[0])
       next[1].callback()
@@ -79,6 +82,7 @@ async function runWatchControllerModelTests(): Promise<void> {
   const signals: AbortSignal[] = []
   const states: string[] = []
   const loadedVersions: string[] = []
+  const refreshTimestamps: number[] = []
   const controller = new ReliableWatchController({
     load: (signal) => new Promise<{ resourceVersion: string; items: string[] }>((resolve, reject) => {
       signals.push(signal)
@@ -92,7 +96,10 @@ async function runWatchControllerModelTests(): Promise<void> {
       connections.push(connection)
       return connection
     },
-    onData: (data) => loadedVersions.push(data.resourceVersion),
+    onData: (data, snapshot) => {
+      loadedVersions.push(data.resourceVersion)
+      refreshTimestamps.push(snapshot.lastSuccessfulRefresh ?? -1)
+    },
     onState: (snapshot) => states.push(snapshot.state),
     now: () => 1700000000000 + loadedVersions.length,
     schedule: scheduler.schedule,
@@ -106,14 +113,22 @@ async function runWatchControllerModelTests(): Promise<void> {
   assertWatch(connections.length === 1 && loadedVersions[0] === '12', 'initial relist did not open one watch')
   connections[0].emitOpen()
   assertWatch(controller.getSnapshot().state === 'live', 'watch open did not become live')
+  const refreshingStateCount = states.filter((state) => state === 'refreshing').length
 
   connections[0].emitMessage('{"type":"MODIFIED","object":{}}')
   connections[0].emitMessage('{"type":"MODIFIED","object":{}}')
-  assertWatch(resolvers.length === 2 && connections[0].closed, 'normal events created duplicate relists or left the old watch open')
+  assertWatch(resolvers.length === 1 && !connections[0].closed && scheduler.timers.size === 2, 'normal events did not leave one debounce alongside the stable-live timer')
+  assertWatch(Array.from(scheduler.timers.values()).filter((timer) => timer.delay === WATCH_EVENT_DEBOUNCE_MS).length === 1, 'normal events created duplicate debounce timers')
+  const backgroundStateStart = states.length
+  assertWatch(scheduler.runNext(WATCH_EVENT_DEBOUNCE_MS) === WATCH_EVENT_DEBOUNCE_MS && resolvers.length === 2 && connections[0].closed && controller.getSnapshot().state === 'live', 'normal events did not trigger one debounced background relist')
   resolvers[1]({ resourceVersion: '13', items: ['second'] })
   await settleWatchPromises()
-  assertWatch(connections.length === 2 && loadedVersions[1] === '13', 'relist reused an old resource version')
+  assertWatch(connections.length === 2 && loadedVersions[1] === '13' && controller.getSnapshot().resourceVersion === '13', 'relist reused an old resource version')
+  assertWatch(refreshTimestamps[1] > refreshTimestamps[0], 'background relist did not update the successful refresh timestamp')
+  assertWatch(states.slice(backgroundStateStart).every((state) => state === 'live'), 'successful background relist exposed a transient non-live state')
+  assertWatch(states.filter((state) => state === 'refreshing').length === refreshingStateCount, 'background relist emitted refreshing after the panel became live')
   assertWatch(controller.getSnapshot().lastSuccessfulRefresh !== null, 'successful relist did not record a UI timestamp')
+  assertWatch(scheduler.timers.size === 0, 'background relist retained a stale stable-live timer before reopening the watch')
   connections[1].emitOpen()
 
   connections[1].emitMessage('{"type":"CLOSED"}')
@@ -183,6 +198,36 @@ async function runWatchBackoffModelTests(): Promise<void> {
   controller.stop()
 }
 
+/** Exercises cancellation of a pending event debounce when the stream fails or the generation stops. */
+async function runWatchDebounceCancellationModelTests(): Promise<void> {
+  const scheduler = fakeScheduler()
+  const connections: Array<ReturnType<typeof fakeWatchConnection>> = []
+  const controller = new ReliableWatchController({
+    load: async () => ({ resourceVersion: '12' }),
+    getResourceVersion: (data) => data.resourceVersion,
+    watchUrl: (resourceVersion) => `/watch?resourceVersion=${resourceVersion}`,
+    open: () => {
+      const connection = fakeWatchConnection()
+      connections.push(connection)
+      return connection
+    },
+    onData: () => undefined,
+    onState: () => undefined,
+    schedule: scheduler.schedule,
+    cancel: scheduler.cancel,
+  })
+
+  controller.start()
+  await settleWatchPromises()
+  connections[0].emitOpen()
+  connections[0].emitMessage('{"type":"MODIFIED","object":{}}')
+  assertWatch(scheduler.timers.size === 2, 'normal event did not schedule a debounce before stream failure')
+  connections[0].emitError()
+  assertWatch(scheduler.timers.size === 1 && controller.getSnapshot().state === 'reconnecting', 'stream failure did not cancel the pending event debounce')
+  controller.stop()
+  assertWatch(scheduler.timers.size === 0 && connections[0].closed, 'generation stop did not cancel the recovery timer and stream')
+}
+
 /** Exercises the safe initial permission signal and verifies it becomes unavailable without retrying. */
 async function runPermissionDeniedModelTests(): Promise<void> {
   const scheduler = fakeScheduler()
@@ -200,11 +245,14 @@ async function runPermissionDeniedModelTests(): Promise<void> {
 
   controller.start()
   await settleWatchPromises()
+  connection.emitMessage('{"type":"MODIFIED","object":{}}')
+  assertWatch(scheduler.timers.size === 1, 'permission test did not create a pending event debounce')
   connection.emitMessage('{"type":"ERROR","error":{"reason":"permission-denied","relist":false}}')
   assertWatch(controller.getSnapshot().state === 'unavailable' && scheduler.timers.size === 0, 'permission-denied watch did not become unavailable without a retry timer')
   controller.stop()
 }
 
 void runWatchControllerModelTests()
+void runWatchDebounceCancellationModelTests()
 void runWatchBackoffModelTests()
 void runPermissionDeniedModelTests()

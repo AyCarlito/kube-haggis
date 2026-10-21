@@ -22,10 +22,13 @@ const (
 	resourceSchemaStateMissing          = "missing"
 	resourceSchemaStateNonStructural    = "non-structural"
 	resourceSchemaStatePermissionDenied = "permission-denied"
+	resourceSchemaStateUnavailable      = "unavailable"
+	resourceSchemaStateMalformed        = "malformed"
 	resourceSchemaStateError            = "error"
 	resourceSchemaMaxDepth              = 32
-	resourceSchemaMaxFields             = 512
-	resourceSchemaMaxFallbacks          = 32
+	// resourceSchemaMaxFields bounds expanded built-in schemas while leaving room for real referenced models.
+	resourceSchemaMaxFields    = 4096
+	resourceSchemaMaxFallbacks = 32
 )
 
 // ResourceSchema is the safe schema response used by the browser form and YAML fallback.
@@ -36,6 +39,7 @@ type ResourceSchema struct {
 	Version            string           `json:"version"`
 	Resource           string           `json:"resource"`
 	Kind               string           `json:"kind,omitempty"`
+	Source             string           `json:"source,omitempty"`
 	Schema             *SchemaField     `json:"schema,omitempty"`
 	Fallbacks          []SchemaFallback `json:"fallbacks,omitempty"`
 	FallbacksTruncated bool             `json:"fallbacksTruncated,omitempty"`
@@ -51,8 +55,10 @@ type SchemaFallback struct {
 
 // SchemaField is a bounded, browser-safe subset of a structural OpenAPI v3 field.
 type SchemaField struct {
-	Name                 string        `json:"name,omitempty"`
-	Type                 string        `json:"type"`
+	Name string `json:"name,omitempty"`
+	Type string `json:"type"`
+	// ScalarTypes lists the exact primitive JSON types accepted by a normalized scalar union.
+	ScalarTypes          []string      `json:"scalarTypes,omitempty"`
 	Title                string        `json:"title,omitempty"`
 	Description          string        `json:"description,omitempty"`
 	Format               string        `json:"format,omitempty"`
@@ -76,7 +82,7 @@ type SchemaField struct {
 	UniqueItems          bool          `json:"uniqueItems,omitempty"`
 }
 
-// ResourceSchema returns the structural schema for a discovered custom resource.
+// ResourceSchema returns the normalized schema for one discovered resource GVR.
 func (s *Service) ResourceSchema(ctx context.Context, contextName, group, version, resource string) (ResourceSchema, error) {
 	group = strings.TrimSpace(group)
 	version = strings.TrimSpace(version)
@@ -84,22 +90,23 @@ func (s *Service) ResourceSchema(ctx context.Context, contextName, group, versio
 	if version == "" || resource == "" {
 		return ResourceSchema{}, fmt.Errorf("version and resource are required for schema discovery")
 	}
-	result := ResourceSchema{Group: group, Version: version, Resource: resource}
-	if group == "" || group == "apiextensions.k8s.io" {
-		result.State = resourceSchemaStateUnsupported
-		result.Message = "Schema forms are available for custom resources only; use the YAML editor for this resource."
-		return result, nil
-	}
-
-	dynamicClient, _, _, err := s.clients(contextName)
+	dynamicClient, discoveryClient, _, resolvedContext, revision, err := s.clientsWithRevision(contextName)
 	if err != nil {
 		return ResourceSchema{}, err
 	}
-	return loadResourceSchema(ctx, dynamicClient, group, version, resource)
+	key := resourceSchemaCacheKey{contextName: resolvedContext, revision: revision, group: group, version: version, resource: resource}
+	if cached, found := s.cachedResourceSchema(key); found {
+		return cached, nil
+	}
+	result, err := loadResourceSchema(ctx, dynamicClient, group, version, resource, discoveryClient)
+	if err == nil && result.State == resourceSchemaStateAvailable && result.Schema != nil {
+		s.storeResourceSchema(key, result)
+	}
+	return result, err
 }
 
-// loadResourceSchema reads one CustomResourceDefinition through the generic dynamic API.
-func loadResourceSchema(ctx context.Context, client dynamic.Interface, group, version, resource string) (ResourceSchema, error) {
+// loadCRDResourceSchema reads one CustomResourceDefinition through the generic dynamic API.
+func loadCRDResourceSchema(ctx context.Context, client dynamic.Interface, group, version, resource string) (ResourceSchema, error) {
 	result := ResourceSchema{Group: group, Version: version, Resource: resource}
 	crdName := resource + "." + group
 	crd, err := client.Resource(customResourceDefinitionGVR()).Get(ctx, crdName, metav1.GetOptions{})
@@ -311,10 +318,17 @@ func parseSchemaField(raw map[string]interface{}, name string, required bool, de
 	if name != "" && !safeSchemaPropertyName(name) {
 		return nil, fmt.Errorf("schema property name %q is unsafe", name)
 	}
+	raw = normalizePreserveUnknownField(raw)
+	scalarTypes, scalarUnion := schemaScalarUnionTypes(raw)
 	if unsupported, keyword := hasUnsupportedSchemaKeyword(raw); unsupported {
 		return nil, fmt.Errorf("schema uses unsupported construct %q", keyword)
 	}
 	typeName, foundType, typeErr := unstructured.NestedString(raw, "type")
+	if scalarUnion {
+		typeName = "string"
+		foundType = true
+		typeErr = nil
+	}
 	if typeErr != nil || !foundType || typeName == "" {
 		return nil, fmt.Errorf("schema field %q does not declare a type", name)
 	}
@@ -322,7 +336,7 @@ func parseSchemaField(raw map[string]interface{}, name string, required bool, de
 		return nil, fmt.Errorf("schema field %q uses unsupported type %q", name, typeName)
 	}
 
-	field := &SchemaField{Name: name, Type: typeName, Required: required}
+	field := &SchemaField{Name: name, Type: typeName, Required: required, ScalarTypes: scalarTypes}
 	field.Title, _, _ = unstructured.NestedString(raw, "title")
 	field.Description, _, _ = unstructured.NestedString(raw, "description")
 	field.Format, _, _ = unstructured.NestedString(raw, "format")
@@ -373,7 +387,7 @@ func parseSchemaField(raw map[string]interface{}, name string, required bool, de
 	field.ExclusiveMinimum, _, _ = unstructured.NestedBool(raw, "exclusiveMinimum")
 	field.ExclusiveMaximum, _, _ = unstructured.NestedBool(raw, "exclusiveMaximum")
 	field.UniqueItems, _, _ = unstructured.NestedBool(raw, "uniqueItems")
-	field.Enum, err = schemaEnumValues(raw["enum"], typeName)
+	field.Enum, err = schemaEnumValues(raw["enum"], typeName, scalarTypes...)
 	if err != nil {
 		return nil, fmt.Errorf("schema field %q enum: %w", name, err)
 	}
@@ -394,6 +408,131 @@ func parseSchemaField(raw map[string]interface{}, name string, required bool, de
 		}
 	}
 	return field, nil
+}
+
+// normalizePreserveUnknownField models preserved CRD data as a bounded string-valued object map.
+func normalizePreserveUnknownField(raw map[string]interface{}) map[string]interface{} {
+	preserved, ok := raw["x-kubernetes-preserve-unknown-fields"].(bool)
+	if !ok || !preserved {
+		return raw
+	}
+	normalized := make(map[string]interface{}, len(raw)+1)
+	for key, value := range raw {
+		normalized[key] = value
+	}
+	delete(normalized, "x-kubernetes-preserve-unknown-fields")
+	normalized["type"] = "object"
+	normalized["additionalProperties"] = map[string]interface{}{"type": "string"}
+	return normalized
+}
+
+// schemaScalarUnionTypes recognizes only exact string/integer or string/number scalar unions.
+func schemaScalarUnionTypes(raw map[string]interface{}) ([]string, bool) {
+	if raw == nil {
+		return nil, false
+	}
+	var unionKeyword string
+	var unionValue interface{}
+	for _, keyword := range []string{"oneOf", "anyOf"} {
+		value, found := raw[keyword]
+		if !found || value == nil {
+			continue
+		}
+		if unionKeyword != "" {
+			return nil, false
+		}
+		unionKeyword = keyword
+		unionValue = value
+	}
+	if unionKeyword == "" {
+		format, _ := raw["format"].(string)
+		if format != "int-or-string" {
+			return nil, false
+		}
+		if typeValue, found := raw["type"]; found {
+			typeName, ok := typeValue.(string)
+			if !ok || (typeName != "string" && typeName != "integer") {
+				return nil, false
+			}
+		}
+		for key, value := range raw {
+			switch key {
+			case "type", "format", "title", "description", "readOnly", "default", "enum", "minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems":
+			case "x-kubernetes-int-or-string":
+				if marker, ok := value.(bool); !ok || !marker {
+					return nil, false
+				}
+			default:
+				return nil, false
+			}
+		}
+		return []string{"string", "integer"}, true
+	}
+	branches, ok := unionValue.([]interface{})
+	if !ok || len(branches) != 2 {
+		return nil, false
+	}
+	types := make(map[string]bool, len(branches))
+	for _, branchValue := range branches {
+		branch, ok := branchValue.(map[string]interface{})
+		if !ok || len(branch) != 1 {
+			return nil, false
+		}
+		typeName, ok := branch["type"].(string)
+		if !ok || (typeName != "string" && typeName != "integer" && typeName != "number") {
+			return nil, false
+		}
+		types[typeName] = true
+	}
+	if !(types["string"] && (types["integer"] || types["number"]) && len(types) == 2) {
+		return nil, false
+	}
+	if typeValue, found := raw["type"]; found {
+		typeName, ok := typeValue.(string)
+		if !ok || !types[typeName] {
+			return nil, false
+		}
+	}
+	for key, value := range raw {
+		switch key {
+		case unionKeyword, "type", "format", "title", "description", "readOnly", "default", "enum", "minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems":
+		case "x-kubernetes-int-or-string":
+			if marker, ok := value.(bool); !ok || !marker {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+	}
+	if types["integer"] {
+		return []string{"string", "integer"}, true
+	}
+	return []string{"string", "number"}, true
+}
+
+// orderedSchemaPropertyNames returns deterministic property names and visits root resource sections before large spec branches.
+func orderedSchemaPropertyNames(properties map[string]interface{}, root bool) []string {
+	names := make([]string, 0, len(properties))
+	for name := range properties {
+		names = append(names, name)
+	}
+	if !root {
+		sort.Strings(names)
+		return names
+	}
+	rootOrder := map[string]int{"apiVersion": 0, "kind": 1, "metadata": 2, "status": 3, "spec": 4}
+	sort.Slice(names, func(left, right int) bool {
+		leftRank, leftKnown := rootOrder[names[left]]
+		rightRank, rightKnown := rootOrder[names[right]]
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		if leftKnown && leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return names[left] < names[right]
+	})
+	return names
 }
 
 // parseSchemaFieldWithFallbacks removes unsupported nested fields before strict normalization.
@@ -437,12 +576,73 @@ func stripUnsupportedSchemaFieldsBounded(raw map[string]interface{}, path string
 		appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("schema contains more than %d fields", resourceSchemaMaxFields))
 		return nil, nil
 	}
+	raw = normalizePreserveUnknownField(raw)
 	if unsupported, keyword := hasUnsupportedSchemaKeyword(raw); unsupported {
 		if path == "$" {
 			return nil, fmt.Errorf("schema uses unsupported construct %q", keyword)
 		}
-		appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("unsupported schema construct %q", keyword))
+		reason := fmt.Sprintf("unsupported schema construct %q", keyword)
+		if keyword == "x-kubernetes-preserve-unknown-fields" {
+			reason = "field permits arbitrary schema-free data; use YAML"
+		}
+		appendSchemaFallback(fallbacks, truncated, path, reason)
 		return nil, nil
+	}
+	_, scalarUnion := schemaScalarUnionTypes(raw)
+	typeName, foundType, typeErr := unstructured.NestedString(raw, "type")
+	if scalarUnion {
+		typeName = "string"
+		foundType = true
+		typeErr = nil
+	}
+	if typeErr != nil || !foundType || typeName == "" {
+		if path == "$" {
+			return nil, fmt.Errorf("schema field at %s does not declare a type", path)
+		}
+		appendSchemaFallback(fallbacks, truncated, path, "field schema does not declare a supported type")
+		return nil, nil
+	}
+	if !supportedSchemaType(typeName) {
+		if path == "$" {
+			return nil, fmt.Errorf("schema field at %s uses unsupported type %q", path, typeName)
+		}
+		appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("field uses unsupported type %q", typeName))
+		return nil, nil
+	}
+	if typeName == "array" {
+		items, foundItems := raw["items"]
+		if !foundItems {
+			if path == "$" {
+				return nil, fmt.Errorf("schema array field at %s has no item schema", path)
+			}
+			appendSchemaFallback(fallbacks, truncated, path, "array item schema requires YAML")
+			return nil, nil
+		}
+		if _, ok := items.(map[string]interface{}); !ok {
+			if path == "$" {
+				return nil, fmt.Errorf("schema array field at %s has malformed item schema", path)
+			}
+			appendSchemaFallback(fallbacks, truncated, path, "malformed array item schema requires YAML")
+			return nil, nil
+		}
+	}
+	if typeName == "object" {
+		if additional, foundAdditional := raw["additionalProperties"]; foundAdditional {
+			if allowed, isBool := additional.(bool); isBool && allowed {
+				if path == "$" {
+					return nil, fmt.Errorf("schema object at %s allows untyped additional properties", path)
+				}
+				appendSchemaFallback(fallbacks, truncated, path, "untyped additional properties require YAML")
+				return nil, nil
+			}
+			if _, isMap := additional.(map[string]interface{}); !isMap && additional != nil {
+				if path == "$" {
+					return nil, fmt.Errorf("schema object at %s has malformed additional properties", path)
+				}
+				appendSchemaFallback(fallbacks, truncated, path, "malformed additional properties require YAML")
+				return nil, nil
+			}
+		}
 	}
 	if required, found := raw["required"]; found {
 		if requiredNames, ok := required.([]interface{}); ok && len(requiredNames) > resourceSchemaMaxFields {
@@ -470,16 +670,12 @@ func stripUnsupportedSchemaFieldsBounded(raw map[string]interface{}, path string
 				return nil, nil
 			}
 			cleanedProperties := make(map[string]interface{}, len(properties))
-			propertyNames := make([]string, 0, len(properties))
-			for propertyName := range properties {
-				propertyNames = append(propertyNames, propertyName)
-			}
-			sort.Strings(propertyNames)
+			propertyNames := orderedSchemaPropertyNames(properties, path == "$")
 			for _, propertyName := range propertyNames {
 				rawProperty := properties[propertyName]
 				property, ok := rawProperty.(map[string]interface{})
 				if !ok {
-					cleanedProperties[propertyName] = rawProperty
+					appendSchemaFallback(fallbacks, truncated, schemaPath(path, propertyName), "malformed field schema requires YAML")
 					continue
 				}
 				child, err := stripUnsupportedSchemaFieldsBounded(property, schemaPath(path, propertyName), fallbacks, truncated, depth+1, fields)
@@ -646,11 +842,7 @@ func populateObjectSchema(field *SchemaField, raw map[string]interface{}, depth 
 		return fmt.Errorf("object field %q properties: %w", field.Name, propertiesErr)
 	}
 	if foundProperties {
-		names := make([]string, 0, len(properties))
-		for name := range properties {
-			names = append(names, name)
-		}
-		sort.Strings(names)
+		names := orderedSchemaPropertyNames(properties, depth == 0)
 		for _, name := range names {
 			property, ok := properties[name].(map[string]interface{})
 			if !ok {
@@ -696,6 +888,11 @@ func populateObjectSchema(field *SchemaField, raw map[string]interface{}, depth 
 func hasUnsupportedSchemaKeyword(raw map[string]interface{}) (bool, string) {
 	for _, keyword := range []string{"$ref", "oneOf", "anyOf", "allOf", "not", "if", "then", "else", "contains", "patternProperties", "dependencies", "dependentRequired", "additionalItems"} {
 		if value, found := raw[keyword]; found && value != nil {
+			if keyword == "oneOf" || keyword == "anyOf" {
+				if _, scalarUnion := schemaScalarUnionTypes(raw); scalarUnion {
+					continue
+				}
+			}
 			return true, keyword
 		}
 	}
@@ -706,6 +903,9 @@ func hasUnsupportedSchemaKeyword(raw map[string]interface{}) (bool, string) {
 	}
 	if intOrString, found := raw["x-kubernetes-int-or-string"]; found {
 		if value, ok := intOrString.(bool); ok && value {
+			if _, scalarUnion := schemaScalarUnionTypes(raw); scalarUnion {
+				return false, ""
+			}
 			return true, "x-kubernetes-int-or-string"
 		}
 	}
@@ -750,8 +950,8 @@ func requiredSchemaNames(value interface{}) (map[string]bool, error) {
 	return result, nil
 }
 
-// schemaEnumValues normalizes primitive enum values and verifies they match the field type.
-func schemaEnumValues(value interface{}, typeName string) ([]interface{}, error) {
+// schemaEnumValues normalizes primitive enum values and verifies they match the field type or scalar union.
+func schemaEnumValues(value interface{}, typeName string, scalarTypes ...string) ([]interface{}, error) {
 	if value == nil {
 		return nil, nil
 	}
@@ -762,7 +962,17 @@ func schemaEnumValues(value interface{}, typeName string) ([]interface{}, error)
 	result := make([]interface{}, 0, len(items))
 	for _, item := range items {
 		normalized, ok := normalizeSchemaJSON(item)
-		if !ok || !schemaValueMatchesType(normalized, typeName) {
+		matches := schemaValueMatchesType(normalized, typeName)
+		if len(scalarTypes) > 0 {
+			matches = false
+			for _, scalarType := range scalarTypes {
+				if schemaValueMatchesType(normalized, scalarType) {
+					matches = true
+					break
+				}
+			}
+		}
+		if !ok || !matches {
 			return nil, fmt.Errorf("contains a value that does not match %q", typeName)
 		}
 		if _, duplicate := findSchemaEnum(result, normalized); duplicate {

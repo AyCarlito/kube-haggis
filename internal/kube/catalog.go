@@ -353,6 +353,8 @@ func (s *Service) InvalidateDiscovery(contextName string) error {
 	delete(s.discoveryCache, key)
 	s.discoveryGenerations[key]++
 	delete(s.discoveryFlights, key)
+	s.resourceSchemaCache = make(map[resourceSchemaCacheKey]ResourceSchema)
+	s.resourceSchemaCacheOrder = nil
 	s.mu.Unlock()
 	return nil
 }

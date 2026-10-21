@@ -4,6 +4,9 @@ export type FreshnessState = 'live' | 'reconnecting' | 'stale' | 'refreshing' | 
 /** Defines how long a watch must remain open before recovery backoff resets. */
 export const WATCH_STABLE_DELAY_MS = 10000
 
+/** Defines the bounded window used to coalesce normal Kubernetes watch events. */
+export const WATCH_EVENT_DEBOUNCE_MS = 250
+
 /** Identifies the safe failure reasons understood from the watch SSE protocol. */
 export type WatchFailureReason = 'network' | 'watch-closed' | 'resource-version-expired' | 'permission-denied' | 'watch-error' | 'refresh-error'
 
@@ -129,13 +132,15 @@ export function browserWatchConnection(url: string): WatchConnection {
   }
 }
 
-/** Owns one relist, one SSE watch, one retry timer, and one cancellation boundary. */
+/** Owns relists, one SSE watch, recovery timers, and one cancellation boundary. */
 export class ReliableWatchController<T> {
   private readonly options: ReliableWatchOptions<T>
   private active = false
   private generation = 0
   private stream: WatchConnection | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
+  private coalescingTimer: ReturnType<typeof setTimeout> | null = null
+  private coalescingToken = 0
   private stableTimer: ReturnType<typeof setTimeout> | null = null
   private refreshAbort: AbortController | null = null
   private snapshot: WatchSnapshot = initialWatchSnapshot()
@@ -166,6 +171,7 @@ export class ReliableWatchController<T> {
       this.timer = null
       ;(this.options.cancel ?? clearTimeout)(timer)
     }
+    this.clearCoalescingTimer()
     this.clearStableTimer()
     this.closeStream()
   }
@@ -175,35 +181,45 @@ export class ReliableWatchController<T> {
     return { ...this.snapshot }
   }
 
-  /** Starts one relist when a normal watch event invalidates the current list snapshot. */
+  /** Debounces a normal watch event before relisting the invalidated list snapshot. */
   private requestRefresh(generation: number, stream: WatchConnection): void {
-    if (!this.isCurrent(generation) || this.stream !== stream || this.refreshAbort !== null) return
-    this.closeStream()
-    this.refresh(generation)
+    if (!this.isCurrent(generation) || this.stream !== stream || this.refreshAbort !== null || this.coalescingTimer !== null) return
+    const schedule = this.options.schedule ?? ((callback: () => void, milliseconds: number) => setTimeout(callback, milliseconds))
+    const token = ++this.coalescingToken
+    const timer = schedule(() => {
+      if (token !== this.coalescingToken) return
+      this.coalescingToken += 1
+      this.coalescingTimer = null
+      if (!this.isCurrent(generation) || this.stream !== stream) return
+      this.closeStream()
+      this.refresh(generation, this.snapshot.hasData)
+    }, WATCH_EVENT_DEBOUNCE_MS)
+    if (token === this.coalescingToken) this.coalescingTimer = timer
   }
 
   /** Performs the only refresh operation allowed for the current controller generation. */
-  private refresh(generation: number): void {
+  private refresh(generation: number, background = false): void {
     if (!this.isCurrent(generation) || this.refreshAbort !== null) return
     const abort = new AbortController()
     this.refreshAbort = abort
-    this.setState({ state: 'refreshing', message: undefined })
+    if (!background) this.setState({ state: 'refreshing', message: undefined })
     void this.options.load(abort.signal).then(
-      (data) => this.completeRefresh(generation, abort, data),
+      (data) => this.completeRefresh(generation, abort, data, background),
       () => this.failRefresh(generation, abort),
     )
   }
 
   /** Commits a successful relist and opens the next watch from its newest resource version. */
-  private completeRefresh(generation: number, abort: AbortController, data: T): void {
+  private completeRefresh(generation: number, abort: AbortController, data: T, background: boolean): void {
     if (!this.isCurrent(generation, abort)) return
     this.refreshAbort = null
     this.closeStream()
     const resourceVersion = this.options.getResourceVersion(data).trim()
+    const backgroundRefresh = background && this.snapshot.hasData
     const timestamp = this.options.now?.() ?? Date.now()
     const refreshedSnapshot: WatchSnapshot = {
       ...this.snapshot,
-      state: 'reconnecting',
+      state: backgroundRefresh && resourceVersion ? 'live' : 'reconnecting',
       attempt: resourceVersion ? this.snapshot.attempt : this.snapshot.attempt + 1,
       hasData: true,
       resourceVersion,
@@ -303,8 +319,18 @@ export class ReliableWatchController<T> {
   private closeStream(): void {
     const stream = this.stream
     this.stream = null
+    this.clearCoalescingTimer()
     this.clearStableTimer()
     stream?.close()
+  }
+
+  /** Cancels a pending normal-event debounce without affecting recovery or stable-live timers. */
+  private clearCoalescingTimer(): void {
+    this.coalescingToken += 1
+    if (this.coalescingTimer === null) return
+    const timer = this.coalescingTimer
+    this.coalescingTimer = null
+    ;(this.options.cancel ?? clearTimeout)(timer)
   }
 
   /** Cancels a pending stable-live timer without affecting the retry timer. */

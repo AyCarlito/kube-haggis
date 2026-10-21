@@ -72,6 +72,181 @@ func TestBuildOperationalReadPackExtractsPodPostureAndRedactsSecretValues(t *tes
 	}
 }
 
+// TestPodComputeQuantityAggregationUsesKubernetesSemantics verifies summed app resources and maximum init resources.
+func TestPodComputeQuantityAggregationUsesKubernetesSemantics(t *testing.T) {
+	definition := readPackDefinition("", "v1", "pods", "Pod", true)
+	pod := relatedObject("v1", "Pod", "api-0", "team-a", "pod-uid", map[string]interface{}{
+		"spec": map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "resources": map[string]interface{}{
+					"requests": map[string]interface{}{"cpu": "250m", "memory": "128Mi"},
+					"limits":   map[string]interface{}{"cpu": "500m", "memory": "256Mi"},
+				}},
+				map[string]interface{}{"name": "sidecar", "resources": map[string]interface{}{
+					"requests": map[string]interface{}{"cpu": "750m", "memory": "256Mi"},
+					"limits":   map[string]interface{}{"cpu": "500m", "memory": "256Mi"},
+				}},
+			},
+			"initContainers": []interface{}{map[string]interface{}{"name": "init", "resources": map[string]interface{}{
+				"requests": map[string]interface{}{"cpu": "2", "memory": "1Gi"},
+				"limits":   map[string]interface{}{"cpu": "3", "memory": "2Gi"},
+			}}},
+		},
+	})
+	data, partial := computeReadPackObjectData(definition, pod)
+	if partial || data.Requests.CPU.Value != "2" || data.Requests.Memory.Value != "1Gi" || data.Limits.CPU.Value != "3" || data.Limits.Memory.Value != "2Gi" {
+		t.Fatalf("Pod quantities were not aggregated with init-container max semantics: partial=%t requests=%+v limits=%+v", partial, data.Requests, data.Limits)
+	}
+	if data.Name != "api-0" || data.Namespace != "team-a" {
+		t.Fatalf("Pod Compute identity was not preserved: %+v", data)
+	}
+}
+
+// TestPodComputeQuantityAggregationReportsPartialContainerValues verifies absent container values remain explicit.
+func TestPodComputeQuantityAggregationReportsPartialContainerValues(t *testing.T) {
+	definition := readPackDefinition("", "v1", "pods", "Pod", true)
+	pod := relatedObject("v1", "Pod", "api-0", "team-a", "pod-uid", map[string]interface{}{
+		"spec": map[string]interface{}{"containers": []interface{}{
+			map[string]interface{}{"name": "app", "resources": map[string]interface{}{"requests": map[string]interface{}{"cpu": "250m"}}},
+			map[string]interface{}{"name": "sidecar", "resources": map[string]interface{}{"requests": map[string]interface{}{"memory": "128Mi"}}},
+		}},
+	})
+	data, partial := computeReadPackObjectData(definition, pod)
+	if !partial || data.Requests.State != computeQuantityStatePartial || data.Requests.CPU.State != computeQuantityStatePartial || data.Requests.Memory.State != computeQuantityStatePartial {
+		t.Fatalf("partial Pod quantities were not explicit: partial=%t requests=%+v", partial, data.Requests)
+	}
+}
+
+// TestNodeComputeUsesNativeCapacityAndAllocatable verifies Node capacity fields are not fabricated requests or limits.
+func TestNodeComputeUsesNativeCapacityAndAllocatable(t *testing.T) {
+	definition := readPackDefinition("", "v1", "nodes", "Node", false)
+	node := relatedObject("v1", "Node", "worker-a", "", "node-uid", map[string]interface{}{
+		"status": map[string]interface{}{
+			"capacity":    map[string]interface{}{"cpu": "8", "memory": "32Gi", "pods": "110"},
+			"allocatable": map[string]interface{}{"cpu": "7500m", "memory": "30Gi", "pods": "100"},
+		},
+	})
+	data, partial := computeReadPackObjectData(definition, node)
+	if partial || data.Capacity.CPU.Value != "8" || data.Capacity.Memory.Value != "32Gi" || data.Allocatable.CPU.Value != "7500m" || data.Allocatable.Memory.Value != "30Gi" {
+		t.Fatalf("Node native capacity was not preserved: partial=%t capacity=%+v allocatable=%+v", partial, data.Capacity, data.Allocatable)
+	}
+	if data.Requests.State != computeQuantityStateNotApplicable || data.Limits.State != computeQuantityStateNotApplicable {
+		t.Fatalf("Node requests or limits were fabricated: requests=%+v limits=%+v", data.Requests, data.Limits)
+	}
+}
+
+// TestComputeReadPackAlignsActualUsageUnits verifies metrics use the request units shown beside them.
+func TestComputeReadPackAlignsActualUsageUnits(t *testing.T) {
+	definition := readPackDefinition("", "v1", "pods", "Pod", true)
+	pod := relatedObject("v1", "Pod", "api-0", "team-a", "pod-uid", map[string]interface{}{
+		"spec": map[string]interface{}{"containers": []interface{}{map[string]interface{}{"name": "app", "resources": map[string]interface{}{
+			"requests": map[string]interface{}{"cpu": "24", "memory": "24G"},
+		}}}},
+	})
+	metric := relatedObject("metrics.k8s.io/v1beta1", "PodMetrics", "api-0", "team-a", "", map[string]interface{}{
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"containers": []interface{}{map[string]interface{}{"name": "app", "usage": map[string]interface{}{"cpu": "12116325676n", "memory": "2729156Ki"}}},
+	})
+	client := newRelatedDynamicClientForDefinitions([]ResourceDefinition{definition})
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if action.GetResource().Group == "metrics.k8s.io" {
+			return true, metric, nil
+		}
+		return false, nil, nil
+	})
+	panel := extractComputeReadPackAt(context.Background(), client, definition, pod, newRelatedCallBudget(context.Background()), time.Now().UTC())
+	data, ok := panel.Data.(*ComputeReadPackData)
+	if !ok || data.Usage.CPU.Value != "12.116325676" || data.Usage.Memory.Value != "2.794655744G" {
+		t.Fatalf("actual usage did not use request units: panel=%+v data=%+v", panel, data)
+	}
+}
+
+// TestComputeReadPackRejectsSameNamedMetricFromAnotherNamespace verifies exact Pod metric identity.
+func TestComputeReadPackRejectsSameNamedMetricFromAnotherNamespace(t *testing.T) {
+	definition := readPackDefinition("", "v1", "pods", "Pod", true)
+	pod := relatedObject("v1", "Pod", "api-0", "team-a", "pod-uid", nil)
+	metric := relatedObject("metrics.k8s.io/v1beta1", "PodMetrics", "api-0", "team-b", "", map[string]interface{}{
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"usage":     map[string]interface{}{"cpu": "500m", "memory": "1Gi"},
+	})
+	client := newRelatedDynamicClientForDefinitions([]ResourceDefinition{definition})
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if action.GetResource().Group == "metrics.k8s.io" {
+			return true, metric, nil
+		}
+		return false, nil, nil
+	})
+	panel := extractComputeReadPackAt(context.Background(), client, definition, pod, newRelatedCallBudget(context.Background()), time.Now().UTC())
+	data, ok := panel.Data.(*ComputeReadPackData)
+	if !ok || data.Name != "api-0" || data.Namespace != "team-a" || data.Usage.State != readPackStatePartial || !strings.Contains(data.Usage.Message, "identity") {
+		t.Fatalf("same-named cross-namespace metric was not rejected: panel=%+v data=%+v", panel, data)
+	}
+}
+
+// TestComputeReadPackPreservesMetricFailureStates verifies telemetry states while retaining object-side values.
+func TestComputeReadPackPreservesMetricFailureStates(t *testing.T) {
+	definition := readPackDefinition("", "v1", "pods", "Pod", true)
+	pod := relatedObject("v1", "Pod", "api-0", "team-a", "pod-uid", map[string]interface{}{
+		"spec": map[string]interface{}{"containers": []interface{}{map[string]interface{}{"name": "app", "resources": map[string]interface{}{"requests": map[string]interface{}{"cpu": "250m", "memory": "128Mi"}}}}},
+	})
+	now := time.Date(2026, 10, 20, 10, 10, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		response    runtime.Object
+		err         error
+		wantState   string
+		wantMessage string
+		wantCPU     string
+		wantMemory  string
+	}{
+		{name: "permission denied", err: apierrors.NewForbidden(schema.GroupResource{Group: "metrics.k8s.io", Resource: "pods"}, "api-0", nil), wantState: readPackStatePermissionDenied, wantMessage: "RBAC"},
+		{name: "unavailable", err: apierrors.NewNotFound(schema.GroupResource{Group: "metrics.k8s.io", Resource: "pods"}, "api-0"), wantState: readPackStateUnavailable, wantMessage: "not available"},
+		{name: "empty", response: relatedObject("metrics.k8s.io/v1beta1", "PodMetrics", "api-0", "team-a", "", map[string]interface{}{"timestamp": now.Format(time.RFC3339), "containers": []interface{}{}}), wantState: readPackStateEmpty, wantMessage: "no Pod"},
+		{name: "available", response: relatedObject("metrics.k8s.io/v1beta1", "PodMetrics", "api-0", "team-a", "", map[string]interface{}{"timestamp": now.Format(time.RFC3339), "containers": []interface{}{map[string]interface{}{"name": "app", "usage": map[string]interface{}{"cpu": "250m", "memory": "128Mi"}}, map[string]interface{}{"name": "proxy", "usage": map[string]interface{}{"cpu": "500m", "memory": "256Mi"}}}}), wantState: readPackStateAvailable, wantMessage: "Actual Pod", wantCPU: "750m", wantMemory: "384Mi"},
+		{name: "partial", response: relatedObject("metrics.k8s.io/v1beta1", "PodMetrics", "api-0", "team-a", "", map[string]interface{}{"timestamp": now.Format(time.RFC3339), "containers": []interface{}{map[string]interface{}{"name": "app", "usage": map[string]interface{}{"cpu": "250m"}}}}), wantState: readPackStatePartial, wantMessage: "part"},
+		{name: "stale", response: relatedObject("metrics.k8s.io/v1beta1", "PodMetrics", "api-0", "team-a", "", map[string]interface{}{"timestamp": now.Add(-metricsStaleAfter - time.Minute).Format(time.RFC3339), "containers": []interface{}{map[string]interface{}{"name": "app", "usage": map[string]interface{}{"cpu": "250m", "memory": "128Mi"}}}}), wantState: readPackStateStale, wantMessage: "stale"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newRelatedDynamicClientForDefinitions([]ResourceDefinition{definition})
+			client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				if action.GetResource().Group != "metrics.k8s.io" {
+					return false, nil, nil
+				}
+				return true, test.response, test.err
+			})
+			panel := extractComputeReadPackAt(context.Background(), client, definition, pod, newRelatedCallBudget(context.Background()), now)
+			data, ok := panel.Data.(*ComputeReadPackData)
+			if !ok || panel.State != test.wantState || data.Usage.State != test.wantState || !strings.Contains(strings.ToLower(data.Usage.Message), strings.ToLower(test.wantMessage)) || data.Requests.CPU.Value != "250m" || (test.wantCPU != "" && data.Usage.CPU.Value != test.wantCPU) || (test.wantMemory != "" && data.Usage.Memory.Value != test.wantMemory) {
+				t.Fatalf("unexpected Compute failure state: panel=%+v data=%+v", panel, data)
+			}
+		})
+	}
+}
+
+// TestComputeReadPackUsesOneBoundedMetricsGet verifies detail telemetry does not list or fan out.
+func TestComputeReadPackUsesOneBoundedMetricsGet(t *testing.T) {
+	definition := readPackDefinition("", "v1", "nodes", "Node", false)
+	node := relatedObject("v1", "Node", "worker-a", "", "node-uid", map[string]interface{}{"status": map[string]interface{}{"capacity": map[string]interface{}{"cpu": "2", "memory": "2Gi"}, "allocatable": map[string]interface{}{"cpu": "1500m", "memory": "1Gi"}}})
+	metric := relatedObject("metrics.k8s.io/v1beta1", "NodeMetrics", "worker-a", "", "", map[string]interface{}{"timestamp": time.Now().UTC().Format(time.RFC3339), "usage": map[string]interface{}{"cpu": "500m", "memory": "128Mi"}})
+	client := newRelatedDynamicClientForDefinitions([]ResourceDefinition{definition})
+	client.PrependReactor("get", "nodes", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if action.GetResource().Group == "metrics.k8s.io" {
+			return true, metric, nil
+		}
+		return false, nil, nil
+	})
+	budget := newRelatedCallBudget(context.Background())
+	panel := extractComputeReadPackAt(context.Background(), client, definition, node, budget, time.Now().UTC())
+	if panel.State != readPackStateAvailable || budget.count() != 1 || len(client.Actions()) != 1 {
+		t.Fatalf("Compute telemetry exceeded its bounded read: state=%s calls=%d actions=%d", panel.State, budget.count(), len(client.Actions()))
+	}
+	action, ok := client.Actions()[0].(clienttesting.GetAction)
+	if !ok || action.GetResource().Group != "metrics.k8s.io" || action.GetResource().Resource != "nodes" || action.GetName() != "worker-a" {
+		t.Fatalf("Compute telemetry did not use one exact metrics GET: %#v", client.Actions())
+	}
+}
+
 // TestBuildOperationalReadPackReportsMissingEndpointSliceAPI verifies optional API absence is panel-local.
 func TestBuildOperationalReadPackReportsMissingEndpointSliceAPI(t *testing.T) {
 	ingress := relatedObject("networking.k8s.io/v1", "Ingress", "api", "default", "ingress-uid", map[string]interface{}{

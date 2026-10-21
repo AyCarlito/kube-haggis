@@ -1,4 +1,4 @@
-import type { ResourceDefinition, RouteState } from './types'
+import type { RelatedResource, ResourceDefinition, RouteState } from './types'
 
 /** Describes one served version within a grouped resource catalog. */
 export interface CatalogVersionGroup {
@@ -19,6 +19,7 @@ export function parseResourceRoute(pathname: string, search: string): RouteState
   if (parts[0] === 'diagnostics') return { path: '/diagnostics', view: 'diagnostics' }
   if (parts[0] === 'search') return { path: '/search', view: 'search', search, namespace: new URLSearchParams(search).get('namespace') || undefined }
   if (parts[0] === 'catalog') return { path: '/catalog', view: 'catalog' }
+  if (parts[0] === 'workloads') return { path: '/workloads', view: 'workloads', namespace: new URLSearchParams(search).get('namespace') || undefined }
   if (parts[0] !== 'resources' || !parts[1]) return { path: '/' }
   const namespace = new URLSearchParams(search).get('namespace') || undefined
   if (parts.length >= 4) {
@@ -43,10 +44,16 @@ export function isAmbiguousCatalogRoute(route: RouteState, definitions: Resource
 }
 
 /** Builds the canonical group/version/resource route used by new deep links. */
-export function catalogResourcePath(definition: ResourceDefinition, name?: string): string {
+export function catalogResourcePath<T extends Pick<ResourceDefinition, 'group' | 'version' | 'resource'>>(definition: T, name?: string): string {
   const group = definition.group ? `group-${encodeURIComponent(definition.group)}` : 'core'
   const base = `/resources/${group}/${encodeURIComponent(definition.version)}/${encodeURIComponent(definition.resource)}`
   return name === undefined ? base : `${base}/${encodeURIComponent(name)}`
+}
+
+/** Returns an exact detail route only for a resolved relationship with a discovered target definition. */
+export function relatedResourceDetailPath(item: Pick<RelatedResource, 'state' | 'definition' | 'name'>): string | undefined {
+  if (item.state !== 'resolved' || !item.definition || !item.name) return undefined
+  return catalogResourcePath(item.definition, item.name)
 }
 
 /** Keeps a short route only when the loaded catalog has exactly one matching resource name. */
@@ -57,10 +64,57 @@ export function catalogResourcePathForSlug(resource: string, definitions: Resour
 	return name === undefined ? base : `${base}/${encodeURIComponent(name)}`
 }
 
+const staticNavigationResourceIdentities: Record<string, Pick<ResourceDefinition, 'group' | 'version' | 'resource'>> = {
+  pods: { group: '', version: 'v1', resource: 'pods' },
+  nodes: { group: '', version: 'v1', resource: 'nodes' },
+  events: { group: '', version: 'v1', resource: 'events' },
+  services: { group: '', version: 'v1', resource: 'services' },
+  ingresses: { group: 'networking.k8s.io', version: 'v1', resource: 'ingresses' },
+  configmaps: { group: '', version: 'v1', resource: 'configmaps' },
+  secrets: { group: '', version: 'v1', resource: 'secrets' },
+  persistentvolumeclaims: { group: '', version: 'v1', resource: 'persistentvolumeclaims' },
+  namespaces: { group: '', version: 'v1', resource: 'namespaces' },
+  deployments: { group: 'apps', version: 'v1', resource: 'deployments' },
+  statefulsets: { group: 'apps', version: 'v1', resource: 'statefulsets' },
+  daemonsets: { group: 'apps', version: 'v1', resource: 'daemonsets' },
+  jobs: { group: 'batch', version: 'v1', resource: 'jobs' },
+  cronjobs: { group: 'batch', version: 'v1', resource: 'cronjobs' },
+}
+
+/** Builds an exact route for a known static destination without guessing an alternate API resource. */
+export function catalogStaticNavigationPath(resource: string, definitions: ResourceDefinition[], name?: string): string {
+  const identity = staticNavigationResourceIdentities[resource]
+  if (!identity) return catalogResourcePathForSlug(resource, definitions, name)
+  const definition = definitions.find((item) => item.group === identity.group && item.version === identity.version && item.resource === identity.resource)
+  return catalogResourcePath(definition ?? identity, name)
+}
+
 /** Builds an exact Event route for core/v1 when both Kubernetes Event APIs are discovered. */
 export function catalogEventResourcePath(definitions: ResourceDefinition[], name?: string): string {
 	const coreEvents = definitions.find((item) => item.group === '' && item.version === 'v1' && item.resource === 'events')
 	return coreEvents ? catalogResourcePath(coreEvents, name) : catalogResourcePathForSlug('events', definitions, name)
+}
+
+/** Determines whether a catalog definition matches every term in a local search query. */
+export function resourceCatalogMatchesFilter(definition: ResourceDefinition, query: string): boolean {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (!terms.length) return true
+  const group = definition.group || 'core'
+  const searchableText = [
+    group,
+    `${group}/${definition.version}`,
+    definition.version,
+    definition.resource,
+    definition.kind,
+    ...(definition.shortNames ?? []),
+    ...(definition.categories ?? []),
+  ].join(' ').toLowerCase()
+  return terms.every((term) => searchableText.includes(term))
+}
+
+/** Filters already loaded catalog definitions without performing a discovery request. */
+export function filterResourceCatalog(definitions: ResourceDefinition[], query: string): ResourceDefinition[] {
+  return definitions.filter((definition) => resourceCatalogMatchesFilter(definition, query))
 }
 
 /** Groups catalog rows by API group and version in deterministic display order. */

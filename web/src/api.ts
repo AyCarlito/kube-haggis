@@ -182,7 +182,7 @@ export async function fetchDiscovery(context: string): Promise<ResourceDefinitio
   return response.items
 }
 
-/** Loads a structural CRD schema without exposing kubeconfig credentials to the browser. */
+/** Loads a normalized Kubernetes resource schema without exposing kubeconfig credentials to the browser. */
 export function fetchResourceSchema(context: string, definition: ResourceDefinition): Promise<ResourceSchemaResponse> {
   return fetchJson<ResourceSchemaResponse>(
     apiUrl('/api/schema', {
@@ -259,7 +259,7 @@ export function fetchRelated(
   )
 }
 
-/** Loads the deferred broad reverse-owner relationship phase for one resource. */
+/** Loads the deferred targeted native descendant relationship phase for one resource. */
 export function fetchRelatedReverse(
   context: string,
   definition: ResourceDefinition,

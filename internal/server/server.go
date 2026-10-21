@@ -52,7 +52,7 @@ type Server struct {
 // relatedLoader describes the read-only relationship aggregation seam used by the HTTP handler.
 type relatedLoader func(context.Context, string, string, string, string, string, string, bool) (kube.RelatedResourceList, error)
 
-// resourceSchemaLoader describes the read-only CRD schema seam used by the HTTP handler.
+// resourceSchemaLoader describes the read-only normalized resource schema seam used by the HTTP handler.
 type resourceSchemaLoader func(context.Context, string, string, string, string) (kube.ResourceSchema, error)
 
 // resourceGetLoader describes the generic resource read seam used by HTTP handlers.
@@ -249,7 +249,7 @@ func (s *Server) handleSearch(writer http.ResponseWriter, request *http.Request)
 	writeJSON(writer, http.StatusOK, result)
 }
 
-// handleSchema returns a read-only structural CRD schema or an explicit YAML fallback state.
+// handleSchema returns a read-only normalized resource schema or an explicit YAML fallback state.
 func (s *Server) handleSchema(writer http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
 	loadSchema := s.resourceSchema
@@ -312,9 +312,17 @@ func (s *Server) handleRelated(writer http.ResponseWriter, request *http.Request
 	writeJSON(writer, http.StatusOK, relationships)
 }
 
-// handleRelatedReverse returns the deferred broad reverse-owner relationship phase.
+// handleRelatedReverse returns the deferred targeted native descendant relationship phase.
 func (s *Server) handleRelatedReverse(writer http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
+	if query.Get("group") == "" && query.Get("version") == "v1" && query.Get("resource") == "events" {
+		writeJSON(writer, http.StatusOK, kube.RelatedResourceList{
+			State:   "empty",
+			Message: "Events use involvedObject relationships; reverse-owner loading is not supported.",
+			Items:   []kube.RelatedResource{},
+		})
+		return
+	}
 	loadRelated := s.relatedReverse
 	if loadRelated == nil {
 		loadRelated = s.kube.RelatedReverseResources

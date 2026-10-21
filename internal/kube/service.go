@@ -173,15 +173,25 @@ type MetricsOverview struct {
 
 // EventSummary contains the useful, compact portion of a Kubernetes Event.
 type EventSummary struct {
-	Type      string    `json:"type"`
-	Reason    string    `json:"reason"`
-	Message   string    `json:"message"`
-	Name      string    `json:"name"`
-	Namespace string    `json:"namespace,omitempty"`
-	Object    string    `json:"object"`
-	Count     int64     `json:"count"`
-	FirstSeen time.Time `json:"firstSeen"`
-	LastSeen  time.Time `json:"lastSeen"`
+	Type           string                `json:"type"`
+	Reason         string                `json:"reason"`
+	Message        string                `json:"message"`
+	Name           string                `json:"name"`
+	Namespace      string                `json:"namespace,omitempty"`
+	Object         string                `json:"object"`
+	InvolvedObject *EventObjectReference `json:"involvedObject,omitempty"`
+	Count          int64                 `json:"count"`
+	FirstSeen      time.Time             `json:"firstSeen"`
+	LastSeen       time.Time             `json:"lastSeen"`
+}
+
+// EventObjectReference contains the bounded Kubernetes identity named by an Event.
+type EventObjectReference struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
+	UID        string `json:"uid,omitempty"`
 }
 
 // ClusterOverview is the aggregate model used by the cluster landing page.
@@ -262,17 +272,19 @@ type configLoadResult struct {
 
 // Service owns kubeconfig loading and creates dynamic clients for contexts.
 type Service struct {
-	kubeconfigPath       string
-	mu                   sync.Mutex
-	rules                *clientcmd.ClientConfigLoadingRules
-	config               *clientcmdapi.Config
-	fingerprint          configSourceFingerprint
-	loaded               bool
-	revision             uint64
-	lastReloadError      string
-	discoveryCache       map[discoveryCacheKey]discoveryCacheEntry
-	discoveryFlights     map[discoveryCacheKey]*discoveryFlight
-	discoveryGenerations map[discoveryCacheKey]uint64
+	kubeconfigPath           string
+	mu                       sync.Mutex
+	rules                    *clientcmd.ClientConfigLoadingRules
+	config                   *clientcmdapi.Config
+	fingerprint              configSourceFingerprint
+	loaded                   bool
+	revision                 uint64
+	lastReloadError          string
+	discoveryCache           map[discoveryCacheKey]discoveryCacheEntry
+	discoveryFlights         map[discoveryCacheKey]*discoveryFlight
+	discoveryGenerations     map[discoveryCacheKey]uint64
+	resourceSchemaCache      map[resourceSchemaCacheKey]ResourceSchema
+	resourceSchemaCacheOrder []resourceSchemaCacheKey
 }
 
 const (
@@ -291,6 +303,7 @@ func NewService(kubeconfigPath string) *Service {
 		discoveryCache:       make(map[discoveryCacheKey]discoveryCacheEntry),
 		discoveryFlights:     make(map[discoveryCacheKey]*discoveryFlight),
 		discoveryGenerations: make(map[discoveryCacheKey]uint64),
+		resourceSchemaCache:  make(map[resourceSchemaCacheKey]ResourceSchema),
 	}
 }
 
@@ -872,6 +885,8 @@ func (s *Service) ensureConfigLocked(force bool) (*clientcmdapi.Config, configLo
 	s.loaded = true
 	s.revision++
 	s.discoveryCache = make(map[discoveryCacheKey]discoveryCacheEntry)
+	s.resourceSchemaCache = make(map[resourceSchemaCacheKey]ResourceSchema)
+	s.resourceSchemaCacheOrder = nil
 	s.lastReloadError = ""
 	return config, configLoadResult{Reloaded: wasLoaded || force}, nil
 }
@@ -1660,26 +1675,40 @@ func summarizeEvent(item *unstructured.Unstructured) EventSummary {
 	reason, _, _ := unstructured.NestedString(item.Object, "reason")
 	message, _, _ := unstructured.NestedString(item.Object, "message")
 	objectName := ""
+	var objectReference *EventObjectReference
 	involvedObject, _, _ := unstructured.NestedMap(item.Object, "involvedObject")
 	if involvedObject != nil {
 		kind, _, _ := unstructured.NestedString(involvedObject, "kind")
 		name, _, _ := unstructured.NestedString(involvedObject, "name")
-		objectName = kind + "/" + name
+		apiVersion, _, _ := unstructured.NestedString(involvedObject, "apiVersion")
+		namespace, _, _ := unstructured.NestedString(involvedObject, "namespace")
+		uid, _, _ := unstructured.NestedString(involvedObject, "uid")
+		objectReference = &EventObjectReference{
+			APIVersion: strings.TrimSpace(apiVersion),
+			Kind:       strings.TrimSpace(kind),
+			Name:       strings.TrimSpace(name),
+			Namespace:  strings.TrimSpace(namespace),
+			UID:        strings.TrimSpace(uid),
+		}
+		if kind != "" || name != "" {
+			objectName = kind + "/" + name
+		}
 	}
 	count := nestedInt64(item.Object, "count")
 	if count < 1 {
 		count = 1
 	}
 	return EventSummary{
-		Type:      eventType,
-		Reason:    reason,
-		Message:   message,
-		Name:      item.GetName(),
-		Namespace: item.GetNamespace(),
-		Object:    objectName,
-		Count:     count,
-		FirstSeen: eventTimeForFields(item, "firstTimestamp", "eventTime", "lastTimestamp"),
-		LastSeen:  eventTimeForFields(item, "lastTimestamp", "eventTime", "firstTimestamp"),
+		Type:           eventType,
+		Reason:         reason,
+		Message:        message,
+		Name:           item.GetName(),
+		Namespace:      item.GetNamespace(),
+		Object:         objectName,
+		InvolvedObject: objectReference,
+		Count:          count,
+		FirstSeen:      eventTimeForFields(item, "firstTimestamp", "eventTime", "lastTimestamp"),
+		LastSeen:       eventTimeForFields(item, "lastTimestamp", "eventTime", "firstTimestamp"),
 	}
 }
 

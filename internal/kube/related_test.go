@@ -48,6 +48,101 @@ func TestCollectRelatedResourcesResolvesWorkloadDescendantsAndSelectors(t *testi
 	}
 }
 
+// TestCollectRelatedResourcesResolvesEventInvolvedObject verifies exact Event target identity and navigation data.
+func TestCollectRelatedResourcesResolvesEventInvolvedObject(t *testing.T) {
+	event := relatedObject("v1", "Event", "warning", "default", "event-uid", map[string]interface{}{
+		"involvedObject": map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"name":       "api-0",
+			"namespace":  "default",
+			"uid":        "pod-uid",
+		},
+	})
+	pod := relatedObject("v1", "Pod", "api-0", "default", "pod-uid", nil)
+	client := newRelatedDynamicClient(event, pod)
+
+	result := collectRelatedResources(context.Background(), client, relatedDefinitions(), nil, "", "v1", "events", "default", true, event)
+	item := findRelatedItem(result.Items, relatedTypeInvolvedObject, "api-0")
+	if item == nil || item.State != relatedItemResolved || item.APIVersion != "v1" || item.Kind != "Pod" || item.Namespace != "default" || item.UID != "pod-uid" {
+		t.Fatalf("Event involvedObject was not resolved safely: %+v", result)
+	}
+	if item.Definition == nil || item.Definition.Group != "" || item.Definition.Version != "v1" || item.Definition.Resource != "pods" || !item.Definition.Namespaced {
+		t.Fatalf("Event involvedObject did not retain the exact target GVR: %+v", item)
+	}
+	if result.Diagnostics.QueryCount != 1 || listActionCount(client) != 0 {
+		t.Fatalf("Event relationship used an unexpected reverse/list query: diagnostics=%+v actions=%#v", result.Diagnostics, client.Actions())
+	}
+}
+
+// TestCollectRelatedResourcesRejectsEventTargetUIDMismatch verifies stale Event references remain explicit and unclickable.
+func TestCollectRelatedResourcesRejectsEventTargetUIDMismatch(t *testing.T) {
+	event := relatedObject("v1", "Event", "warning", "default", "event-uid", map[string]interface{}{
+		"involvedObject": map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"name":       "api-0",
+			"namespace":  "default",
+			"uid":        "stale-pod-uid",
+		},
+	})
+	pod := relatedObject("v1", "Pod", "api-0", "default", "current-pod-uid", nil)
+	client := newRelatedDynamicClient(event, pod)
+
+	result := collectRelatedResources(context.Background(), client, relatedDefinitions(), nil, "", "v1", "events", "default", true, event)
+	item := findRelatedItem(result.Items, relatedTypeInvolvedObject, "api-0")
+	if item == nil || item.State != relatedItemUnresolved || item.Message == "" || item.Definition == nil {
+		t.Fatalf("stale Event target was not explicit: %+v", result)
+	}
+}
+
+// TestCollectRelatedResourcesDoesNotReverseLoadEvents verifies Event relationships omit the deferred reverse phase.
+func TestCollectRelatedResourcesDoesNotReverseLoadEvents(t *testing.T) {
+	event := relatedObject("v1", "Event", "warning", "default", "event-uid", map[string]interface{}{
+		"involvedObject": map[string]interface{}{"apiVersion": "v1", "kind": "Pod", "name": "missing", "namespace": "default"},
+	})
+	client := newRelatedDynamicClient(event)
+
+	result := collectRelatedResourcesWithBudget(context.Background(), client, relatedDefinitions(), nil, "", "v1", "events", "default", true, event, newRelatedCallBudget(context.Background()), false, true)
+	if result.Diagnostics.QueryCount != 0 || listActionCount(client) != 0 || len(result.Items) != 0 || len(result.Notices) != 0 {
+		t.Fatalf("Event reverse phase was not omitted: diagnostics=%+v result=%+v actions=%#v", result.Diagnostics, result, client.Actions())
+	}
+}
+
+// TestCollectRelatedResourcesResolvesIngressServiceBackend verifies Ingress Service backends are direct related targets.
+func TestCollectRelatedResourcesResolvesIngressServiceBackend(t *testing.T) {
+	ingress := relatedObject("networking.k8s.io/v1", "Ingress", "edge", "default", "ingress-uid", map[string]interface{}{
+		"spec": map[string]interface{}{
+			"defaultBackend": map[string]interface{}{"service": map[string]interface{}{"name": "edge-service"}},
+			"rules": []interface{}{map[string]interface{}{
+				"http": map[string]interface{}{"paths": []interface{}{map[string]interface{}{
+					"backend": map[string]interface{}{"service": map[string]interface{}{"name": "edge-service"}},
+				}}},
+			}},
+		},
+	})
+	service := relatedObject("v1", "Service", "edge-service", "default", "service-uid", nil)
+	client := newRelatedDynamicClient(ingress, service)
+
+	result := collectRelatedResources(context.Background(), client, relatedDefinitions(), nil, "networking.k8s.io", "v1", "ingresses", "default", true, ingress)
+	item := findRelatedItem(result.Items, relatedTypeIngressBackend, "edge-service")
+	if result.State != relatedStateAvailable || item == nil || item.State != relatedItemResolved {
+		t.Fatalf("Ingress Service backend was not resolved: %+v", result)
+	}
+	if item.Definition == nil || item.Definition.Group != "" || item.Definition.Version != "v1" || item.Definition.Resource != "services" || item.Namespace != "default" {
+		t.Fatalf("Ingress backend lost the exact Service target identity: %+v", item)
+	}
+	backendCount := 0
+	for _, related := range result.Items {
+		if related.Type == relatedTypeIngressBackend && related.Name == "edge-service" {
+			backendCount++
+		}
+	}
+	if backendCount != 1 || getActionCount(client, "services", "edge-service") != 1 {
+		t.Fatalf("Ingress backend was not deduplicated to one target GET: count=%d actions=%#v", backendCount, client.Actions())
+	}
+}
+
 // TestCollectRelatedResourcesResolvesServiceSelector verifies native Service selector matching.
 func TestCollectRelatedResourcesResolvesServiceSelector(t *testing.T) {
 	service := relatedObject("v1", "Service", "api", "default", "service-uid", map[string]interface{}{
@@ -63,6 +158,35 @@ func TestCollectRelatedResourcesResolvesServiceSelector(t *testing.T) {
 	}
 	if !hasRelatedItem(result.Items, relatedTypeSelectorMatch, "api-0", relatedItemResolved) || hasRelatedItem(result.Items, relatedTypeSelectorMatch, "worker-0", relatedItemResolved) {
 		t.Fatalf("Service selector results were incorrect: %+v", result.Items)
+	}
+}
+
+// TestCollectRelatedResourcesResolvesServiceEndpointSlices verifies the native Service label relationship in both directions.
+func TestCollectRelatedResourcesResolvesServiceEndpointSlices(t *testing.T) {
+	service := relatedObject("v1", "Service", "api", "default", "service-uid", map[string]interface{}{
+		"spec": map[string]interface{}{"selector": map[string]interface{}{"app": "api"}},
+	})
+	matchingSlice := relatedObject("discovery.k8s.io/v1", "EndpointSlice", "api-1", "default", "slice-uid", nil)
+	matchingSlice.SetLabels(map[string]string{"kubernetes.io/service-name": "api"})
+	matchingSlice.Object["endpoints"] = []interface{}{map[string]interface{}{"targetRef": map[string]interface{}{"apiVersion": "v1", "kind": "Pod", "name": "api-0", "namespace": "default", "uid": "pod-uid"}}}
+	otherSlice := relatedObject("discovery.k8s.io/v1", "EndpointSlice", "worker-1", "default", "other-slice-uid", nil)
+	otherSlice.SetLabels(map[string]string{"kubernetes.io/service-name": "worker"})
+	pod := relatedObject("v1", "Pod", "api-0", "default", "pod-uid", nil)
+	client := newRelatedDynamicClient(service, matchingSlice, otherSlice, pod)
+
+	serviceResult := collectRelatedResources(context.Background(), client, relatedDefinitions(), nil, "", "v1", "services", "default", true, service)
+	if !hasRelatedItem(serviceResult.Items, relatedTypeEndpointSlice, "api-1", relatedItemResolved) || hasRelatedItem(serviceResult.Items, relatedTypeEndpointSlice, "worker-1", relatedItemResolved) {
+		t.Fatalf("Service EndpointSlice relationships were incorrect: %+v", serviceResult)
+	}
+
+	sliceResult := collectRelatedResources(context.Background(), client, relatedDefinitions(), nil, "discovery.k8s.io", "v1", "endpointslices", "default", true, matchingSlice)
+	serviceItem := findRelatedItem(sliceResult.Items, relatedTypeEndpointSlice, "api")
+	if serviceItem == nil || serviceItem.State != relatedItemResolved || serviceItem.Definition == nil || serviceItem.Definition.Resource != "services" || serviceItem.Namespace != "default" {
+		t.Fatalf("EndpointSlice Service relationship was not resolved with exact identity: %+v", sliceResult)
+	}
+	podItem := findRelatedItem(sliceResult.Items, relatedTypeEndpointPod, "api-0")
+	if podItem == nil || podItem.State != relatedItemResolved || podItem.Definition == nil || podItem.Definition.Resource != "pods" || podItem.Namespace != "default" || podItem.UID != "pod-uid" {
+		t.Fatalf("EndpointSlice Pod target relationship was not resolved with UID verification: %+v", sliceResult)
 	}
 }
 
@@ -164,21 +288,122 @@ func TestCollectRelatedResourcesDefersReverseOwnerDiscovery(t *testing.T) {
 	}
 }
 
-// TestCollectRelatedResourcesEnforcesCallBudget verifies broad discovery never exceeds the deterministic call cap.
-func TestCollectRelatedResourcesEnforcesCallBudget(t *testing.T) {
+// TestCollectRelatedResourcesDoesNotScanUnrelatedDiscoveryResources verifies unsupported discovery entries are never reverse-scanned.
+func TestCollectRelatedResourcesDoesNotScanUnrelatedDiscoveryResources(t *testing.T) {
 	definitions := syntheticRelatedDefinitions(64)
 	current := relatedObject("fixture.example/v1", "Fixture", "current", "default", "current-uid", nil)
 	client := newRelatedDynamicClientForDefinitions(definitions, current)
 
 	result := collectRelatedResourcesWithBudget(context.Background(), client, definitions, nil, "fixture.example", "v1", "resources-0", "default", true, current, newRelatedCallBudget(context.Background()), false, true)
-	if result.Diagnostics.QueryCount != relatedCallBudgetLimit {
-		t.Fatalf("relationship query exceeded or failed to use call budget: %+v", result.Diagnostics)
+	if result.Diagnostics.QueryCount != 0 {
+		t.Fatalf("unsupported resource unexpectedly issued relationship queries: %+v", result.Diagnostics)
 	}
-	if !result.Truncated || !hasNoticeState(result.Notices, relatedStatePartial) {
-		t.Fatalf("call budget exhaustion was not explicit: %+v", result)
+	if result.State != relatedStateEmpty || len(result.Items) != 0 || len(result.Notices) != 0 {
+		t.Fatalf("unsupported resource returned reverse relationship data: %+v", result)
 	}
-	if listActionCount(client) > relatedCallBudgetLimit {
-		t.Fatalf("fake Kubernetes client observed too many list calls: %d", listActionCount(client))
+	if listActionCount(client) != 0 {
+		t.Fatalf("fake Kubernetes client scanned unrelated discovered resources: %d", listActionCount(client))
+	}
+}
+
+// TestOwnedDescendantQueryPlanCoversNativeChains verifies every Phase 1 native controller child mapping.
+func TestOwnedDescendantQueryPlanCoversNativeChains(t *testing.T) {
+	cases := []struct {
+		name          string
+		group         string
+		version       string
+		resource      string
+		kind          string
+		childGroup    string
+		childVersion  string
+		childResource string
+	}{
+		{name: "Deployment ReplicaSet", group: "apps", version: "v1", resource: "deployments", kind: "Deployment", childGroup: "apps", childVersion: "v1", childResource: "replicasets"},
+		{name: "ReplicaSet Pod", group: "apps", version: "v1", resource: "replicasets", kind: "ReplicaSet", childGroup: "", childVersion: "v1", childResource: "pods"},
+		{name: "StatefulSet Pod", group: "apps", version: "v1", resource: "statefulsets", kind: "StatefulSet", childGroup: "", childVersion: "v1", childResource: "pods"},
+		{name: "DaemonSet Pod", group: "apps", version: "v1", resource: "daemonsets", kind: "DaemonSet", childGroup: "", childVersion: "v1", childResource: "pods"},
+		{name: "Job Pod", group: "batch", version: "v1", resource: "jobs", kind: "Job", childGroup: "", childVersion: "v1", childResource: "pods"},
+		{name: "CronJob Job", group: "batch", version: "v1", resource: "cronjobs", kind: "CronJob", childGroup: "batch", childVersion: "v1", childResource: "jobs"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			apiVersion := testCase.version
+			if testCase.group != "" {
+				apiVersion = testCase.group + "/" + testCase.version
+			}
+			object := relatedObject(apiVersion, testCase.kind, "current", "default", "current-uid", nil)
+			collector := &relatedCollector{
+				definitions:       relatedDefinitions(),
+				object:            object,
+				currentGroup:      testCase.group,
+				currentVersion:    testCase.version,
+				currentResource:   testCase.resource,
+				currentNamespaced: true,
+			}
+			plan := collector.ownedDescendantQueryPlan()
+			if len(plan) != 1 || plan[0].definition.Group != testCase.childGroup || plan[0].definition.Version != testCase.childVersion || plan[0].definition.Resource != testCase.childResource || plan[0].namespace != "default" {
+				t.Fatalf("unexpected native descendant query plan: %+v", plan)
+			}
+		})
+	}
+}
+
+// TestCollectRelatedResourcesFiltersSupportedDescendantsByOwnerUID verifies exact child GVR and owner UID filtering.
+func TestCollectRelatedResourcesFiltersSupportedDescendantsByOwnerUID(t *testing.T) {
+	deployment := relatedObject("apps/v1", "Deployment", "api", "default", "deployment-uid", nil)
+	matchingReplicaSet := relatedObjectWithOwners("apps/v1", "ReplicaSet", "api-rs", "default", "replicaset-uid", nil, []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "api", UID: "deployment-uid"}})
+	otherReplicaSet := relatedObjectWithOwners("apps/v1", "ReplicaSet", "other-rs", "default", "other-replicaset-uid", nil, []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "other", UID: "other-deployment-uid"}})
+	customChild := relatedObjectWithOwners("example.test/v1", "Widget", "api-widget", "default", "widget-uid", nil, []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "api", UID: "deployment-uid"}})
+	definitions := append(relatedDefinitions(), ResourceDefinition{Group: "example.test", Version: "v1", Resource: "widgets", Kind: "Widget", Namespaced: true, Verbs: []string{"get", "list"}})
+	client := newRelatedDynamicClientForDefinitions(definitions, deployment, matchingReplicaSet, otherReplicaSet, customChild)
+
+	result := collectRelatedResourcesWithBudget(context.Background(), client, definitions, nil, "apps", "v1", "deployments", "default", true, deployment, newRelatedCallBudget(context.Background()), false, true)
+	matching := findRelatedItem(result.Items, relatedTypeOwnedDescendant, "api-rs")
+	if matching == nil || matching.State != relatedItemResolved || matching.Definition == nil || matching.Definition.Group != "apps" || matching.Definition.Resource != "replicasets" {
+		t.Fatalf("supported ReplicaSet descendant was not resolved: %+v", result)
+	}
+	if hasRelatedItem(result.Items, relatedTypeOwnedDescendant, "other-rs", relatedItemResolved) || hasRelatedItem(result.Items, relatedTypeOwnedDescendant, "api-widget", relatedItemResolved) {
+		t.Fatalf("descendant filtering returned an unrelated object: %+v", result.Items)
+	}
+	if result.Diagnostics.QueryCount != 1 || listActionCount(client) != 1 {
+		t.Fatalf("targeted descendant query did not issue exactly one child list: diagnostics=%+v actions=%#v", result.Diagnostics, client.Actions())
+	}
+	for _, action := range client.Actions() {
+		listAction, ok := action.(clienttesting.ListAction)
+		if !ok {
+			continue
+		}
+		if listAction.GetResource().Group != "apps" || listAction.GetResource().Version != "v1" || listAction.GetResource().Resource != "replicasets" || listAction.GetNamespace() != "default" {
+			t.Fatalf("targeted query used an unsafe or unrelated list target: %#v", listAction)
+		}
+	}
+}
+
+// TestCollectRelatedResourcesReportsUnavailableSupportedChild verifies one limitation is returned when a native child API is undiscovered.
+func TestCollectRelatedResourcesReportsUnavailableSupportedChild(t *testing.T) {
+	deployment := relatedObject("apps/v1", "Deployment", "api", "default", "deployment-uid", nil)
+	definitions := make([]ResourceDefinition, 0, len(relatedDefinitions())-1)
+	for _, definition := range relatedDefinitions() {
+		if definition.Group == "apps" && definition.Version == "v1" && definition.Resource == "replicasets" {
+			continue
+		}
+		definitions = append(definitions, definition)
+	}
+	client := newRelatedDynamicClientForDefinitions(definitions, deployment)
+
+	result := collectRelatedResourcesWithBudget(context.Background(), client, definitions, nil, "apps", "v1", "deployments", "default", true, deployment, newRelatedCallBudget(context.Background()), true, false)
+	limitations := 0
+	for _, notice := range result.Notices {
+		if notice.Type == relatedTypeOwnedDescendant {
+			limitations++
+			if notice.State != relatedItemUnavailable || notice.Deferred {
+				t.Fatalf("unavailable child limitation had the wrong state: %+v", notice)
+			}
+		}
+	}
+	if limitations != 1 || len(result.Items) != 0 || listActionCount(client) != 0 {
+		t.Fatalf("unavailable supported child was not summarized once without a query: result=%+v actions=%#v", result, client.Actions())
 	}
 }
 
@@ -249,7 +474,7 @@ func BenchmarkDirectRelationshipsWith1000Definitions(b *testing.B) {
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
 		result := collectRelatedResourcesWithBudget(context.Background(), client, definitions, nil, "fixture.example", "v1", "resources-0", "default", true, current, newRelatedCallBudget(context.Background()), true, false)
-		if result.State != relatedStatePartial || !hasRelatedItem(result.Items, relatedTypeOwner, "api", relatedItemResolved) {
+		if result.State != relatedStateAvailable || !hasRelatedItem(result.Items, relatedTypeOwner, "api", relatedItemResolved) {
 			b.Fatalf("direct relationship benchmark fixture failed: %+v", result)
 		}
 	}
@@ -265,10 +490,15 @@ func relatedDefinitions() []ResourceDefinition {
 		{Group: "", Version: "v1", Resource: "persistentvolumeclaims", Kind: "PersistentVolumeClaim", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "persistentvolumes", Kind: "PersistentVolume", Namespaced: false, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "serviceaccounts", Kind: "ServiceAccount", Namespaced: true, Verbs: []string{"get", "list"}},
+		{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices", Kind: "EndpointSlice", Namespaced: true, Verbs: []string{"get", "list"}},
+		{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses", Kind: "Ingress", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet", Namespaced: true, Verbs: []string{"get", "list"}},
+		{Group: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet", Namespaced: true, Verbs: []string{"get", "list"}},
+		{Group: "apps", Version: "v1", Resource: "daemonsets", Kind: "DaemonSet", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "batch", Version: "v1", Resource: "jobs", Kind: "Job", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "batch", Version: "v1", Resource: "cronjobs", Kind: "CronJob", Namespaced: true, Verbs: []string{"get", "list"}},
+		{Group: "", Version: "v1", Resource: "events", Kind: "Event", Namespaced: true, Verbs: []string{"get", "list"}},
 	}
 }
 
