@@ -15,6 +15,7 @@ import type {
   ResourceObject,
   ResourceSchemaResponse,
   RelatedResourcesResponse,
+  OperationalReadPackResponse,
   NodeActionRequest,
   NodeActionResponse,
   PVCActionRequest,
@@ -195,6 +196,28 @@ export function fetchRelatedReverse(
       name,
       namespaced: String(definition.namespaced),
     }),
+  )
+}
+
+/** Loads one bounded, read-only built-in operational read pack. */
+export function fetchOperationalReadPack(
+  context: string,
+  definition: ResourceDefinition,
+  namespace: string,
+  name: string,
+  signal?: AbortSignal,
+): Promise<OperationalReadPackResponse> {
+  return fetchJson<OperationalReadPackResponse>(
+    apiUrl('/api/read-pack', {
+      context,
+      group: definition.group,
+      version: definition.version,
+      resource: definition.resource,
+      namespace: definition.namespaced ? namespace : '',
+      name,
+      namespaced: String(definition.namespaced),
+    }),
+    { signal },
   )
 }
 

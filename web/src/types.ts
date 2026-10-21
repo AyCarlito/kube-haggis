@@ -360,6 +360,328 @@ export interface ClusterOverview {
 /** Represents an unstructured Kubernetes resource object. */
 export type ResourceObject = Record<string, unknown>
 
+/** Identifies the explicit state of one operational read-pack panel. */
+export type OperationalReadPackState = 'available' | 'empty' | 'partial' | 'permission-denied' | 'unavailable' | 'error'
+
+/** Contains safe timing and cap diagnostics for one operational read-pack request. */
+export interface OperationalReadPackDiagnostics {
+  queryCount: number
+  queryBudget: number
+  durationMilliseconds: number
+  deadlineMilliseconds: number
+  resultLimit: number
+}
+
+/** Identifies a related Kubernetes object without returning its resource body. */
+export interface OperationalReadPackReference {
+  apiVersion?: string
+  kind?: string
+  name: string
+  namespace?: string
+  state: string
+  message?: string
+}
+
+/** Contains one safe Kubernetes condition summary. */
+export interface OperationalCondition {
+  type: string
+  status: string
+  reason?: string
+  message?: string
+}
+
+/** Describes one bounded native selector expression. */
+export interface OperationalLabelExpression {
+  key: string
+  operator: string
+  values?: string[]
+}
+
+/** Contains display-safe LabelSelector values. */
+export interface OperationalLabelSelector {
+  matchLabels: Record<string, string>
+  matchExpressions: OperationalLabelExpression[]
+  text: string
+}
+
+/** Summarizes one Ingress rule host and HTTP path set. */
+export interface IngressRuleSummary {
+  host?: string
+  paths: IngressPathSummary[]
+}
+
+/** Identifies one Ingress path backend. */
+export interface IngressPathSummary {
+  path?: string
+  pathType?: string
+  serviceName?: string
+  servicePort?: string
+  resource?: string
+}
+
+/** Identifies one unique Ingress backend. */
+export interface IngressBackendSummary {
+  name: string
+  namespace?: string
+  port?: string
+  kind?: string
+  state: string
+}
+
+/** Summarizes one EndpointSlice endpoint set. */
+export interface EndpointSliceSummary {
+  name: string
+  serviceName?: string
+  addressType?: string
+  ports: string[]
+  endpoints: EndpointSummary[]
+}
+
+/** Contains safe address and topology state for one EndpointSlice endpoint. */
+export interface EndpointSummary {
+  addresses: string[]
+  ready?: boolean
+  serving?: boolean
+  terminating?: boolean
+  nodeName?: string
+  zone?: string
+}
+
+/** Contains Ingress rules, backend services, and EndpointSlice visibility. */
+export interface IngressReadPackData {
+  ingressClass?: string
+  tlsHosts: string[]
+  rules: IngressRuleSummary[]
+  backends: IngressBackendSummary[]
+  services: OperationalReadPackReference[]
+  endpointSlices: EndpointSliceSummary[]
+}
+
+/** Contains the current EndpointSlice summary. */
+export interface EndpointSliceReadPackData {
+  slice: EndpointSliceSummary
+}
+
+/** Summarizes one NetworkPolicy peer and port set. */
+export interface NetworkPolicyRuleSummary {
+  peerCount: number
+  portCount: number
+  peers: string[]
+  ports: string[]
+}
+
+/** Contains NetworkPolicy selector, rules, and bounded affected Pod references. */
+export interface NetworkPolicyReadPackData {
+  podSelector: OperationalLabelSelector
+  policyTypes: string[]
+  ingressRules: NetworkPolicyRuleSummary[]
+  egressRules: NetworkPolicyRuleSummary[]
+  affectedPods: OperationalReadPackReference[]
+}
+
+/** Summarizes one HPA metric source and target. */
+export interface AutoscalerMetricSummary {
+  type: string
+  resource?: string
+  name?: string
+  current?: string
+  target?: string
+  targetAverage?: string
+  targetUtilization?: number
+}
+
+/** Contains HPA target, replica bounds, metrics, and conditions. */
+export interface HorizontalPodAutoscalerReadPackData {
+  target: OperationalReadPackReference
+  minReplicas?: number
+  maxReplicas?: number
+  currentReplicas?: number
+  desiredReplicas?: number
+  metrics: AutoscalerMetricSummary[]
+  conditions: OperationalCondition[]
+}
+
+/** Contains PDB availability counters and disruption allowance. */
+export interface PodDisruptionBudgetReadPackData {
+  minAvailable?: string
+  maxUnavailable?: string
+  expectedPods?: number
+  currentHealthy?: number
+  desiredHealthy?: number
+  disruptionsAllowed?: number
+  conditions: OperationalCondition[]
+}
+
+/** Contains ResourceQuota scopes and used/hard quantities. */
+export interface ResourceQuotaReadPackData {
+  scopes: string[]
+  usage: QuotaUsageSummary[]
+}
+
+/** Summarizes one quota resource and optional percentage. */
+export interface QuotaUsageSummary {
+  resource: string
+  used?: string
+  hard?: string
+  percent?: number
+}
+
+/** Contains bounded LimitRange defaults and limits. */
+export interface LimitRangeReadPackData {
+  items: LimitRangeItemSummary[]
+}
+
+/** Summarizes one LimitRange item without arbitrary provider fields. */
+export interface LimitRangeItemSummary {
+  type: string
+  default: Record<string, string>
+  defaultRequest: Record<string, string>
+  max: Record<string, string>
+  min: Record<string, string>
+}
+
+/** Contains PersistentVolume lifecycle fields and safe claim/class references. */
+export interface PersistentVolumeReadPackData {
+  phase?: string
+  reason?: string
+  storageClass?: string
+  reclaimPolicy?: string
+  volumeMode?: string
+  capacity: Record<string, string>
+  claimRef: OperationalReadPackReference
+  source?: string
+  nodeAffinity: boolean
+  providerMessage: boolean
+  relationships: OperationalReadPackReference[]
+}
+
+/** Contains StorageClass provisioning settings and bounded PV relationships. */
+export interface StorageClassReadPackData {
+  provisioner?: string
+  reclaimPolicy?: string
+  volumeBindingMode?: string
+  allowVolumeExpansion?: boolean
+  mountOptions: string[]
+  allowedTopologies: number
+  persistentVolumes: OperationalReadPackReference[]
+}
+
+/** Contains ServiceAccount references and read-only RBAC binding summaries. */
+export interface ServiceAccountReadPackData {
+  automountServiceAccountToken?: boolean
+  secrets: string[]
+  imagePullSecrets: string[]
+  roleBindings: RBACBindingSummary[]
+  clusterRoleBindings: RBACBindingSummary[]
+}
+
+/** Summarizes one RoleBinding or ClusterRoleBinding. */
+export interface RBACBindingSummary {
+  name: string
+  namespace?: string
+  roleKind?: string
+  roleName?: string
+  subjects: RBACSubjectSummary[]
+}
+
+/** Contains one non-secret RBAC subject identity. */
+export interface RBACSubjectSummary {
+  kind: string
+  name: string
+  namespace?: string
+}
+
+/** Contains richer Pod scheduling, readiness, probes, volumes, and security summaries. */
+export interface PodReadPackData {
+  phase?: string
+  reason?: string
+  nodeName?: string
+  schedulerName?: string
+  podIP?: string
+  conditions: OperationalCondition[]
+  readinessGates: string[]
+  containers: PodContainerSummary[]
+  initContainers: PodContainerSummary[]
+  ephemeralContainers: PodContainerSummary[]
+  volumes: PodVolumeSummary[]
+  securityContext: PodSecurityContextSummary
+}
+
+/** Contains one Pod container's status, probes, termination, and security details. */
+export interface PodContainerSummary {
+  name: string
+  image?: string
+  ready?: boolean
+  started?: boolean
+  restartCount?: number
+  state?: string
+  stateReason?: string
+  stateExitCode?: number
+  lastTerminationReason?: string
+  lastTerminationExitCode?: number
+  probes: PodProbeSummary[]
+  securityContext: PodContainerSecuritySummary
+}
+
+/** Identifies one configured Pod probe handler. */
+export interface PodProbeSummary {
+  name: string
+  configured: boolean
+  handler?: string
+}
+
+/** Identifies one Pod volume by type and safe object reference. */
+export interface PodVolumeSummary {
+  name: string
+  type: string
+  reference?: string
+  readOnly?: boolean
+}
+
+/** Contains non-secret Pod-level security settings. */
+export interface PodSecurityContextSummary {
+  runAsUser?: number
+  runAsGroup?: number
+  runAsNonRoot?: boolean
+  fsGroup?: number
+  seccompProfileType?: string
+  hostNetwork?: boolean
+  hostPID?: boolean
+  hostIPC?: boolean
+}
+
+/** Contains non-secret container-level security settings. */
+export interface PodContainerSecuritySummary {
+  privileged?: boolean
+  allowPrivilegeEscalation?: boolean
+  readOnlyRootFilesystem?: boolean
+  runAsUser?: number
+  runAsNonRoot?: boolean
+  seccompProfileType?: string
+  capabilities: string[]
+}
+
+/** Unions every structured data shape returned by the operational read pack. */
+export type OperationalReadPackData = IngressReadPackData | EndpointSliceReadPackData | NetworkPolicyReadPackData | HorizontalPodAutoscalerReadPackData | PodDisruptionBudgetReadPackData | ResourceQuotaReadPackData | LimitRangeReadPackData | PersistentVolumeReadPackData | StorageClassReadPackData | ServiceAccountReadPackData | PodReadPackData
+
+/** Describes one independently readable operational panel. */
+export interface OperationalReadPackPanel {
+  key: string
+  title: string
+  state: OperationalReadPackState
+  message: string
+  truncated?: boolean
+  data?: OperationalReadPackData
+}
+
+/** Contains the bounded structured views for one built-in Kubernetes resource. */
+export interface OperationalReadPackResponse {
+  state: OperationalReadPackState
+  message: string
+  panels: OperationalReadPackPanel[]
+  diagnostics: OperationalReadPackDiagnostics
+}
+
 /** Contains the supported fields for one ephemeral debug-container launch. */
 export interface EphemeralContainerRequest {
   name: string

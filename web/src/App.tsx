@@ -57,6 +57,7 @@ import {
   fetchResource,
   fetchResourceSchema,
   fetchResourceEvents,
+  fetchOperationalReadPack,
   fetchRelated,
   fetchRelatedReverse,
   fetchResources,
@@ -81,6 +82,7 @@ import {
   resolveCatalogDefinition,
 } from './catalog'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
+import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
 import type {
   AuditEntry,
@@ -104,6 +106,22 @@ import type {
   ResourceObject,
   ResourceSchemaField,
   ResourceSchemaResponse,
+  OperationalReadPackResponse,
+  OperationalReadPackPanel as OperationalReadPackPanelModel,
+  IngressReadPackData,
+  EndpointSliceReadPackData,
+  NetworkPolicyReadPackData,
+  HorizontalPodAutoscalerReadPackData,
+  PodDisruptionBudgetReadPackData,
+  ResourceQuotaReadPackData,
+  LimitRangeReadPackData,
+  PersistentVolumeReadPackData,
+  StorageClassReadPackData,
+  ServiceAccountReadPackData,
+  PodReadPackData,
+  OperationalReadPackReference,
+  OperationalCondition,
+  PodContainerSummary,
   ResourceSummary,
   RelatedAggregateState,
   RelatedResourcesResponse,
@@ -1858,7 +1876,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const conflictCurrentYaml = conflict?.currentObject ? boundedConflictText(stringify(isSecret ? redactSecret(sanitizeEditorObject(conflict.currentObject)) : sanitizeEditorObject(conflict.currentObject))) : ''
   const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
   const schemaTabs = schemaCandidate ? [baseDetailTabs[0], 'form', ...baseDetailTabs.slice(1)] : baseDetailTabs
-  const detailTabs = (targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) && !isNew ? [schemaTabs[0], 'operations', ...schemaTabs.slice(1)] : schemaTabs
+  const detailTabs = !isNew ? [schemaTabs[0], ...(isOperationalReadPackResource(definition) ? ['read-pack'] : []), ...((targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) ? ['operations'] : []), ...schemaTabs.slice(1)] : schemaTabs
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
@@ -1869,8 +1887,9 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
      <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
      {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
         {conflict && <ConflictResolutionPanel conflict={conflict} currentYaml={conflictCurrentYaml} isSecret={isSecret} draftKept={draftKept} reviewed={conflictReviewed} onReviewed={setConflictReviewed} onKeepDraft={keepConflictDraft} onReload={reloadConflictObject} onExport={exportConflictDraft} onPrepareRetry={prepareConflictRetry} />}
-        {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
-         {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+         {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
+          {tab === 'read-pack' && isOperationalReadPackResource(definition) && <OperationalReadPackView context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} revision={revision} reloadEpoch={reloadEpoch} />}
+          {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
          {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
          {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
@@ -1882,7 +1901,165 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       {tab === 'files' && definition.resource === 'pods' && !isNew && <PodFileCopyPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
       {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} revision={revision} reloadEpoch={reloadEpoch} onOpenEvent={onOpenEvent} />}
       {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
+ </div>
+}
+
+/** Loads and presents one bounded built-in operational read pack without mutation controls. */
+function OperationalReadPackView({ context, namespace, definition, name, revision, reloadEpoch }: { context: string; namespace: string; definition: ResourceDefinition; name: string; revision: number; reloadEpoch: number }) {
+  const [response, setResponse] = useState<OperationalReadPackResponse | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [refreshNonce, setRefreshNonce] = useState(0)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoading(true)
+    setError('')
+    fetchOperationalReadPack(context, definition, namespace, name, controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) return
+        setResponse(data)
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setError('The structured read pack could not be loaded. Generic YAML, Events, and related resources remain available.')
+      })
+      .finally(() => !controller.signal.aborted && setLoading(false))
+    return () => controller.abort()
+  }, [context, definition.group, definition.version, definition.resource, definition.namespaced, namespace, name, revision, reloadEpoch, refreshNonce])
+
+  if (loading && !response) return <div className="read-pack-panel"><div className="read-pack-loading"><LoaderCircle size={17} className="spin" /> Reading bounded operational fields</div></div>
+  if (error && !response) return <div className="read-pack-panel"><div className="read-pack-header"><div className="logs-title"><Gauge size={16} /><strong>Operational read pack</strong></div><button type="button" className="secondary-button" onClick={() => setRefreshNonce((value) => value + 1)}>Retry</button></div><div className="read-pack-error"><AlertTriangle size={16} /><span>{error}</span></div></div>
+  if (!response) return <div className="read-pack-panel"><QuietState icon={<Gauge size={22} />} title="Read pack is unavailable" detail="Generic YAML, Events, and related resources remain available for this resource." /></div>
+
+  return <div className="read-pack-panel">
+    <div className="read-pack-header"><div><div className="logs-title"><Gauge size={16} /><strong>Operational read pack</strong><span>read-only / bounded</span></div><p className="read-pack-intro">Native summaries are extracted from the exact discovered GVR. Missing APIs, RBAC limits, and provider-specific fields stay visible without blocking the generic detail tabs.</p></div><div className="read-pack-header-actions"><ReadPackStateChip state={response.state} /><button type="button" className="icon-button" onClick={() => setRefreshNonce((value) => value + 1)} aria-label="Refresh operational read pack" title="Refresh operational read pack"><RefreshCw size={15} /></button></div></div>
+    <div className="read-pack-summary"><span>{response.message}</span><code>{response.diagnostics.queryCount}/{response.diagnostics.queryBudget} reads · cap {response.diagnostics.resultLimit}</code></div>
+    {error && <div className="read-pack-error"><AlertTriangle size={16} /><span>{error}</span></div>}
+    <div className="read-pack-cards">{response.panels.map((panel) => <OperationalReadPackCard key={panel.key} panel={panel} />)}</div>
+    {loading && <div className="read-pack-refreshing"><LoaderCircle size={13} className="spin" /> Refreshing operational fields</div>}
   </div>
+}
+
+/** Renders one operational panel with an explicit state badge and structured safe fields. */
+function OperationalReadPackCard({ panel }: { panel: OperationalReadPackPanelModel }) {
+  const data = panel.data
+  let content: ReactNode = <div className="read-pack-no-data">No structured fields are available for this panel.</div>
+  if (panel.key === 'ingress' && data) content = <IngressReadPackView data={data as IngressReadPackData} />
+  if (panel.key === 'endpoint-slice' && data) content = <EndpointSliceReadPackView data={data as EndpointSliceReadPackData} />
+  if (panel.key === 'network-policy' && data) content = <NetworkPolicyReadPackView data={data as NetworkPolicyReadPackData} />
+  if (panel.key === 'horizontal-pod-autoscaler' && data) content = <HorizontalPodAutoscalerReadPackView data={data as HorizontalPodAutoscalerReadPackData} />
+  if (panel.key === 'pod-disruption-budget' && data) content = <PodDisruptionBudgetReadPackView data={data as PodDisruptionBudgetReadPackData} />
+  if (panel.key === 'resource-quota' && data) content = <ResourceQuotaReadPackView data={data as ResourceQuotaReadPackData} />
+  if (panel.key === 'limit-range' && data) content = <LimitRangeReadPackView data={data as LimitRangeReadPackData} />
+  if (panel.key === 'persistent-volume' && data) content = <PersistentVolumeReadPackView data={data as PersistentVolumeReadPackData} />
+  if (panel.key === 'storage-class' && data) content = <StorageClassReadPackView data={data as StorageClassReadPackData} />
+  if (panel.key === 'service-account' && data) content = <ServiceAccountReadPackView data={data as ServiceAccountReadPackData} />
+  if (panel.key === 'pod' && data) content = <PodReadPackView data={data as PodReadPackData} />
+  return <section className={`read-pack-card read-pack-card-${panel.state}`}><div className="read-pack-card-heading"><div><span className="panel-eyebrow">Built-in view</span><h2>{panel.title}</h2></div><ReadPackStateChip state={panel.state} /></div><p className="read-pack-card-message">{panel.message}</p>{panel.truncated && <div className="read-pack-truncated"><AlertTriangle size={14} /><span>Results are capped. The generic related-resource view remains available for broader navigation.</span></div>}{content}</section>
+}
+
+/** Renders the compact state label used by every operational panel. */
+function ReadPackStateChip({ state }: { state: string }) {
+  return <span className={`read-pack-state-chip read-pack-state-${state}`}><span />{operationalReadPackStateLabel(state)}</span>
+}
+
+/** Renders a dense field grid shared by structured operational views. */
+function ReadPackFieldGrid({ rows }: { rows: Array<{ label: string; value: ReactNode }> }) {
+  return <div className="read-pack-field-grid">{rows.map((row) => <div className="read-pack-field" key={row.label}><span>{row.label}</span><strong>{row.value === undefined || row.value === null || row.value === '' ? '—' : row.value}</strong></div>)}</div>
+}
+
+/** Renders a titled subsection inside one operational card. */
+function ReadPackSection({ title, children }: { title: string; children: ReactNode }) {
+  return <div className="read-pack-section"><div className="read-pack-section-heading"><span>{title}</span></div>{children}</div>
+}
+
+/** Renders an explicit empty line for bounded structured collections. */
+function ReadPackEmptyLine({ children }: { children: ReactNode }) {
+  return <div className="read-pack-empty-line">{children}</div>
+}
+
+/** Renders a safe reference list without navigation or object bodies. */
+function ReadPackReferenceList({ items, emptyLabel }: { items: OperationalReadPackReference[]; emptyLabel: string }) {
+  if (!items.length) return <ReadPackEmptyLine>{emptyLabel}</ReadPackEmptyLine>
+  return <div className="read-pack-reference-list">{items.map((item, index) => <div className="read-pack-reference" key={`${item.kind || 'resource'}-${item.namespace || ''}-${item.name}-${index}`}><div><strong>{item.kind || 'Resource'}/{item.name || 'unnamed'}</strong><span>{item.namespace ? `ns ${item.namespace}` : 'cluster scope'}</span></div><span className={`read-pack-reference-state read-pack-state-${item.state}`}>{operationalReadPackStateLabel(item.state)}</span></div>)}</div>
+}
+
+/** Renders bounded condition summaries without backend error messages. */
+function ReadPackConditions({ conditions }: { conditions: OperationalCondition[] }) {
+  if (!conditions.length) return <ReadPackEmptyLine>No condition rows were returned.</ReadPackEmptyLine>
+  return <div className="read-pack-condition-list">{conditions.map((condition, index) => <div className="read-pack-condition" key={`${condition.type}-${index}`}><span className={`read-pack-condition-status read-pack-condition-${condition.status.toLowerCase()}`} /> <strong>{condition.type || 'Condition'}</strong><code>{condition.status || 'unknown'}{condition.reason ? ` / ${condition.reason}` : ''}</code></div>)}</div>
+}
+
+/** Renders a map of bounded quantity values. */
+function ReadPackMap({ values }: { values: Record<string, string> }) {
+  const entries = Object.entries(values)
+  if (!entries.length) return <span className="read-pack-muted">none</span>
+  return <span className="read-pack-map">{entries.slice(0, 8).map(([key, value]) => <code key={key}>{key}={value}</code>)}</span>
+}
+
+/** Renders Ingress service backend, rule, and EndpointSlice visibility. */
+function IngressReadPackView({ data }: { data: IngressReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Ingress class', value: data.ingressClass }, { label: 'Rules', value: data.rules.length }, { label: 'Backends', value: data.backends.length }, { label: 'EndpointSlices', value: data.endpointSlices.length }]} /><ReadPackSection title="Backends"><div className="read-pack-table">{data.backends.length ? data.backends.map((backend, index) => <div className="read-pack-table-row" key={`${backend.name}-${backend.port}-${index}`}><strong>{backend.kind || 'Service'}/{backend.name}</strong><code>{backend.port || 'any port'}</code><span>{backend.state}</span></div>) : <ReadPackEmptyLine>No service backends were declared.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Rules and TLS"><div className="read-pack-rule-list">{data.rules.map((rule, index) => <div className="read-pack-rule" key={`${rule.host || 'default'}-${index}`}><strong>{rule.host || '* default host'}</strong><span>{rule.paths.map((path) => `${path.path || '/'} → ${path.serviceName || path.resource || 'unresolved'}${path.servicePort ? `:${path.servicePort}` : ''}`).join(' · ') || 'no HTTP paths'}</span></div>)}{data.tlsHosts.length > 0 && <div className="read-pack-rule"><strong>TLS hosts</strong><span>{data.tlsHosts.join(' · ')}</span></div>}{!data.rules.length && !data.tlsHosts.length && <ReadPackEmptyLine>No rules or TLS hosts were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="EndpointSlice visibility"><div className="read-pack-table">{data.endpointSlices.length ? data.endpointSlices.map((slice) => <div className="read-pack-table-row" key={slice.name}><strong>{slice.name}</strong><code>{slice.serviceName || 'unlabeled'}</code><span>{slice.endpoints.length} endpoint{slice.endpoints.length === 1 ? '' : 's'}</span></div>) : <ReadPackEmptyLine>No matching EndpointSlices were returned.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders one EndpointSlice's addresses, ports, readiness, and topology. */
+function EndpointSliceReadPackView({ data }: { data: EndpointSliceReadPackData }) {
+  const slice = data.slice
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Service', value: slice.serviceName }, { label: 'Address type', value: slice.addressType }, { label: 'Ports', value: slice.ports.join(', ') }, { label: 'Endpoints', value: slice.endpoints.length }]} /><ReadPackSection title="Endpoint readiness"><div className="read-pack-table">{slice.endpoints.length ? slice.endpoints.map((endpoint, index) => <div className="read-pack-table-row" key={`${endpoint.addresses.join('-')}-${index}`}><strong>{endpoint.addresses.join(', ') || 'no address'}</strong><code>{endpoint.nodeName || endpoint.zone || 'no topology'}</code><span>{endpoint.ready === undefined ? 'unknown' : endpoint.ready ? 'ready' : 'not ready'}</span></div>) : <ReadPackEmptyLine>No addresses were returned.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders NetworkPolicy selectors, rule shape, and affected Pod references. */
+function NetworkPolicyReadPackView({ data }: { data: NetworkPolicyReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Pod selector', value: data.podSelector.text || 'all Pods in namespace' }, { label: 'Policy types', value: data.policyTypes.join(', ') }, { label: 'Ingress rules', value: data.ingressRules.length }, { label: 'Egress rules', value: data.egressRules.length }, { label: 'Affected Pods', value: data.affectedPods.length }]} /><ReadPackSection title="Rule shape"><div className="read-pack-table">{[...data.ingressRules.map((rule, index) => ({ ...rule, label: `Ingress ${index + 1}` })), ...data.egressRules.map((rule, index) => ({ ...rule, label: `Egress ${index + 1}` }))].map((rule) => <div className="read-pack-table-row" key={rule.label}><strong>{rule.label}</strong><code>{rule.peerCount} peers</code><span>{rule.portCount} ports</span></div>)}{!data.ingressRules.length && !data.egressRules.length && <ReadPackEmptyLine>No ingress or egress rules were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Affected Pods"><ReadPackReferenceList items={data.affectedPods} emptyLabel="No matching Pods were returned by the bounded selector query." /></ReadPackSection></div>
+}
+
+/** Renders HPA target, replica status, metrics, and conditions. */
+function HorizontalPodAutoscalerReadPackView({ data }: { data: HorizontalPodAutoscalerReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Target', value: `${data.target.kind || 'Resource'}/${data.target.name || 'unresolved'}` }, { label: 'Min replicas', value: data.minReplicas }, { label: 'Max replicas', value: data.maxReplicas }, { label: 'Current', value: data.currentReplicas }, { label: 'Desired', value: data.desiredReplicas }]} /><ReadPackSection title="Metrics"><div className="read-pack-table">{data.metrics.length ? data.metrics.map((metric, index) => <div className="read-pack-table-row" key={`${metric.type}-${metric.resource || metric.name || index}`}><strong>{metric.type || 'metric'}</strong><code>{metric.resource || metric.name || 'custom'}</code><span>{metric.current || metric.target || metric.targetAverage || (metric.targetUtilization === undefined ? 'no reading' : `${metric.targetUtilization}% target`)}</span></div>) : <ReadPackEmptyLine>No HPA metric rows were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Conditions"><ReadPackConditions conditions={data.conditions} /></ReadPackSection></div>
+}
+
+/** Renders PDB availability counters and disruption allowance. */
+function PodDisruptionBudgetReadPackView({ data }: { data: PodDisruptionBudgetReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Min available', value: data.minAvailable }, { label: 'Max unavailable', value: data.maxUnavailable }, { label: 'Expected Pods', value: data.expectedPods }, { label: 'Current healthy', value: data.currentHealthy }, { label: 'Desired healthy', value: data.desiredHealthy }, { label: 'Disruptions allowed', value: data.disruptionsAllowed }]} /><ReadPackSection title="Status conditions"><ReadPackConditions conditions={data.conditions} /></ReadPackSection></div>
+}
+
+/** Renders ResourceQuota used and hard quantity summaries. */
+function ResourceQuotaReadPackView({ data }: { data: ResourceQuotaReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Scopes', value: data.scopes.join(', ') || 'all scopes' }, { label: 'Resources', value: data.usage.length }]} /><ReadPackSection title="Usage"><div className="read-pack-table">{data.usage.length ? data.usage.map((item) => <div className="read-pack-table-row" key={item.resource}><strong>{item.resource}</strong><code>{item.used || '—'} used / {item.hard || '—'} hard</code><span>{item.percent === undefined ? '—' : `${item.percent}%`}</span></div>) : <ReadPackEmptyLine>No used or hard quantities were returned.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders LimitRange default and bound quantities. */
+function LimitRangeReadPackView({ data }: { data: LimitRangeReadPackData }) {
+  return <div className="read-pack-body"><ReadPackSection title="Limit items"><div className="read-pack-table">{data.items.length ? data.items.map((item, index) => <div className="read-pack-table-row read-pack-table-row-stack" key={`${item.type}-${index}`}><strong>{item.type || 'limit'}</strong><ReadPackMap values={{ ...item.default, ...item.defaultRequest }} /><ReadPackMap values={{ ...item.min, ...item.max }} /></div>) : <ReadPackEmptyLine>No LimitRange items were returned.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders PersistentVolume lifecycle fields and relationship references. */
+function PersistentVolumeReadPackView({ data }: { data: PersistentVolumeReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Phase', value: data.phase }, { label: 'Reason', value: data.reason }, { label: 'StorageClass', value: data.storageClass }, { label: 'Reclaim policy', value: data.reclaimPolicy }, { label: 'Volume mode', value: data.volumeMode }, { label: 'Source', value: data.source }, { label: 'Capacity', value: <ReadPackMap values={data.capacity} /> }, { label: 'Provider message', value: data.providerMessage ? 'present but withheld' : 'not reported' }]} /><ReadPackSection title="Relationships"><ReadPackReferenceList items={data.relationships} emptyLabel="No claim or StorageClass relationship was declared." /></ReadPackSection></div>
+}
+
+/** Renders StorageClass lifecycle settings and bounded PersistentVolume relationships. */
+function StorageClassReadPackView({ data }: { data: StorageClassReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Provisioner', value: data.provisioner }, { label: 'Reclaim policy', value: data.reclaimPolicy }, { label: 'Binding mode', value: data.volumeBindingMode }, { label: 'Expansion', value: data.allowVolumeExpansion === undefined ? 'not reported' : data.allowVolumeExpansion ? 'allowed' : 'disabled' }, { label: 'Mount options', value: data.mountOptions.join(', ') || 'none' }, { label: 'Allowed topologies', value: data.allowedTopologies }]} /><ReadPackSection title="PersistentVolumes"><ReadPackReferenceList items={data.persistentVolumes} emptyLabel="No PersistentVolumes use this StorageClass in the bounded result." /></ReadPackSection></div>
+}
+
+/** Renders ServiceAccount references and read-only RBAC bindings. */
+function ServiceAccountReadPackView({ data }: { data: ServiceAccountReadPackData }) {
+  const bindings = [...data.roleBindings.map((binding) => ({ ...binding, kind: 'RoleBinding' })), ...data.clusterRoleBindings.map((binding) => ({ ...binding, kind: 'ClusterRoleBinding' }))]
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Automount token', value: data.automountServiceAccountToken === undefined ? 'not reported' : data.automountServiceAccountToken ? 'enabled' : 'disabled' }, { label: 'Secret references', value: data.secrets.join(', ') || 'none' }, { label: 'Image pull refs', value: data.imagePullSecrets.join(', ') || 'none' }, { label: 'RBAC bindings', value: bindings.length }]} /><ReadPackSection title="RBAC bindings"><div className="read-pack-table">{bindings.length ? bindings.map((binding, index) => <div className="read-pack-table-row read-pack-table-row-stack" key={`${binding.kind}-${binding.name}-${index}`}><strong>{binding.kind}/{binding.name}</strong><code>{binding.roleKind || 'Role'}/{binding.roleName || 'unresolved'}</code><span>{binding.namespace || 'cluster scope'}</span></div>) : <ReadPackEmptyLine>No read-only RoleBinding or ClusterRoleBinding references this account.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders Pod scheduling, readiness, containers, volumes, and security posture. */
+function PodReadPackView({ data }: { data: PodReadPackData }) {
+  const containers = [...data.containers, ...data.initContainers.map((container) => ({ ...container, name: `init/${container.name}` })), ...data.ephemeralContainers.map((container) => ({ ...container, name: `debug/${container.name}` }))]
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Phase', value: data.phase }, { label: 'Reason', value: data.reason }, { label: 'Node', value: data.nodeName }, { label: 'Scheduler', value: data.schedulerName }, { label: 'Pod IP', value: data.podIP }, { label: 'Readiness gates', value: data.readinessGates.join(', ') || 'none' }]} /><ReadPackSection title="Conditions"><ReadPackConditions conditions={data.conditions} /></ReadPackSection><ReadPackSection title="Containers"><div className="read-pack-table">{containers.length ? containers.map((container) => <PodContainerReadPackRow container={container} key={container.name} />) : <ReadPackEmptyLine>No container summaries were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Volumes"><div className="read-pack-table">{data.volumes.length ? data.volumes.map((volume) => <div className="read-pack-table-row" key={volume.name}><strong>{volume.name}</strong><code>{volume.type}</code><span>{volume.reference || 'configured'}{volume.readOnly ? ' / read-only' : ''}</span></div>) : <ReadPackEmptyLine>No volume summaries were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Security context"><ReadPackFieldGrid rows={[{ label: 'Run as user', value: data.securityContext.runAsUser }, { label: 'Run as non-root', value: data.securityContext.runAsNonRoot === undefined ? 'not reported' : data.securityContext.runAsNonRoot ? 'yes' : 'no' }, { label: 'Seccomp', value: data.securityContext.seccompProfileType }, { label: 'Host network', value: data.securityContext.hostNetwork === undefined ? 'not reported' : data.securityContext.hostNetwork ? 'yes' : 'no' }]} /></ReadPackSection></div>
+}
+
+/** Renders one Pod container's readiness, probes, restarts, and termination reason. */
+function PodContainerReadPackRow({ container }: { container: PodContainerSummary }) {
+  const probes = container.probes.map((probe) => `${probe.name}${probe.handler ? ` / ${probe.handler}` : ''}`).join(', ')
+  const termination = container.lastTerminationReason || container.stateReason || container.state || 'no termination reason'
+  return <div className="read-pack-table-row read-pack-table-row-stack"><strong>{container.name}</strong><code>{container.image || 'image unavailable'}</code><span>{container.ready === undefined ? 'ready unknown' : container.ready ? 'ready' : 'not ready'} · {container.restartCount ?? 0} restarts · {termination}</span><small>{probes || 'no probes configured'}</small></div>
 }
 
 /** Renders bounded CRD identity, version, and subresource capability metadata on detail pages. */

@@ -51,6 +51,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Complete discovery-backed GVR catalog with subresource capabilities, partial-discovery states, scope validation, and canonical resource routes.
 - Version-aware CRD capabilities with served/preferred/storage metadata, bounded printer columns, subresource details, and schema-form YAML fallbacks.
 - Reliable resource and Event watches with bounded relist recovery, freshness states, cancellation, and safe failure signals.
+- Bounded read-only operational packs for built-in networking, policy, autoscaling, quota, storage, ServiceAccount/RBAC, and Pod posture views.
 
 ### Partially Implemented
 
@@ -222,7 +223,7 @@ Make live resource and Event data resilient to network failures, watch closure, 
 - Cancel watches deterministically on navigation, context changes, kubeconfig reloads, and component disposal.
 - Cover watch closure, relist, HTTP 410, network recovery, and cancellation with deterministic tests.
 
-### F5. Built-in operational read packs
+### F5. Built-in operational read packs (Implemented)
 
 Add structured, read-only views for high-value built-in resources while retaining generic YAML, Events, and related-resource fallback.
 

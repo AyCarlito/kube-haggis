@@ -34,6 +34,7 @@ type Server struct {
 	relatedReverse relatedLoader
 	resourceSchema resourceSchemaLoader
 	resourceGet    resourceGetLoader
+	readPack       operationalReadPackLoader
 	resourceApply  resourceApplyLoader
 	resourceDelete resourceDeleteLoader
 	workloadAction workloadActionLoader
@@ -76,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/resources/delete", s.handleBulkResourceDelete)
 	mux.HandleFunc("/api/related", s.handleRelated)
 	mux.HandleFunc("/api/related/reverse", s.handleRelatedReverse)
+	mux.HandleFunc("/api/read-pack", s.handleOperationalReadPack)
 	mux.HandleFunc("/api/watch", s.handleWatch)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/events/watch", s.handleEventWatch)
