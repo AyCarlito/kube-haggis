@@ -21,42 +21,39 @@ The repository currently contains the first usable vertical slice. The backend a
 - Discovery-driven built-in resource and CRD browsing through Kubernetes dynamic clients.
 - Generic resource list, detail, create, update, delete, and watch API paths.
 - Resource list search, namespace scope, label selector, and live-watch refresh behavior.
+- Resource list status filters, page-local sorting, configurable summary columns, bounded page sizes, and opaque continuation-token pagination.
 - Generic YAML editor and create workflow.
 - Client-side full-object updates with resource-version handling and Kubernetes dry-run review.
 - Refresh the complete resource from Kubernetes after a successful YAML apply before updating the editor state.
 - Resource-scoped Events with live watches and navigation into generic Event details.
+- Owner-reference relationship view with controller/deletion flags and discovery-aware navigation to owner resources.
 - Per-context read-only/write-mode UI and backend write-mode guard.
 - Secret value masking with explicit reveal.
 - Removal of `metadata.managedFields` from the YAML editor and write payloads.
 - Redacted SQLite mutation history for apply and delete outcomes.
 - Native Pod log streaming with follow, previous-container, tail, and container controls.
+- Native interactive Pod `exec` and `attach` sessions available in read-only mode with TTY input, resize handling, container selection, and Kubernetes RBAC authorization.
+- Native Pod port-forward sessions with loopback binding, target/local port controls, session lifecycle, and Kubernetes RBAC authorization.
+- Ephemeral debug-container launch through `pods/ephemeralcontainers` and bounded native file download/upload through `pods/exec`.
+- Native `metrics.k8s.io/v1beta1` collection with node and Pod CPU/memory usage summaries, freshness states, and responsive overview charts.
+- Discovery-driven related-resource views for owner descendants, selectors, storage bindings, and safe native PodSpec references with explicit partial/RBAC states.
+- Targeted workload operations for scale, restart, pause/resume, rollback, image changes, and Job/CronJob scheduling with dry-run review and confirmation.
+- Native Node cordon, uncordon, drain, and taint workflows with eviction-only drain safety review and explicit confirmation.
+- PVC resize and VolumeSnapshot workflows with StorageClass/API capability states, dry-run review, and explicit confirmation.
+- High-friction single and bulk delete workflows with resource-version preconditions, server-side dry-run review, exact confirmations, per-item results, and redacted audit outcomes.
+- Schema-generated forms for supported structural CRDs with bounded validation and YAML fallback for unsupported schemas.
+- Kubeconfig reload controls and metadata-only file-change detection with last-good-state retention and safe context refresh.
+- Read-only local mutation history UI with bounded filters, safe outcome summaries, refresh states, and disconnected-source handling.
+- Deterministic fake-cluster and HTTP handler coverage for discovery, watches, mutations, permission failures, conflicts, dry-runs, and sensitive-error redaction.
+- Dedicated resource-version conflict review with safe current-object refresh, bounded difference summaries, local-draft preservation, and explicit retry preparation.
 - Local-only visual identity using the provided `haggis.svg` asset.
 
 ### Partially Implemented
 
-- Resource tables have search, namespace, label selector, and live updates, but status filters, sorting, configurable columns, and continuation-token pagination are still incomplete.
-- Resource detail pages have overview and YAML tabs. Resource-scoped Events are live, while related-resource tabs are still explanatory placeholders.
+- Resource detail pages have overview, YAML, live Events, and discovery-driven related-resource relationship views.
 - Event detail pages omit the Events tab because Events are not expected to have child Events.
-- CRDs support discovery, generic CRUD, and YAML editing. Schema-generated CRD forms are not implemented yet.
-- Client-side apply currently uses full-object Kubernetes updates rather than a three-way `kubectl apply` merge. Resource-version conflicts reach the UI as errors, but there is no dedicated conflict-resolution workflow yet.
-- The overview detects whether `metrics.k8s.io` is available, but it does not yet fetch or chart live usage.
-- Mutation history is persisted and exposed by the backend API, but it does not yet have a dedicated history view in the UI.
-
-### Remaining First-Release Work
-
-- Native interactive `exec` and `attach` sessions.
-- Native port-forward sessions.
-- Ephemeral debug containers and file copy operations.
-- Metrics API collection and CPU/memory charts.
-- Resource-scoped Events and owner/reference relationship views.
-- Targeted workload forms and actions for scale, restart, pause/resume, rollback, image changes, and job scheduling.
-- Node cordon, uncordon, drain, and taint workflows.
-- PVC resize and snapshot workflows.
-- Delete confirmations, bulk operations, and stronger destructive-action review.
-- Schema-generated forms for structural CRDs.
-- Kubeconfig reload controls and file-change handling.
-- UI for local mutation history.
-- Fake-cluster and handler tests covering discovery, watches, mutations, and permission failures.
+- CRDs support discovery, generic CRUD, schema-generated forms for supported structural schemas, and YAML editing as the complete fallback.
+- Client-side apply currently uses full-object Kubernetes updates rather than a three-way `kubectl apply` merge. Resource-version conflicts use the dedicated review workflow and remain explicit rather than being force-resolved.
 
 ### Verification
 
@@ -95,6 +92,9 @@ The repository currently contains the first usable vertical slice. The backend a
 - Use the selected kubeconfig identity and Kubernetes RBAC as the authorization authority.
 - Start in read-only mode.
 - Maintain write mode independently per cluster context and reset it on context switch unless explicitly enabled again.
+- Allow interactive Pod `exec` and `attach` sessions in read-only mode; Kubernetes RBAC remains the authorization authority for those sessions.
+- Allow Pod port-forward sessions in read-only mode; bind local endpoints to loopback and rely on Kubernetes RBAC for authorization.
+- Require write mode for ephemeral debug-container creation and file uploads; allow bounded file downloads in read-only mode under Kubernetes RBAC.
 - Require a diff and server-side dry-run before applying edits where supported.
 - Use client-side apply/full-object updates for writes, with Kubernetes resource-version conflicts surfaced to the user.
 - Require stronger confirmation for deletes, evictions, drains, namespace changes, and other destructive operations.
