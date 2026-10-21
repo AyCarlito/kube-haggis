@@ -120,6 +120,7 @@ export function fetchResources(
   namespace: string,
   labelSelector = '',
   query: ResourceListQuery = {},
+  signal?: AbortSignal,
 ): Promise<ResourceListResponse> {
   return fetchJson<ResourceListResponse>(
     apiUrl('/api/resources', {
@@ -133,6 +134,7 @@ export function fetchResources(
       limit: String(query.limit ?? 100),
       continue: query.continueToken,
     }),
+    { signal },
   )
 }
 
@@ -428,8 +430,8 @@ export function portForwardUrl(context: string, namespace: string, pod: string, 
 }
 
 /** Loads Events associated with one resource UID. */
-export function fetchResourceEvents(context: string, namespace: string, uid: string): Promise<ResourceEventsResponse> {
-  return fetchJson<ResourceEventsResponse>(apiUrl('/api/events', { context, namespace, uid }))
+export function fetchResourceEvents(context: string, namespace: string, uid: string, signal?: AbortSignal): Promise<ResourceEventsResponse> {
+  return fetchJson<ResourceEventsResponse>(apiUrl('/api/events', { context, namespace, uid }), { signal })
 }
 
 /** Builds the server-sent events URL for resource-scoped Events. */

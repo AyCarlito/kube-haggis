@@ -16,7 +16,10 @@ import (
 
 	"github.com/kube-haggis/kube-haggis/internal/audit"
 	"github.com/kube-haggis/kube-haggis/internal/kube"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
@@ -286,50 +289,18 @@ func (s *Server) handleRelatedReverse(writer http.ResponseWriter, request *http.
 // handleWatch streams generic resource changes as server-sent events.
 func (s *Server) handleWatch(writer http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
-	watcher, err := s.kube.WatchResources(
-		request.Context(),
-		query.Get("context"),
-		query.Get("group"),
-		query.Get("version"),
-		query.Get("resource"),
-		query.Get("namespace"),
-		query.Get("namespaced") != "false",
-		query.Get("resourceVersion"),
-	)
-	if err != nil {
-		writeError(writer, err)
-		return
-	}
-	defer watcher.Stop()
-
-	writer.Header().Set("Content-Type", "text/event-stream")
-	writer.Header().Set("Cache-Control", "no-cache")
-	writer.Header().Set("Connection", "keep-alive")
-	flusher, ok := writer.(http.Flusher)
-	if !ok {
-		writeError(writer, fmt.Errorf("streaming is not supported by this server"))
-		return
-	}
-	_, _ = writer.Write([]byte(": KubeHaggis watch connected\n\n"))
-	flusher.Flush()
-
-	for {
-		select {
-		case <-request.Context().Done():
-			return
-		case event, open := <-watcher.ResultChan():
-			if !open {
-				return
-			}
-			payload := map[string]interface{}{"type": eventType(event.Type), "object": event.Object}
-			encoded, encodeErr := json.Marshal(payload)
-			if encodeErr != nil {
-				continue
-			}
-			_, _ = writer.Write([]byte("data: " + string(encoded) + "\n\n"))
-			flusher.Flush()
-		}
-	}
+	streamWatch(writer, request, "KubeHaggis watch connected", func(ctx context.Context) (watch.Interface, error) {
+		return s.kube.WatchResources(
+			ctx,
+			query.Get("context"),
+			query.Get("group"),
+			query.Get("version"),
+			query.Get("resource"),
+			query.Get("namespace"),
+			query.Get("namespaced") != "false",
+			query.Get("resourceVersion"),
+		)
+	})
 }
 
 // handleEvents returns Events associated with one resource UID.
@@ -346,9 +317,16 @@ func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request)
 // handleEventWatch streams Events associated with one resource UID.
 func (s *Server) handleEventWatch(writer http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
-	watcher, err := s.kube.WatchEventsForResource(request.Context(), query.Get("context"), query.Get("namespace"), query.Get("uid"), query.Get("resourceVersion"))
+	streamWatch(writer, request, "KubeHaggis Event watch connected", func(ctx context.Context) (watch.Interface, error) {
+		return s.kube.WatchEventsForResource(ctx, query.Get("context"), query.Get("namespace"), query.Get("uid"), query.Get("resourceVersion"))
+	})
+}
+
+// streamWatch adapts one Kubernetes watch to a safe, lifecycle-aware SSE stream.
+func streamWatch(writer http.ResponseWriter, request *http.Request, connectedMessage string, open func(context.Context) (watch.Interface, error)) {
+	watcher, err := open(request.Context())
 	if err != nil {
-		writeError(writer, err)
+		writeWatchOpenError(writer, err)
 		return
 	}
 	defer watcher.Stop()
@@ -361,7 +339,9 @@ func (s *Server) handleEventWatch(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, fmt.Errorf("streaming is not supported by this server"))
 		return
 	}
-	_, _ = writer.Write([]byte(": KubeHaggis Event watch connected\n\n"))
+	if _, err := writer.Write([]byte(": " + connectedMessage + "\n\n")); err != nil {
+		return
+	}
 	flusher.Flush()
 
 	for {
@@ -370,17 +350,124 @@ func (s *Server) handleEventWatch(writer http.ResponseWriter, request *http.Requ
 			return
 		case event, open := <-watcher.ResultChan():
 			if !open {
+				writeWatchEvent(writer, flusher, map[string]interface{}{
+					"type":  "CLOSED",
+					"error": watchSignal("watch-closed"),
+				})
 				return
 			}
-			payload := map[string]interface{}{"type": eventType(event.Type), "object": event.Object}
-			encoded, encodeErr := json.Marshal(payload)
-			if encodeErr != nil {
-				continue
+			if event.Type == watch.Error {
+				if !writeWatchEvent(writer, flusher, safeWatchErrorEvent(event.Object)) {
+					return
+				}
+				return
 			}
-			_, _ = writer.Write([]byte("data: " + string(encoded) + "\n\n"))
-			flusher.Flush()
+			if !writeWatchEvent(writer, flusher, map[string]interface{}{"type": eventType(event.Type), "object": event.Object}) {
+				return
+			}
 		}
 	}
+}
+
+// writeWatchEvent writes one JSON SSE data frame and reports transport failure.
+func writeWatchEvent(writer http.ResponseWriter, flusher http.Flusher, payload interface{}) bool {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return true
+	}
+	if _, err := writer.Write([]byte("data: " + string(encoded) + "\n\n")); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
+}
+
+// safeWatchErrorEvent converts a Kubernetes watch error into a bounded browser signal.
+func safeWatchErrorEvent(object runtime.Object) map[string]interface{} {
+	reason := watchErrorReason(object)
+	return map[string]interface{}{"type": "ERROR", "error": watchSignal(reason)}
+}
+
+// watchSignal builds a browser-safe watch failure payload without Kubernetes error text.
+func watchSignal(reason string) map[string]interface{} {
+	return map[string]interface{}{
+		"reason": reason,
+		"relist": reason == "resource-version-expired" || reason == "watch-error" || reason == "watch-closed",
+	}
+}
+
+// watchErrorReason classifies a Kubernetes Status object without exposing its message.
+func watchErrorReason(object runtime.Object) string {
+	switch status := object.(type) {
+	case *metav1.Status:
+		if status.Code == http.StatusGone || status.Reason == metav1.StatusReasonExpired {
+			return "resource-version-expired"
+		}
+		if status.Code == http.StatusForbidden || status.Reason == metav1.StatusReasonForbidden {
+			return "permission-denied"
+		}
+	case *unstructured.Unstructured:
+		code, _, _ := unstructured.NestedInt64(status.Object, "code")
+		reason, _, _ := unstructured.NestedString(status.Object, "reason")
+		if code == http.StatusGone || strings.EqualFold(reason, string(metav1.StatusReasonExpired)) {
+			return "resource-version-expired"
+		}
+		if code == http.StatusForbidden || strings.EqualFold(reason, string(metav1.StatusReasonForbidden)) {
+			return "permission-denied"
+		}
+	}
+	return "watch-error"
+}
+
+// watchErrorReasonFromError classifies an initial watch failure for a safe HTTP response.
+func watchErrorReasonFromError(err error) string {
+	switch {
+	case apierrors.IsResourceExpired(err):
+		return "resource-version-expired"
+	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
+		return "permission-denied"
+	default:
+		return "watch-error"
+	}
+}
+
+// watchErrorMessage returns a stable operator-facing message for a watch failure.
+func watchErrorMessage(reason string) string {
+	switch reason {
+	case "resource-version-expired":
+		return "The Kubernetes watch resource version expired; the resource will be relisted."
+	case "permission-denied":
+		return "Kubernetes denied this watch; check RBAC permissions for the selected resource."
+	default:
+		return "The Kubernetes watch ended unexpectedly; the resource will be relisted."
+	}
+}
+
+// writeWatchOpenError writes a safe classified response when a watch cannot start.
+func writeWatchOpenError(writer http.ResponseWriter, err error) {
+	reason := watchErrorReasonFromError(err)
+	if reason == "permission-denied" {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		writer.Header().Set("Cache-Control", "no-cache")
+		writer.Header().Set("Connection", "keep-alive")
+		if flusher, ok := writer.(http.Flusher); ok {
+			writeWatchEvent(writer, flusher, map[string]interface{}{"type": "ERROR", "error": watchSignal(reason)})
+			return
+		}
+	}
+	status := http.StatusBadGateway
+	switch reason {
+	case "resource-version-expired":
+		status = http.StatusGone
+	case "permission-denied":
+		status = http.StatusForbidden
+	}
+	payload := map[string]interface{}{
+		"error":  watchErrorMessage(reason),
+		"reason": reason,
+		"relist": reason == "resource-version-expired" || reason == "watch-error",
+	}
+	writeJSON(writer, status, payload)
 }
 
 // handleLogs streams native Kubernetes Pod logs as text.

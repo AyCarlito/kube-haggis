@@ -81,6 +81,7 @@ import {
   resolveCatalogDefinition,
 } from './catalog'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
+import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
 import type {
   AuditEntry,
   AuditResponse,
@@ -98,6 +99,7 @@ import type {
   ResourceDeleteResponse,
   BulkDeleteResponse,
   ResourceConflictResponse,
+  ResourceEventsResponse,
   ResourceListResponse,
   ResourceObject,
   ResourceSchemaField,
@@ -229,6 +231,7 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [contextLoading, setContextLoading] = useState(true)
   const [contextRequestError, setContextRequestError] = useState('')
+  const [kubeconfigReloadEpoch, setKubeconfigReloadEpoch] = useState(0)
   const contextRequestID = useRef(0)
   const contextLoadingRef = useRef(true)
 
@@ -311,6 +314,7 @@ export default function App() {
   async function reloadKubeconfigSources() {
     const requestID = contextRequestID.current + 1
     contextRequestID.current = requestID
+    setKubeconfigReloadEpoch((value) => value + 1)
     contextLoadingRef.current = true
     setContextLoading(true)
     setContextRequestError('')
@@ -402,6 +406,8 @@ export default function App() {
       definition={activeDefinition}
       name={validResourceName}
       writeEnabled={writeEnabled}
+      revision={contextRevision}
+      reloadEpoch={kubeconfigReloadEpoch}
       onBack={() => navigate(catalogResourcePath(activeDefinition), activeDefinition.resource)}
       onOpenEvent={(event) => navigate(catalogEventResourcePath(definitions, event.name), 'events', event.name, event.namespace || undefined)}
       onOpenResource={(definition, resourceName, resourceNamespace) => navigate(catalogResourcePath(definition, resourceName), definition.resource, resourceName, resourceNamespace)}
@@ -411,6 +417,8 @@ export default function App() {
       context={selectedContext}
       namespace={selectedNamespace}
       definition={activeDefinition}
+      revision={contextRevision}
+      reloadEpoch={kubeconfigReloadEpoch}
       writeEnabled={writeEnabled}
       onOpen={(name, itemNamespace) => navigate(catalogResourcePath(activeDefinition, name), activeDefinition.resource, name, activeDefinition.namespaced && selectedNamespace === 'all' ? itemNamespace : undefined)}
       onCreate={() => navigate(catalogResourcePath(activeDefinition, 'new'), activeDefinition.resource, 'new')}
@@ -1122,8 +1130,70 @@ function auditOutcomeNote(entry: AuditEntry): string {
   return entry.dryRun ? 'No cluster change' : 'Mutation accepted'
 }
 
+/** Returns the compact label for one watched-panel freshness state. */
+function freshnessLabel(state: FreshnessState): string {
+  switch (state) {
+    case 'live':
+      return 'Live'
+    case 'reconnecting':
+      return 'Reconnecting'
+    case 'stale':
+      return 'Stale data'
+    case 'refreshing':
+      return 'Refreshing'
+    default:
+      return 'Unavailable'
+  }
+}
+
+/** Formats a UI-only successful refresh timestamp without implying Kubernetes time. */
+function formatRefreshTimestamp(timestamp: number | null): string {
+  if (timestamp === null || !Number.isFinite(timestamp)) return 'No successful refresh'
+  return `Last successful refresh ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(timestamp))}`
+}
+
+/** Returns the explicit explanation shown while a watched panel is not live. */
+function freshnessMessage(snapshot: WatchSnapshot): string {
+  switch (snapshot.state) {
+    case 'reconnecting':
+      return 'The watch closed or lost its connection. A fresh relist will run before the next watch.'
+    case 'stale':
+      return snapshot.hasData ? 'Showing the last successful snapshot; refresh attempts are still in progress.' : 'The latest refresh failed; retrying the Kubernetes read.'
+    case 'refreshing':
+      return snapshot.hasData ? 'Refreshing from Kubernetes; the last successful snapshot remains visible.' : 'Reading the first Kubernetes snapshot.'
+    default:
+      return snapshot.hasData ? 'The live source is unavailable; the last successful snapshot is marked stale.' : 'No successful Kubernetes snapshot is available yet.'
+  }
+}
+
+/** Renders the state and last-success metadata for a watched panel. */
+function FreshnessStatus({ snapshot }: { snapshot: WatchSnapshot }) {
+  return <span className="freshness-status"><span className={`watch-state-chip watch-state-${snapshot.state}`}><span />{freshnessLabel(snapshot.state)}</span><span className="watch-last-refresh">{formatRefreshTimestamp(snapshot.lastSuccessfulRefresh)}</span></span>
+}
+
+/** Renders an explicit non-live notice so stale data cannot look like a live panel. */
+function FreshnessNotice({ snapshot }: { snapshot: WatchSnapshot }) {
+  if (snapshot.state === 'live') return null
+  const icon = snapshot.state === 'refreshing' ? <LoaderCircle size={14} className="spin" /> : <AlertTriangle size={14} />
+  return <div className={`freshness-notice freshness-notice-${snapshot.state}`} role="status"><span className="freshness-notice-icon">{icon}</span><div><strong>{freshnessLabel(snapshot.state)}</strong><span>{freshnessMessage(snapshot)}</span></div></div>
+}
+
+/** Returns the compact footer copy used when a watch is not live. */
+function freshnessFooterLabel(state: FreshnessState): string {
+  switch (state) {
+    case 'refreshing':
+      return 'refreshing from Kubernetes'
+    case 'reconnecting':
+      return 'reconnecting after a fresh relist'
+    case 'stale':
+      return 'last successful data is marked stale'
+    default:
+      return 'live data is unavailable'
+  }
+}
+
 /** Renders the generic live-updating resource table. */
-function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen, onCreate }: { context: string; namespace: string; definition: ResourceDefinition; writeEnabled: boolean; onOpen: (name: string, namespace?: string) => void; onCreate: () => void }) {
+function ResourceListPage({ context, namespace, definition, revision, reloadEpoch, writeEnabled, onOpen, onCreate }: { context: string; namespace: string; definition: ResourceDefinition; revision: number; reloadEpoch: number; writeEnabled: boolean; onOpen: (name: string, namespace?: string) => void; onCreate: () => void }) {
   const [response, setResponse] = useState<ResourceListResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -1136,7 +1206,7 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   const [columnsOpen, setColumnsOpen] = useState(false)
   const [pageSize, setPageSize] = useState(100)
   const [pagination, setPagination] = useState<ResourcePaginationState>({ queryKey: '', pageIndex: 0, tokens: [''] })
-  const [watching, setWatching] = useState(false)
+  const [watchSnapshot, setWatchSnapshot] = useState<WatchSnapshot>(() => initialWatchSnapshot())
   const [refreshNonce, setRefreshNonce] = useState(0)
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
   const [bulkReview, setBulkReview] = useState<BulkDeleteResponse | null>(null)
@@ -1154,6 +1224,7 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   useEffect(() => {
     setPagination({ queryKey: listQueryKey, pageIndex: 0, tokens: [''] })
     setResponse(null)
+    setError('')
     setSelectedKeys([])
     setBulkReview(null)
     setBulkReviewSelection([])
@@ -1161,42 +1232,36 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
     setBulkConfirmation('')
     setBulkResults(null)
     setBulkError('')
-  }, [listQueryKey])
+  }, [listQueryKey, revision, reloadEpoch])
 
   useEffect(() => {
-    let active = true
-    let stream: EventSource | undefined
-    const load = () => {
-      setLoading(true)
-      fetchResources(context, definition, namespace, labelSelector, { limit: pageSize, continueToken })
-        .then((data) => {
-          if (!active) return
-          setResponse(data)
-          setSelectedKeys((current) => current.filter((key) => data.items.some((item) => resourceItemKey(item) === key)))
-          setPagination((current) => {
-            if (current.queryKey !== listQueryKey || current.pageIndex !== pageIndex) return current
-            const tokens = current.tokens.slice(0, pageIndex + 1)
-            if (data.continue) tokens.push(data.continue)
-            return { ...current, tokens }
-          })
-          setError('')
-          if (!stream && data.resourceVersion) {
-            stream = new EventSource(watchUrl(context, definition, namespace, data.resourceVersion))
-            setWatching(true)
-            stream.onmessage = () => load()
-            stream.onerror = () => setWatching(false)
-          }
+    setWatchSnapshot(initialWatchSnapshot())
+    setError('')
+    const controller = new ReliableWatchController<ResourceListResponse>({
+      load: (signal) => fetchResources(context, definition, namespace, labelSelector, { limit: pageSize, continueToken }, signal),
+      getResourceVersion: (data) => data.resourceVersion,
+      watchUrl: (resourceVersion) => watchUrl(context, definition, namespace, resourceVersion),
+      onData: (data) => {
+        setResponse(data)
+        setSelectedKeys((current) => current.filter((key) => data.items.some((item) => resourceItemKey(item) === key)))
+        setPagination((current) => {
+          if (current.queryKey !== listQueryKey || current.pageIndex !== pageIndex) return current
+          const tokens = current.tokens.slice(0, pageIndex + 1)
+          if (data.continue) tokens.push(data.continue)
+          return { ...current, tokens }
         })
-        .catch((loadError: Error) => active && setError(loadError.message))
-        .finally(() => active && setLoading(false))
-    }
-    load()
-    return () => {
-      active = false
-      stream?.close()
-      setWatching(false)
-    }
-  }, [context, definition, namespace, labelSelector, pageSize, continueToken, pageIndex, listQueryKey, refreshNonce])
+        setError('')
+        setLoading(false)
+      },
+      onState: (snapshot) => {
+        setWatchSnapshot(snapshot)
+        setLoading(snapshot.state === 'refreshing')
+        if (snapshot.state === 'stale' || snapshot.state === 'unavailable') setError(snapshot.message || '')
+      },
+    })
+    controller.start()
+    return () => controller.stop()
+  }, [context, definition, namespace, labelSelector, pageSize, continueToken, pageIndex, listQueryKey, revision, reloadEpoch, refreshNonce])
 
   if (!context) return <SetupState />
   const statusOptions = Array.from(new Set(response?.items.map(resourceStatusLabel) ?? [])).sort((left, right) => left.localeCompare(right))
@@ -1397,7 +1462,7 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
     <div className="resource-page">
       <section className="resource-intro">
         <div><div className="eyebrow"><span className="eyebrow-mark" /> Resource collection</div><h1>{titleCase(definition.resource)}</h1><p>{definition.namespaced ? 'Namespaced resource' : 'Cluster-scoped resource'} / {namespace === 'all' || !definition.namespaced ? 'all namespaces' : namespace}</p></div>
-        <div className="resource-intro-meta"><span className={watching ? 'live-chip' : 'quiet-chip'}><span />{watching ? 'Live watch' : 'Refresh fallback'}</span><span>Page {pageIndex + 1} / {response?.items.length ?? 0} objects</span></div>
+        <div className="resource-intro-meta"><FreshnessStatus snapshot={watchSnapshot} /><span>Page {pageIndex + 1} / {response?.items.length ?? 0} objects</span></div>
       </section>
       <div className="table-toolbar">
         <label className="search-field"><Search size={16} /><input value={search} onChange={(event) => { setSearch(event.target.value); resetLocalView() }} placeholder={`Search ${definition.resource}`} /><kbd>/</kbd></label>
@@ -1412,6 +1477,7 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
         <button className="icon-button toolbar-action" onClick={() => setRefreshNonce((value) => value + 1)} aria-label="Refresh resources"><RefreshCw size={16} /></button>
         <button className="primary-button" disabled={!writeEnabled} onClick={onCreate} title={writeEnabled ? `Create a ${definition.kind}` : 'Enable write mode to create resources'}><span>+</span> New {definition.kind}</button>
       </div>
+      <FreshnessNotice snapshot={watchSnapshot} />
       <div className="table-view-note"><span>Local page view</span> Search, status, and sorting inspect only the loaded Kubernetes page. Label selector is sent to Kubernetes; columns stay in this browser.{printerColumns.length ? ` Safe CRD columns: ${printerColumns.map((column) => column.name).join(', ')}.` : ''}{definition.customResourceCapabilities?.printerColumnWarnings?.length ? ' Unsupported CRD columns use the generic table fallback.' : ''}</div>
       <div className="selection-toolbar">
         <span><strong>{selected.length}</strong> selected / {definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster scope' : namespace}</span>
@@ -1424,11 +1490,12 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
       <div className="resource-table-wrap">
         <table className="resource-table"><thead><tr><th><input className="table-checkbox" type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || selectionLocked} aria-label="Select all visible resources" onChange={(event) => toggleFilteredSelection(event.target.checked)} /></th>{visibleColumnDefinitions.map((column) => <th key={column.key}>{column.label}</th>)}{printerColumns.map((column) => <th key={`printer-${column.name}`} title={column.description}>{column.name}</th>)}<th aria-label="Actions" /></tr></thead><tbody>
           {loading && !response ? <tr><td colSpan={tableColumnCount}><div className="table-loading"><LoaderCircle size={18} className="spin" /> Reading API objects</div></td></tr> : null}
-          {!loading && !filtered.length ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><Box size={20} /><strong>No matching objects</strong><span>Try a different local filter or label selector.</span></div></td></tr> : null}
+           {!loading && !response ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><AlertTriangle size={20} /><strong>Resource data unavailable</strong><span>Waiting for a successful Kubernetes refresh.</span></div></td></tr> : null}
+           {!loading && response && !filtered.length ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><Box size={20} /><strong>No matching objects</strong><span>Try a different local filter or label selector.</span></div></td></tr> : null}
           {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} columns={visibleColumnDefinitions.map((column) => column.key)} printerColumns={printerColumns} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
         </tbody></table>
       </div>
-      <div className="table-footer resource-pagination"><span>Showing {filtered.length} of {response?.items.length ?? 0} on page {pageIndex + 1}{response?.continue ? ' / more available' : ''}</span><div className="pagination-controls"><label>Rows <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{resourcePageSizes.map((size) => <option value={size} key={size}>{size}</option>)}</select></label><button type="button" className="secondary-button" onClick={previousPage} disabled={pageIndex === 0 || loading}><ChevronLeft size={14} /> Previous</button><button type="button" className="secondary-button" onClick={nextPage} disabled={!response?.continue || loading}>Next <ChevronRight size={14} /></button></div><span><span className="table-footer-dot" /> {watching ? 'updates arrive through the Kubernetes watch' : 'refresh to check for updates'}</span></div>
+       <div className="table-footer resource-pagination"><span>Showing {filtered.length} of {response?.items.length ?? 0} on page {pageIndex + 1}{response?.continue ? ' / more available' : ''}</span><div className="pagination-controls"><label>Rows <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{resourcePageSizes.map((size) => <option value={size} key={size}>{size}</option>)}</select></label><button type="button" className="secondary-button" onClick={previousPage} disabled={pageIndex === 0 || loading}><ChevronLeft size={14} /> Previous</button><button type="button" className="secondary-button" onClick={nextPage} disabled={!response?.continue || loading}>Next <ChevronRight size={14} /></button></div><span><span className="table-footer-dot" /> {watchSnapshot.state === 'live' ? 'updates arrive through the Kubernetes watch' : freshnessFooterLabel(watchSnapshot.state)}</span></div>
     </div>
   )
 }
@@ -1553,7 +1620,7 @@ function BulkDeleteResults({ definition, result }: { definition: ResourceDefinit
 }
 
 /** Renders the tabbed detail view for one generic resource. */
-function ResourceDetailPage({ context, namespace, definition, name, writeEnabled, onBack, onOpenEvent, onOpenResource }: { context: string; namespace: string; definition: ResourceDefinition; name: string; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
+function ResourceDetailPage({ context, namespace, definition, name, revision, reloadEpoch, writeEnabled, onBack, onOpenEvent, onOpenResource }: { context: string; namespace: string; definition: ResourceDefinition; name: string; revision: number; reloadEpoch: number; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
   const [object, setObject] = useState<ResourceObject | null>(null)
   const [yamlText, setYamlText] = useState('')
   const [originalYaml, setOriginalYaml] = useState('')
@@ -1813,7 +1880,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'debug' && definition.resource === 'pods' && !isNew && <PodDebugPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
       {tab === 'files' && definition.resource === 'pods' && !isNew && <PodFileCopyPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
-      {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
+      {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} revision={revision} reloadEpoch={reloadEpoch} onOpenEvent={onOpenEvent} />}
       {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
   </div>
 }
@@ -3662,10 +3729,10 @@ function sendTerminalResize(socket: WebSocket | null, cols: number, rows: number
 }
 
 /** Renders the live Event stream associated with a resource UID. */
-function ResourceEventsPanel({ context, namespace, uid, onOpenEvent }: { context: string; namespace: string; uid: string; onOpenEvent: (event: EventSummary) => void }) {
+function ResourceEventsPanel({ context, namespace, uid, revision, reloadEpoch, onOpenEvent }: { context: string; namespace: string; uid: string; revision: number; reloadEpoch: number; onOpenEvent: (event: EventSummary) => void }) {
   const [events, setEvents] = useState<EventSummary[]>([])
   const [error, setError] = useState('')
-  const [watching, setWatching] = useState(false)
+  const [watchSnapshot, setWatchSnapshot] = useState<WatchSnapshot>(() => initialWatchSnapshot())
   const [loading, setLoading] = useState(Boolean(uid))
 
   useEffect(() => {
@@ -3673,31 +3740,27 @@ function ResourceEventsPanel({ context, namespace, uid, onOpenEvent }: { context
       setLoading(false)
       return
     }
-    let active = true
-    let stream: EventSource | undefined
-    const load = () => {
-      fetchResourceEvents(context, namespace === 'all' ? '' : namespace, uid)
-        .then((response) => {
-          if (!active) return
-          setEvents(response.items)
-          setError('')
-          if (!stream && response.resourceVersion) {
-            stream = new EventSource(resourceEventsWatchUrl(context, namespace === 'all' ? '' : namespace, uid, response.resourceVersion))
-            setWatching(true)
-            stream.onmessage = () => load()
-            stream.onerror = () => setWatching(false)
-          }
-        })
-        .catch((loadError: Error) => active && setError(loadError.message))
-        .finally(() => active && setLoading(false))
-    }
-    load()
-    return () => {
-      active = false
-      stream?.close()
-      setWatching(false)
-    }
-  }, [context, namespace, uid])
+    setWatchSnapshot(initialWatchSnapshot())
+    setError('')
+    const effectiveNamespace = namespace === 'all' ? '' : namespace
+    const controller = new ReliableWatchController<ResourceEventsResponse>({
+      load: (signal) => fetchResourceEvents(context, effectiveNamespace, uid, signal),
+      getResourceVersion: (data) => data.resourceVersion,
+      watchUrl: (resourceVersion) => resourceEventsWatchUrl(context, effectiveNamespace, uid, resourceVersion),
+      onData: (response) => {
+        setEvents(response.items)
+        setError('')
+        setLoading(false)
+      },
+      onState: (snapshot) => {
+        setWatchSnapshot(snapshot)
+        setLoading(snapshot.state === 'refreshing')
+        if (snapshot.state === 'stale' || snapshot.state === 'unavailable') setError(snapshot.message || '')
+      },
+    })
+    controller.start()
+    return () => controller.stop()
+  }, [context, namespace, uid, revision, reloadEpoch])
 
   /** Opens a generic Event detail page only when Kubernetes supplied its name. */
   function openEvent(event: EventSummary) {
@@ -3710,7 +3773,7 @@ function ResourceEventsPanel({ context, namespace, uid, onOpenEvent }: { context
 
   if (!uid) return <QuietState icon={<Activity size={22} />} title="Events need a resource UID" detail="This object does not expose a UID that can be used for native Event filtering." />
 
-  return <div className="events-panel"><div className="events-toolbar"><div className="logs-title"><Activity size={16} /><strong>Resource Events</strong><span>{events.length} recorded</span></div><span className={watching ? 'live-chip' : 'quiet-chip'}><span />{watching ? 'Live watch' : 'Refresh fallback'}</span></div>{error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}{loading && !events.length ? <div className="events-loading"><LoaderCircle size={17} className="spin" /> Reading resource Events</div> : null}{!loading && !events.length && !error ? <QuietState icon={<ShieldCheck size={22} />} title="No Events for this resource" detail="Kubernetes has not reported an Event associated with this object." /> : null}<div className="event-list">{events.map((event, index) => <button type="button" className="event-row event-row-button" key={`${event.name}-${event.reason}-${event.lastSeen}-${index}`} onClick={() => openEvent(event)}><span className={`event-type event-type-${event.type.toLowerCase()}`}><span />{event.type || 'Normal'}</span><span className="event-copy"><strong>{event.reason || 'Event'}</strong><span>{event.message || 'No message provided.'}</span></span><span className="event-meta"><code>{event.count > 1 ? `x${event.count}` : 'once'}</code><span>{relativeTime(event.lastSeen)}</span></span></button>)}</div></div>
+  return <div className="events-panel"><div className="events-toolbar"><div className="logs-title"><Activity size={16} /><strong>Resource Events</strong><span>{events.length} recorded</span></div><FreshnessStatus snapshot={watchSnapshot} /></div><FreshnessNotice snapshot={watchSnapshot} />{error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}{loading && !events.length ? <div className="events-loading"><LoaderCircle size={17} className="spin" /> Reading resource Events</div> : null}{!loading && !events.length && !error ? <QuietState icon={<ShieldCheck size={22} />} title="No Events for this resource" detail="Kubernetes has not reported an Event associated with this object." /> : null}<div className="event-list">{events.map((event, index) => <button type="button" className="event-row event-row-button" key={`${event.name}-${event.reason}-${event.lastSeen}-${index}`} onClick={() => openEvent(event)}><span className={`event-type event-type-${event.type.toLowerCase()}`}><span />{event.type || 'Normal'}</span><span className="event-copy"><strong>{event.reason || 'Event'}</strong><span>{event.message || 'No message provided.'}</span></span><span className="event-meta"><code>{event.count > 1 ? `x${event.count}` : 'once'}</code><span>{relativeTime(event.lastSeen)}</span></span></button>)}</div></div>
 }
 
 /** Renders a key/value identity row on a detail page. */

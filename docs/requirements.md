@@ -50,6 +50,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Revision-scoped discovery caching, bounded related-resource query planning, deferred reverse-owner scans, safe relationship diagnostics, and large-discovery benchmark coverage.
 - Complete discovery-backed GVR catalog with subresource capabilities, partial-discovery states, scope validation, and canonical resource routes.
 - Version-aware CRD capabilities with served/preferred/storage metadata, bounded printer columns, subresource details, and schema-form YAML fallbacks.
+- Reliable resource and Event watches with bounded relist recovery, freshness states, cancellation, and safe failure signals.
 
 ### Partially Implemented
 
@@ -210,7 +211,7 @@ Make CRD metadata useful for browsing, forms, and resource operations while keep
 - Handle custom resources across all served versions without confusing version identity or resource-version concurrency.
 - Keep CRD installation, schema editing, and CRD deletion safeguards as separate future work.
 
-### F4. Reliable watches and freshness states
+### F4. Reliable watches and freshness states (Implemented)
 
 Make live resource and Event data resilient to network failures, watch closure, and expired resource versions.
 
