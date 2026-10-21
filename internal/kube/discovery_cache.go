@@ -42,6 +42,7 @@ func cloneResourceDefinitions(definitions []ResourceDefinition) []ResourceDefini
 		cloned[index].Verbs = append([]string(nil), definition.Verbs...)
 		cloned[index].ShortNames = append([]string(nil), definition.ShortNames...)
 		cloned[index].Categories = append([]string(nil), definition.Categories...)
+		cloned[index].CustomResourceCapabilities = cloneCustomResourceCapabilities(definition.CustomResourceCapabilities)
 		cloned[index].Subresources = make([]ResourceSubresource, len(definition.Subresources))
 		for subresourceIndex, subresource := range definition.Subresources {
 			cloned[index].Subresources[subresourceIndex] = subresource
@@ -101,12 +102,12 @@ func (s *Service) loadDiscovery(key discoveryCacheKey, flight *discoveryFlight, 
 	defer cancel()
 	resultChannel := make(chan discoveryCacheEntry, 1)
 	go func() {
-		definitions, issues, discoveryErr := discoverCompleteDefinitions(discoveryClient)
+		definitions, issues, preferredVersions, discoveryErr := discoverCompleteDefinitionsWithPreferences(discoveryClient)
 		if loadContext.Err() != nil {
 			resultChannel <- discoveryCacheEntry{err: loadContext.Err()}
 			return
 		}
-		if customResourceErr := markCustomResourceDefinitionsWithError(loadContext, dynamicClient, definitions); customResourceErr != nil {
+		if customResourceErr := markCustomResourceDefinitionsWithError(loadContext, dynamicClient, definitions, preferredVersions); customResourceErr != nil {
 			issues = append(issues, discoveryIssueForError("apiextensions.k8s.io", "v1", customResourceErr))
 			discoveryErr = errors.Join(discoveryErr, customResourceErr)
 		}

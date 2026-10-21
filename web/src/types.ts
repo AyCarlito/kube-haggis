@@ -57,6 +57,36 @@ export interface ResourceDefinition {
   shortNames?: string[]
   categories?: string[]
   subresources?: ResourceSubresource[]
+  customResourceCapabilities?: CustomResourceCapabilities
+}
+
+/** Describes bounded CRD metadata attached to one served custom-resource GVR. */
+export interface CustomResourceCapabilities {
+  group: string
+  version: string
+  kind: string
+  plural: string
+  resource: string
+  scope: ResourceScope | string
+  servedVersions: string[]
+  preferredVersion: string
+  storageVersion: string
+  statusSubresource: boolean
+  scaleSubresource: boolean
+  scaleSpecReplicasPath?: string
+  scaleStatusReplicasPath?: string
+  scaleLabelSelectorPath?: string
+  printerColumns?: CustomResourcePrinterColumn[]
+  printerColumnWarnings?: string[]
+}
+
+/** Describes one safe, tokenized CRD printer column exposed to custom-resource tables. */
+export interface CustomResourcePrinterColumn {
+  name: string
+  type: string
+  description?: string
+  priority?: number
+  path: string[]
 }
 
 /** Identifies the namespace scope reported by Kubernetes discovery. */
@@ -126,6 +156,16 @@ export interface ResourceSchemaResponse {
   resource: string
   kind?: string
   schema?: ResourceSchemaField
+  fallbacks?: ResourceSchemaFallback[]
+  fallbacksTruncated?: boolean
+  statusSubresource?: boolean
+  scaleStatusPath?: string
+}
+
+/** Explains one schema field that remains available through the complete YAML editor. */
+export interface ResourceSchemaFallback {
+  path: string
+  reason: string
 }
 
 /** Contains common resource fields used by the generic resource table. */
@@ -139,6 +179,7 @@ export interface ResourceSummary {
   ready?: string
   labels?: Record<string, string>
   resourceVersion: string
+  printerColumns?: Record<string, string>
 }
 
 /** Contains a generic resource collection response. */

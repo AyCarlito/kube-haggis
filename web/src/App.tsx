@@ -80,12 +80,15 @@ import {
   parseResourceRoute,
   resolveCatalogDefinition,
 } from './catalog'
+import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import type {
   AuditEntry,
   AuditResponse,
   ClusterOverview,
   ContextSummary,
   ContextsResponse,
+  CustomResourceCapabilities,
+  CustomResourcePrinterColumn,
   EphemeralContainerRequest,
   EventSummary,
   PortForwardMessage,
@@ -914,7 +917,8 @@ function ResourceCatalogPage({ catalog, loading, error, onRetry, onOpen }: { cat
 function CatalogResourceRow({ definition, onOpen }: { definition: ResourceDefinition; onOpen: (definition: ResourceDefinition) => void }) {
   const scope = definition.scope || (definition.namespaced ? 'Namespaced' : 'Cluster')
   const subresources = definition.subresources ?? []
-  return <button type="button" className="catalog-row" onClick={() => onOpen(definition)}><span className="catalog-resource-cell"><strong>{definition.resource}</strong><code>{definition.group ? `${definition.group}/${definition.version}` : definition.version}</code></span><span className="catalog-kind-cell">{definition.kind || 'Unknown kind'}</span><span><span className={`catalog-scope catalog-scope-${scope.toLowerCase()}`}>{scope}</span></span><span className="catalog-meta-cell"><span className="catalog-chip-list">{(definition.verbs ?? []).map((verb) => <code key={verb}>{verb}</code>)}</span>{definition.shortNames?.length ? <small>aliases: {definition.shortNames.join(', ')}</small> : null}{definition.categories?.length ? <small>categories: {definition.categories.join(', ')}</small> : null}</span><span className="catalog-meta-cell">{subresources.length ? <span className="catalog-chip-list">{subresources.map((subresource) => <code key={subresource.name}>{subresource.name}</code>)}</span> : <small>No discovered subresources</small>}{subresources.map((subresource) => <small key={`${subresource.name}-verbs`}>{subresource.name}: {(subresource.verbs ?? []).join(', ') || 'verbs not advertised'}</small>)}</span></button>
+  const custom = definition.customResourceCapabilities
+  return <button type="button" className="catalog-row" onClick={() => onOpen(definition)}><span className="catalog-resource-cell"><strong>{definition.resource}</strong><code>{definition.group ? `${definition.group}/${definition.version}` : definition.version}</code></span><span className="catalog-kind-cell">{definition.kind || 'Unknown kind'}</span><span><span className={`catalog-scope catalog-scope-${scope.toLowerCase()}`}>{scope}</span></span><span className="catalog-meta-cell"><span className="catalog-chip-list">{(definition.verbs ?? []).map((verb) => <code key={verb}>{verb}</code>)}</span>{definition.shortNames?.length ? <small>aliases: {definition.shortNames.join(', ')}</small> : null}{definition.categories?.length ? <small>categories: {definition.categories.join(', ')}</small> : null}{custom ? <><small>CRD / {customResourceCapabilityLabel(custom)}</small><span className="catalog-chip-list">{custom.statusSubresource && <code>status</code>}{custom.scaleSubresource && <code>scale</code>}{custom.printerColumns?.length ? <code>{custom.printerColumns.length} printer columns</code> : null}</span></> : null}</span><span className="catalog-meta-cell">{subresources.length ? <span className="catalog-chip-list">{subresources.map((subresource) => <code key={subresource.name}>{subresource.name}</code>)}</span> : <small>No discovered subresources</small>}{subresources.map((subresource) => <small key={`${subresource.name}-verbs`}>{subresource.name}: {(subresource.verbs ?? []).join(', ') || 'verbs not advertised'}</small>)}{custom?.printerColumnWarnings?.length ? <small>Some printer columns use the generic table fallback.</small> : null}</span></button>
 }
 
 /** Renders a retryable resource-catalog failure without substituting a guessed resource. */
@@ -1206,7 +1210,8 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   const allFilteredSelected = filtered.length > 0 && filtered.every((item) => selectedKeys.includes(resourceItemKey(item)))
   const selectionLocked = Boolean(bulkReview) || Boolean(bulkBusy)
   const visibleColumnDefinitions = resourceColumnDefinitions.filter((column) => visibleColumns.includes(column.key))
-  const tableColumnCount = visibleColumnDefinitions.length + 2
+  const printerColumns = definition.customResourceCapabilities?.printerColumns ?? []
+  const tableColumnCount = visibleColumnDefinitions.length + printerColumns.length + 2
 
   /** Clears page-local selection and starts the first continuation page when needed. */
   function resetLocalView() {
@@ -1407,7 +1412,7 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
         <button className="icon-button toolbar-action" onClick={() => setRefreshNonce((value) => value + 1)} aria-label="Refresh resources"><RefreshCw size={16} /></button>
         <button className="primary-button" disabled={!writeEnabled} onClick={onCreate} title={writeEnabled ? `Create a ${definition.kind}` : 'Enable write mode to create resources'}><span>+</span> New {definition.kind}</button>
       </div>
-      <div className="table-view-note"><span>Local page view</span> Search, status, and sorting inspect only the loaded Kubernetes page. Label selector is sent to Kubernetes; columns stay in this browser.</div>
+      <div className="table-view-note"><span>Local page view</span> Search, status, and sorting inspect only the loaded Kubernetes page. Label selector is sent to Kubernetes; columns stay in this browser.{printerColumns.length ? ` Safe CRD columns: ${printerColumns.map((column) => column.name).join(', ')}.` : ''}{definition.customResourceCapabilities?.printerColumnWarnings?.length ? ' Unsupported CRD columns use the generic table fallback.' : ''}</div>
       <div className="selection-toolbar">
         <span><strong>{selected.length}</strong> selected / {definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster scope' : namespace}</span>
         <div><button type="button" className="secondary-button danger-button" disabled={!writeEnabled || !selected.length || selectionLocked} onClick={() => void reviewBulkDelete()}><Trash2 size={14} /> Review delete{selected.length ? ` (${selected.length})` : ''}</button>{selected.length > 0 && <button type="button" className="text-button" disabled={selectionLocked} onClick={() => { setSelectedKeys([]); clearBulkReview(); setBulkResults(null) }}>Clear selection</button>}</div>
@@ -1417,10 +1422,10 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
       {bulkReview && <BulkDeleteReviewPanel definition={definition} namespace={namespace} items={selected} review={bulkReview} confirmed={bulkConfirmed} confirmation={bulkConfirmation} busy={bulkBusy} onConfirmed={setBulkConfirmed} onConfirmation={setBulkConfirmation} onCancel={clearBulkReview} onApply={() => void applyReviewedBulkDelete()} />}
       {bulkResults && <BulkDeleteResults definition={definition} result={bulkResults} />}
       <div className="resource-table-wrap">
-        <table className="resource-table"><thead><tr><th><input className="table-checkbox" type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || selectionLocked} aria-label="Select all visible resources" onChange={(event) => toggleFilteredSelection(event.target.checked)} /></th>{visibleColumnDefinitions.map((column) => <th key={column.key}>{column.label}</th>)}<th aria-label="Actions" /></tr></thead><tbody>
+        <table className="resource-table"><thead><tr><th><input className="table-checkbox" type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || selectionLocked} aria-label="Select all visible resources" onChange={(event) => toggleFilteredSelection(event.target.checked)} /></th>{visibleColumnDefinitions.map((column) => <th key={column.key}>{column.label}</th>)}{printerColumns.map((column) => <th key={`printer-${column.name}`} title={column.description}>{column.name}</th>)}<th aria-label="Actions" /></tr></thead><tbody>
           {loading && !response ? <tr><td colSpan={tableColumnCount}><div className="table-loading"><LoaderCircle size={18} className="spin" /> Reading API objects</div></td></tr> : null}
           {!loading && !filtered.length ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><Box size={20} /><strong>No matching objects</strong><span>Try a different local filter or label selector.</span></div></td></tr> : null}
-          {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} columns={visibleColumnDefinitions.map((column) => column.key)} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
+          {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} columns={visibleColumnDefinitions.map((column) => column.key)} printerColumns={printerColumns} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
         </tbody></table>
       </div>
       <div className="table-footer resource-pagination"><span>Showing {filtered.length} of {response?.items.length ?? 0} on page {pageIndex + 1}{response?.continue ? ' / more available' : ''}</span><div className="pagination-controls"><label>Rows <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{resourcePageSizes.map((size) => <option value={size} key={size}>{size}</option>)}</select></label><button type="button" className="secondary-button" onClick={previousPage} disabled={pageIndex === 0 || loading}><ChevronLeft size={14} /> Previous</button><button type="button" className="secondary-button" onClick={nextPage} disabled={!response?.continue || loading}>Next <ChevronRight size={14} /></button></div><span><span className="table-footer-dot" /> {watching ? 'updates arrive through the Kubernetes watch' : 'refresh to check for updates'}</span></div>
@@ -1429,8 +1434,8 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
 }
 
 /** Renders one row in the generic resource table. */
-function ResourceRow({ item, columns, selected, selectionDisabled, onToggle, onOpen }: { item: ResourceSummary; columns: ResourceColumnKey[]; selected: boolean; selectionDisabled: boolean; onToggle: (item: ResourceSummary, checked: boolean) => void; onOpen: (name: string, namespace?: string) => void }) {
-  return <tr className={selected ? 'resource-row-selected' : ''} onClick={() => onOpen(item.name, item.namespace)}><td><input className="table-checkbox" type="checkbox" checked={selected} disabled={selectionDisabled} aria-label={`Select ${item.name}`} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggle(item, event.target.checked)} /></td>{columns.map((column) => <td key={column}>{renderResourceCell(column, item, onOpen)}</td>)}<td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
+function ResourceRow({ item, columns, printerColumns, selected, selectionDisabled, onToggle, onOpen }: { item: ResourceSummary; columns: ResourceColumnKey[]; printerColumns: CustomResourcePrinterColumn[]; selected: boolean; selectionDisabled: boolean; onToggle: (item: ResourceSummary, checked: boolean) => void; onOpen: (name: string, namespace?: string) => void }) {
+  return <tr className={selected ? 'resource-row-selected' : ''} onClick={() => onOpen(item.name, item.namespace)}><td><input className="table-checkbox" type="checkbox" checked={selected} disabled={selectionDisabled} aria-label={`Select ${item.name}`} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggle(item, event.target.checked)} /></td>{columns.map((column) => <td key={column}>{renderResourceCell(column, item, onOpen)}</td>)}{printerColumns?.map((column) => <td key={`printer-${column.name}`}><code className="printer-column-cell">{printerColumnDisplay(item, column.name)}</code></td>)}<td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
 }
 
 /** Builds the server query identity used to invalidate stale continuation tokens. */
@@ -1792,6 +1797,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
      <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving || Boolean(conflict)} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
+     {definition.customResourceCapabilities && <CustomResourceCapabilityPanel capabilities={definition.customResourceCapabilities} />}
      {!isNew && <DeleteReviewPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} />}
      <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
      {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
@@ -1810,6 +1816,12 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
       {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
       {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
   </div>
+}
+
+/** Renders bounded CRD identity, version, and subresource capability metadata on detail pages. */
+function CustomResourceCapabilityPanel({ capabilities }: { capabilities: CustomResourceCapabilities }) {
+  const scalePaths = [capabilities.scaleSpecReplicasPath, capabilities.scaleStatusReplicasPath, capabilities.scaleLabelSelectorPath].filter(Boolean).join(' / ')
+  return <section className="crd-capability-panel"><div className="crd-capability-heading"><div><span className="panel-eyebrow">Custom resource definition</span><strong>{capabilities.group} / {capabilities.kind}</strong></div><code>{capabilities.resource} / {capabilities.scope}</code></div><div className="crd-capability-grid"><div><span>Version identity</span><strong>{capabilities.version}</strong><small>{customResourceCapabilityLabel(capabilities)}</small></div><div><span>Subresources</span><strong>{capabilities.statusSubresource || capabilities.scaleSubresource ? [capabilities.statusSubresource ? 'status' : '', capabilities.scaleSubresource ? 'scale' : ''].filter(Boolean).join(' / ') : 'none declared'}</strong><small>{scalePaths ? `scale paths ${scalePaths}` : 'No custom-resource actions are added here.'}</small></div><div><span>Printer columns</span><strong>{capabilities.printerColumns?.length ?? 0} safe columns</strong><small>{capabilities.printerColumnWarnings?.length ? 'Unsupported columns use generic table fields.' : 'Values are bounded and evaluated by the backend.'}</small></div></div></section>
 }
 
 /** Renders the explicit current-state review and local-draft choices for a resource-version conflict. */
@@ -1843,10 +1855,14 @@ function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespa
   const metadata = object.metadata && typeof object.metadata === 'object' && !Array.isArray(object.metadata) ? object.metadata as Record<string, unknown> : {}
   const metadataName = typeof metadata.name === 'string' ? metadata.name : ''
   const metadataNamespace = typeof metadata.namespace === 'string' ? metadata.namespace : namespace === 'all' ? '' : namespace
+  const fallbackText = response.fallbacks?.length ? schemaFallbackSummary(response.fallbacks, response.fallbacksTruncated) : ''
+  const statusNotice = schemaStatusNotice(response)
   const updatePath = (path: string[], value: unknown) => onChange(updateSchemaObject(object, path, value))
   return <div className="schema-form-panel">
     <div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>{isNew ? 'Create from schema' : 'Edit from schema'}</strong><span>structural OpenAPI v3</span></div><div className="schema-form-header-meta">{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}<span className="schema-state-chip schema-state-good">Form ready</span></div></div>
-    <div className="schema-form-intro"><strong>Fields are generated from the cluster CRD.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span></div>
+    <div className="schema-form-intro"><strong>Fields are generated from the cluster CRD.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span>{response.message && <span>{response.message}</span>}</div>
+    {statusNotice && <div className="schema-readonly-notice"><LockKeyhole size={15} /><span>{statusNotice}</span></div>}
+    {fallbackText && <div className="schema-partial-fallback"><AlertTriangle size={15} /><div><strong>Some fields use the YAML fallback</strong><span>{fallbackText}</span></div><button type="button" className="text-button" onClick={onOpenYaml}>Open YAML</button></div>}
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to edit this form. Review still performs the existing Kubernetes server-side dry-run.</div>}
     <form className="schema-form" onSubmit={(event) => event.preventDefault()}>
       <fieldset className="schema-object schema-metadata" disabled={!writeEnabled}>

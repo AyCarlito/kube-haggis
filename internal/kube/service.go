@@ -58,17 +58,18 @@ type ContextSummary struct {
 
 // ResourceDefinition describes one discovered top-level Kubernetes resource and its capabilities.
 type ResourceDefinition struct {
-	Group          string                `json:"group"`
-	Version        string                `json:"version"`
-	Resource       string                `json:"resource"`
-	Kind           string                `json:"kind"`
-	Namespaced     bool                  `json:"namespaced"`
-	Scope          string                `json:"scope"`
-	CustomResource bool                  `json:"customResource"`
-	Verbs          []string              `json:"verbs"`
-	ShortNames     []string              `json:"shortNames,omitempty"`
-	Categories     []string              `json:"categories,omitempty"`
-	Subresources   []ResourceSubresource `json:"subresources,omitempty"`
+	Group                      string                      `json:"group"`
+	Version                    string                      `json:"version"`
+	Resource                   string                      `json:"resource"`
+	Kind                       string                      `json:"kind"`
+	Namespaced                 bool                        `json:"namespaced"`
+	Scope                      string                      `json:"scope"`
+	CustomResource             bool                        `json:"customResource"`
+	CustomResourceCapabilities *CustomResourceCapabilities `json:"customResourceCapabilities,omitempty"`
+	Verbs                      []string                    `json:"verbs"`
+	ShortNames                 []string                    `json:"shortNames,omitempty"`
+	Categories                 []string                    `json:"categories,omitempty"`
+	Subresources               []ResourceSubresource       `json:"subresources,omitempty"`
 }
 
 // ResourceSummary contains the common fields shown in resource tables.
@@ -82,6 +83,7 @@ type ResourceSummary struct {
 	Ready           string            `json:"ready,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	ResourceVersion string            `json:"resourceVersion"`
+	PrinterColumns  map[string]string `json:"printerColumns,omitempty"`
 }
 
 // ResourceList is the generic response returned for a resource collection.
@@ -429,7 +431,7 @@ func (s *Service) ListResources(ctx context.Context, contextName, group, version
 		ResourceVersion: items.GetResourceVersion(),
 	}
 	for index := range items.Items {
-		result.Items = append(result.Items, summarizeResource(&items.Items[index]))
+		result.Items = append(result.Items, summarizeResource(&items.Items[index], definition))
 	}
 	return result, nil
 }
@@ -1309,8 +1311,8 @@ func topPodMetrics(items []PodMetric) []PodMetric {
 	return items
 }
 
-// summarizeResource extracts common fields from an unstructured resource.
-func summarizeResource(item *unstructured.Unstructured) ResourceSummary {
+// summarizeResource extracts common and safe CRD printer-column fields from an unstructured resource.
+func summarizeResource(item *unstructured.Unstructured, definition ResourceDefinition) ResourceSummary {
 	return ResourceSummary{
 		Name:            item.GetName(),
 		Namespace:       item.GetNamespace(),
@@ -1321,6 +1323,7 @@ func summarizeResource(item *unstructured.Unstructured) ResourceSummary {
 		Ready:           resourceReady(item),
 		Labels:          item.GetLabels(),
 		ResourceVersion: item.GetResourceVersion(),
+		PrinterColumns:  evaluateCustomResourcePrinterColumns(item, definition.CustomResourceCapabilities),
 	}
 }
 

@@ -45,6 +45,12 @@ type ResourceCatalog struct {
 
 // discoverCompleteDefinitions loads all served API versions and normalizes subresources.
 func discoverCompleteDefinitions(discoveryClient discovery.DiscoveryInterface) ([]ResourceDefinition, []DiscoveryIssue, error) {
+	definitions, issues, _, discoveryErr := discoverCompleteDefinitionsWithPreferences(discoveryClient)
+	return definitions, issues, discoveryErr
+}
+
+// discoverCompleteDefinitionsWithPreferences loads normalized discovery and the API group's preferred versions.
+func discoverCompleteDefinitionsWithPreferences(discoveryClient discovery.DiscoveryInterface) ([]ResourceDefinition, []DiscoveryIssue, map[string]string, error) {
 	groups, resourceLists, discoveryErr := discoveryClient.ServerGroupsAndResources()
 	if len(resourceLists) == 0 && discoveryErr == nil {
 		// Some test doubles and older discovery implementations only implement the preferred call.
@@ -54,7 +60,7 @@ func discoverCompleteDefinitions(discoveryClient discovery.DiscoveryInterface) (
 	definitions := normalizeResourceLists(resourceLists)
 	issues := discoveryIssues(discoveryErr)
 	issues = append(issues, missingDiscoveryIssues(groups, resourceLists)...)
-	return definitions, deduplicateDiscoveryIssues(issues), discoveryErr
+	return definitions, deduplicateDiscoveryIssues(issues), preferredDiscoveryVersions(groups), discoveryErr
 }
 
 // missingDiscoveryIssues identifies group versions advertised by the server without a resource list.
@@ -180,6 +186,10 @@ func mergeResourceDefinitions(left, right ResourceDefinition) ResourceDefinition
 		merged.Scope = right.Scope
 	}
 	merged.Namespaced = right.Namespaced
+	merged.CustomResource = left.CustomResource || right.CustomResource
+	if merged.CustomResourceCapabilities == nil {
+		merged.CustomResourceCapabilities = cloneCustomResourceCapabilities(right.CustomResourceCapabilities)
+	}
 	merged.Verbs = sortedUniqueStrings(append(append([]string(nil), left.Verbs...), right.Verbs...))
 	merged.ShortNames = sortedUniqueStrings(append(append([]string(nil), left.ShortNames...), right.ShortNames...))
 	merged.Categories = sortedUniqueStrings(append(append([]string(nil), left.Categories...), right.Categories...))

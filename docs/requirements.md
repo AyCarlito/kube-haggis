@@ -49,6 +49,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Local-only visual identity using the provided `haggis.svg` asset.
 - Revision-scoped discovery caching, bounded related-resource query planning, deferred reverse-owner scans, safe relationship diagnostics, and large-discovery benchmark coverage.
 - Complete discovery-backed GVR catalog with subresource capabilities, partial-discovery states, scope validation, and canonical resource routes.
+- Version-aware CRD capabilities with served/preferred/storage metadata, bounded printer columns, subresource details, and schema-form YAML fallbacks.
 
 ### Partially Implemented
 
@@ -197,7 +198,7 @@ Expose every discoverable built-in and custom top-level resource through a compl
 - Handle clusters with large numbers of CRDs without silently truncating the catalog.
 - Keep generic CRUD and YAML fallback available without adding a typed backend implementation for every resource kind.
 
-### F3. Version-aware CRD and custom-resource capabilities
+### F3. Version-aware CRD and custom-resource capabilities (Implemented)
 
 Make CRD metadata useful for browsing, forms, and resource operations while keeping CRD installation and schema mutation out of scope.
 
