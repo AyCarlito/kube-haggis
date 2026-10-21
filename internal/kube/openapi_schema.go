@@ -373,6 +373,9 @@ func (r *schemaReferenceResolver) resolve(raw map[string]interface{}, path strin
 		appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("schema contains more than %d referenced fields", resourceSchemaMaxFields))
 		return nil, nil
 	}
+	if unwrapped, ok := r.singleReferenceAllOf(raw); ok {
+		return r.resolve(unwrapped, path, depth, fields, fallbacks, truncated)
+	}
 
 	if rawReference, found := raw["$ref"]; found {
 		ref, ok := rawReference.(string)
@@ -383,7 +386,7 @@ func (r *schemaReferenceResolver) resolve(raw map[string]interface{}, path strin
 			appendSchemaFallback(fallbacks, truncated, path, "unsupported external or malformed schema reference")
 			return nil, nil
 		}
-		target, found := r.definitions[ref]
+		target, found := r.definitionForReference(ref)
 		if !found {
 			if path == "$" {
 				return nil, fmt.Errorf("schema reference %q is missing", ref)
@@ -403,6 +406,9 @@ func (r *schemaReferenceResolver) resolve(raw map[string]interface{}, path strin
 		merged := copySchemaMap(target)
 		for key, value := range raw {
 			if key != "$ref" {
+				if key == "required" {
+					value = mergeRequiredSchemaValues(merged[key], value)
+				}
 				merged[key] = value
 			}
 		}
@@ -420,11 +426,7 @@ func (r *schemaReferenceResolver) resolve(raw map[string]interface{}, path strin
 			return nil, nil
 		}
 		resolvedProperties := make(map[string]interface{}, len(properties))
-		names := make([]string, 0, len(properties))
-		for name := range properties {
-			names = append(names, name)
-		}
-		sort.Strings(names)
+		names := orderedSchemaPropertyNames(properties, path == "$")
 		for _, name := range names {
 			property, ok := properties[name].(map[string]interface{})
 			if !ok {
@@ -479,6 +481,91 @@ func (r *schemaReferenceResolver) resolve(raw map[string]interface{}, path strin
 		}
 	}
 	return cleaned, nil
+}
+
+// definitionForReference resolves either a fully prefixed local reference or its extracted bare definition name.
+func (r *schemaReferenceResolver) definitionForReference(ref string) (map[string]interface{}, bool) {
+	if target, found := r.definitions[ref]; found {
+		return target, true
+	}
+	bare := strings.TrimPrefix(ref, r.prefix)
+	if bare == ref {
+		return nil, false
+	}
+	target, found := r.definitions[bare]
+	return target, found
+}
+
+// singleReferenceAllOf unwraps only one local reference with supported metadata and validation siblings.
+func (r *schemaReferenceResolver) singleReferenceAllOf(raw map[string]interface{}) (map[string]interface{}, bool) {
+	value, found := raw["allOf"]
+	if !found || value == nil {
+		return nil, false
+	}
+	branches, ok := value.([]interface{})
+	if !ok || len(branches) != 1 {
+		return nil, false
+	}
+	branch, ok := branches[0].(map[string]interface{})
+	if !ok || branch == nil {
+		return nil, false
+	}
+	ref, ok := branch["$ref"].(string)
+	if !ok || !strings.HasPrefix(ref, r.prefix) {
+		return nil, false
+	}
+	merged := map[string]interface{}{"$ref": ref}
+	for _, siblingSource := range []map[string]interface{}{branch, raw} {
+		for key, sibling := range siblingSource {
+			switch key {
+			case "$ref", "allOf":
+				continue
+			case "title", "description", "format", "readOnly", "default", "enum", "minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems", "required":
+			case "x-kubernetes-patch-strategy", "x-kubernetes-patch-merge-key", "x-kubernetes-list-type", "x-kubernetes-list-map-keys", "x-kubernetes-map-type":
+			default:
+				return nil, false
+			}
+			if key == "required" {
+				sibling = mergeRequiredSchemaValues(merged[key], sibling)
+			}
+			merged[key] = sibling
+		}
+	}
+	return merged, true
+}
+
+// mergeRequiredSchemaValues preserves both required lists when a reference wrapper adds required fields.
+func mergeRequiredSchemaValues(existing, overlay interface{}) interface{} {
+	if existing == nil {
+		return overlay
+	}
+	existingNames, existingOK := existing.([]interface{})
+	overlayNames, overlayOK := overlay.([]interface{})
+	if !existingOK {
+		return existing
+	}
+	if !overlayOK {
+		return overlay
+	}
+	merged := append([]interface{}{}, existingNames...)
+	seen := make(map[string]struct{}, len(merged))
+	for _, item := range merged {
+		if name, ok := item.(string); ok {
+			seen[name] = struct{}{}
+		}
+	}
+	for _, item := range overlayNames {
+		name, ok := item.(string)
+		if !ok {
+			return overlay
+		}
+		if _, found := seen[name]; found {
+			continue
+		}
+		seen[name] = struct{}{}
+		merged = append(merged, name)
+	}
+	return merged
 }
 
 // completeOpenAPIResourceSchema builds the public result from a normalized OpenAPI source.
@@ -546,7 +633,11 @@ func openAPIV2SchemaToRaw(source *openapi_v2.Schema) (map[string]interface{}, er
 			raw["type"] = types[0]
 		} else if len(types) > 1 {
 			raw["type"] = types[0]
-			raw["oneOf"] = make([]interface{}, len(types))
+			oneOf := make([]interface{}, 0, len(types))
+			for _, typeName := range types {
+				oneOf = append(oneOf, map[string]interface{}{"type": typeName})
+			}
+			raw["oneOf"] = oneOf
 		}
 	}
 	if source.Title != "" {
@@ -800,6 +891,7 @@ func cloneSchemaField(source *SchemaField) *SchemaField {
 		return nil
 	}
 	result := *source
+	result.ScalarTypes = append([]string(nil), source.ScalarTypes...)
 	result.Enum = append([]interface{}(nil), source.Enum...)
 	if source.Default != nil {
 		result.Default, _ = normalizeSchemaJSON(source.Default)

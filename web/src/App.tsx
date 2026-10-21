@@ -92,6 +92,7 @@ import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQu
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
+import { parseSchemaInput, projectSchemaIdentityFields, validateSchemaScalarValue } from './schemaForm'
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
 import { parseWorkloadReplicaInput, workloadReplicaInput, WORKLOAD_REPLICA_VALIDATION_MESSAGE } from './workload'
 import type {
@@ -2872,13 +2873,11 @@ function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespa
   const metadataNamespace = typeof metadata.namespace === 'string' ? metadata.namespace : namespace === 'all' ? '' : namespace
   const fallbackText = response.fallbacks?.length ? schemaFallbackSummary(response.fallbacks, response.fallbacksTruncated) : ''
   const statusNotice = schemaStatusNotice(response)
-  const formSchema = response.schema.type === 'object' && response.schema.properties?.some((property) => property.name === 'metadata')
-    ? { ...response.schema, properties: response.schema.properties.filter((property) => property.name !== 'metadata') }
-    : response.schema
+  const formSchema = projectSchemaIdentityFields(response.schema)
   const updatePath = (path: string[], value: unknown) => onChange(updateSchemaObject(object, path, value))
   return <div className="schema-form-panel">
      <div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>{isNew ? 'Create from schema' : 'Edit from schema'}</strong><span>{schemaSourceLabel(response.source)}</span></div><div className="schema-form-header-meta">{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}<span className="schema-state-chip schema-state-good">Form ready</span></div></div>
-     <div className="schema-form-intro"><strong>Fields are generated from the Kubernetes API schema.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span><span>Identity metadata is controlled by the Metadata section above; labels, annotations, and other metadata remain available through YAML.</span>{response.message && <span>{response.message}</span>}</div>
+     <div className="schema-form-intro"><strong>Fields are generated from the Kubernetes API schema.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span><span>Identity fields are controlled above while metadata details are generated from the API schema; labels, annotations, generateName, and other metadata fields appear here when exposed.</span>{response.message && <span>{response.message}</span>}</div>
     {statusNotice && <div className="schema-readonly-notice"><LockKeyhole size={15} /><span>{statusNotice}</span></div>}
     {fallbackText && <div className="schema-partial-fallback"><AlertTriangle size={15} /><div><strong>Some fields use the YAML fallback</strong><span>{fallbackText}</span></div><button type="button" className="text-button" onClick={onOpenYaml}>Open YAML</button></div>}
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to edit this form. Review still performs the existing Kubernetes server-side dry-run.</div>}
@@ -2921,12 +2920,13 @@ function SchemaFieldEditor({ field, value, path, writeEnabled, onChange }: { fie
   }
 
   const enumValues = field.enum || []
+  const scalarUnion = Boolean(field.scalarTypes?.length)
   const valueKey = displayValue === undefined ? '' : schemaValueKey(displayValue)
   const stringValue = typeof displayValue === 'string' ? displayValue : displayValue === undefined || displayValue === null ? '' : String(displayValue)
   return <label className={`schema-field schema-field-${field.type}`}>
     <span>{label} {field.required && <b>required</b>}{field.readOnly && <em>read-only</em>}{present && !field.required && <button type="button" className="schema-clear" onClick={(event) => { event.preventDefault(); clear() }} disabled={!writeEnabled || field.readOnly}>Clear</button>}</span>
     {field.description && <small>{field.description}</small>}
-    {enumValues.length > 0 ? <select value={valueKey} onChange={(event) => onChange(path, event.target.value ? parseSchemaValue(event.target.value) : undefined)} disabled={!writeEnabled || field.readOnly} required={field.required}><option value="">{field.required ? 'Choose a value' : 'Not set'}</option>{enumValues.map((item) => <option key={schemaValueKey(item)} value={schemaValueKey(item)}>{String(item)}</option>)}</select> : field.type === 'boolean' ? <input type="checkbox" checked={displayValue === true} onChange={(event) => onChange(path, event.target.checked)} disabled={!writeEnabled || field.readOnly} /> : <input type={field.type === 'number' || field.type === 'integer' ? 'number' : 'text'} value={stringValue} onChange={(event) => onChange(path, parseSchemaInput(field, event.target.value))} disabled={!writeEnabled || field.readOnly} required={field.required} min={field.minimum} max={field.maximum} minLength={field.minLength} maxLength={field.maxLength} pattern={field.pattern} step={field.type === 'integer' ? 1 : field.multipleOf || 'any'} inputMode={field.type === 'number' || field.type === 'integer' ? 'decimal' : undefined} />}
+     {enumValues.length > 0 && !scalarUnion ? <select value={valueKey} onChange={(event) => onChange(path, event.target.value ? parseSchemaValue(event.target.value) : undefined)} disabled={!writeEnabled || field.readOnly} required={field.required}><option value="">{field.required ? 'Choose a value' : 'Not set'}</option>{enumValues.map((item) => <option key={schemaValueKey(item)} value={schemaValueKey(item)}>{String(item)}</option>)}</select> : field.type === 'boolean' ? <input type="checkbox" checked={displayValue === true} onChange={(event) => onChange(path, event.target.checked)} disabled={!writeEnabled || field.readOnly} /> : <input type={field.type === 'number' || field.type === 'integer' ? 'number' : 'text'} value={stringValue} onChange={(event) => onChange(path, parseSchemaInput(field, event.target.value))} disabled={!writeEnabled || field.readOnly} required={field.required} min={field.minimum} max={field.maximum} minLength={field.minLength} maxLength={field.maxLength} pattern={field.pattern} step={field.type === 'integer' ? 1 : field.multipleOf || 'any'} inputMode={field.type === 'number' || field.type === 'integer' ? 'decimal' : undefined} />}
     {field.format && <i className="schema-format">format / {field.format}</i>}
   </label>
 }
@@ -3051,13 +3051,6 @@ function createSchemaValue(field?: ResourceSchemaField): unknown {
   }
 }
 
-/** Converts one primitive input string into the JSON value described by a field. */
-function parseSchemaInput(field: ResourceSchemaField, value: string): unknown {
-  if (value === '') return undefined
-  if (field.type === 'integer' || field.type === 'number') return Number(value)
-  return value
-}
-
 /** Encodes one enum or select value without losing booleans and numbers. */
 function schemaValueKey(value: unknown): string {
   return JSON.stringify(value) ?? ''
@@ -3089,30 +3082,10 @@ function validateSchemaValue(field: ResourceSchemaField, value: unknown, path: s
   if (field.enum?.length && !field.enum.some((candidate) => schemaValuesEqual(candidate, value))) errors.push(`${path} must match one of the listed enum values.`)
   switch (field.type) {
     case 'string':
-      if (typeof value !== 'string') errors.push(`${path} must be a string.`)
-      else {
-        if (field.minLength !== undefined && value.length < field.minLength) errors.push(`${path} must contain at least ${field.minLength} characters.`)
-        if (field.maxLength !== undefined && value.length > field.maxLength) errors.push(`${path} must contain at most ${field.maxLength} characters.`)
-        if (field.pattern) {
-          try {
-            if (!new RegExp(field.pattern).test(value)) errors.push(`${path} does not match the required pattern.`)
-          } catch {
-            errors.push(`${path} uses an invalid validation pattern.`)
-          }
-        }
-      }
-      break
     case 'integer':
-    case 'number': {
-      if (typeof value !== 'number' || !Number.isFinite(value) || (field.type === 'integer' && !Number.isInteger(value))) {
-        errors.push(`${path} must be a ${field.type}.`)
-        break
-      }
-      if (field.minimum !== undefined && (field.exclusiveMinimum ? value <= field.minimum : value < field.minimum)) errors.push(`${path} is below the minimum.`)
-      if (field.maximum !== undefined && (field.exclusiveMaximum ? value >= field.maximum : value > field.maximum)) errors.push(`${path} is above the maximum.`)
-      if (field.multipleOf !== undefined && Math.abs(value / field.multipleOf - Math.round(value / field.multipleOf)) > 1e-9) errors.push(`${path} must be a multiple of ${field.multipleOf}.`)
+    case 'number':
+      errors.push(...validateSchemaScalarValue(field, value, path))
       break
-    }
     case 'boolean':
       if (typeof value !== 'boolean') errors.push(`${path} must be a boolean.`)
       break

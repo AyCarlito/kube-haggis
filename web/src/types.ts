@@ -226,6 +226,7 @@ export type ResourceSchemaState = 'available' | 'unsupported' | 'missing' | 'non
 export interface ResourceSchemaField {
   name?: string
   type: 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'array'
+  scalarTypes?: Array<'string' | 'integer' | 'number'>
   title?: string
   description?: string
   format?: string

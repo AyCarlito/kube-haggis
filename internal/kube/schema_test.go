@@ -166,6 +166,344 @@ func TestLoadResourceSchemaPrefersOpenAPIV3AndLocksServerFields(t *testing.T) {
 	}
 }
 
+// TestLoadResourceSchemaResolvesBuiltInAllOfReferences verifies production-shaped bare definitions preserve every root section and safety lock.
+func TestLoadResourceSchemaResolvesBuiltInAllOfReferences(t *testing.T) {
+	discovery := testSchemaDiscovery(t, "Deployment", map[string]interface{}{
+		"io.k8s.api.apps.v1.Deployment": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"apiVersion": map[string]interface{}{"type": "string"},
+				"kind":       map[string]interface{}{"type": "string"},
+				"metadata": map[string]interface{}{
+					"allOf":       []interface{}{map[string]interface{}{"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"}},
+					"description": "Object metadata.",
+				},
+				"spec": map[string]interface{}{
+					"allOf":       []interface{}{map[string]interface{}{"$ref": "#/components/schemas/io.k8s.api.apps.v1.DeploymentSpec"}},
+					"description": "Desired deployment state.",
+				},
+				"status": map[string]interface{}{
+					"allOf":    []interface{}{map[string]interface{}{"$ref": "#/components/schemas/io.k8s.api.apps.v1.DeploymentStatus"}},
+					"readOnly": true,
+				},
+			},
+		},
+		"io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name":            map[string]interface{}{"type": "string"},
+				"namespace":       map[string]interface{}{"type": "string"},
+				"generateName":    map[string]interface{}{"type": "string"},
+				"uid":             map[string]interface{}{"type": "string"},
+				"labels":          map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+				"annotations":     map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+				"resourceVersion": map[string]interface{}{"type": "string"},
+			},
+		},
+		"io.k8s.api.apps.v1.DeploymentSpec": map[string]interface{}{
+			"type":     "object",
+			"required": []interface{}{"replicas"},
+			"properties": map[string]interface{}{
+				"replicas": map[string]interface{}{"type": "integer", "minimum": float64(0)},
+				"template": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{"type": "string"},
+					},
+				},
+			},
+		},
+		"io.k8s.api.apps.v1.DeploymentStatus": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"readyReplicas": map[string]interface{}{"type": "integer"},
+				"conditions": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"type":    map[string]interface{}{"type": "string"},
+							"message": map[string]interface{}{"type": "string"},
+						},
+					},
+				},
+			},
+		},
+	}, nil)
+	result, err := loadResourceSchema(context.Background(), fake.NewSimpleDynamicClient(runtime.NewScheme()), "apps", "v1", "deployments", discovery)
+	if err != nil || result.State != resourceSchemaStateAvailable || result.Schema == nil {
+		t.Fatalf("built-in allOf schema was not normalized: result=%+v err=%v", result, err)
+	}
+	for _, name := range []string{"apiVersion", "kind", "metadata", "spec", "status"} {
+		if schemaFieldProperty(result.Schema, name) == nil {
+			t.Fatalf("normalized root omitted %q: %+v", name, result.Schema.Properties)
+		}
+	}
+	metadata := schemaFieldProperty(result.Schema, "metadata")
+	if metadata.Description != "Object metadata." || schemaFieldProperty(metadata, "name") == nil || !schemaFieldProperty(metadata, "name").ReadOnly || schemaFieldProperty(metadata, "namespace") == nil || !schemaFieldProperty(metadata, "namespace").ReadOnly || schemaFieldProperty(metadata, "labels") == nil || schemaFieldProperty(metadata, "annotations") == nil || schemaFieldProperty(metadata, "generateName") == nil {
+		t.Fatalf("metadata reference wrapper was not preserved safely: %+v", metadata)
+	}
+	spec := schemaFieldProperty(result.Schema, "spec")
+	if spec.Description != "Desired deployment state." || schemaFieldProperty(spec, "replicas") == nil || schemaFieldProperty(spec, "template") == nil {
+		t.Fatalf("nested spec fields did not survive normalization: %+v", spec)
+	}
+	status := schemaFieldProperty(result.Schema, "status")
+	conditions := schemaFieldProperty(status, "conditions")
+	var conditionType *SchemaField
+	if conditions != nil && conditions.Items != nil {
+		conditionType = schemaFieldProperty(conditions.Items, "type")
+	}
+	if !status.ReadOnly || conditions == nil || !conditions.ReadOnly || conditions.Items == nil || !conditions.Items.ReadOnly || conditionType == nil || !conditionType.ReadOnly {
+		t.Fatalf("status descendants were not read-only: status=%+v conditions=%+v", status, conditions)
+	}
+}
+
+// TestNormalizeOpenAPISchemaSupportsKubernetesScalarUnions verifies exact IntOrString and Quantity fields avoid YAML fallbacks without guessing real unions.
+func TestNormalizeOpenAPISchemaSupportsKubernetesScalarUnions(t *testing.T) {
+	intOrString := []interface{}{map[string]interface{}{"type": "integer"}, map[string]interface{}{"type": "string"}}
+	quantity := []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "number"}}
+	container := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"lifecycle": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"httpGet": map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{"port": map[string]interface{}{"oneOf": intOrString, "format": "int-or-string"}},
+					},
+				},
+			},
+			"readinessProbe": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"httpGet": map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{"port": map[string]interface{}{"oneOf": intOrString, "format": "int-or-string"}},
+					},
+				},
+			},
+			"env": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"valueFrom": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"resourceFieldRef": map[string]interface{}{
+									"type":       "object",
+									"properties": map[string]interface{}{"divisor": map[string]interface{}{"oneOf": quantity, "format": "quantity"}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	normalized, err := normalizeOpenAPISchema(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"spec": map[string]interface{}{"allOf": []interface{}{map[string]interface{}{"$ref": "#/components/schemas/DeploymentSpec"}}},
+		},
+	}, map[string]map[string]interface{}{
+		"DeploymentSpec": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"strategy": map[string]interface{}{
+					"allOf":                       []interface{}{map[string]interface{}{"$ref": "#/components/schemas/DeploymentStrategy"}},
+					"x-kubernetes-patch-strategy": "retainKeys",
+				},
+				"ports": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{"targetPort": map[string]interface{}{"oneOf": intOrString, "format": "int-or-string"}},
+					},
+				},
+				"template": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"spec": map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{"containers": map[string]interface{}{"type": "array", "items": container}},
+						},
+					},
+				},
+			},
+		},
+		"DeploymentStrategy": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"maxSurge":       map[string]interface{}{"oneOf": intOrString, "format": "int-or-string"},
+				"maxUnavailable": map[string]interface{}{"oneOf": intOrString, "format": "int-or-string"},
+				"trueUnion":      map[string]interface{}{"oneOf": []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "integer"}, map[string]interface{}{"type": "boolean"}}},
+			},
+		},
+	}, "#/components/schemas/")
+	if err != nil || normalized.field == nil {
+		t.Fatalf("scalar union normalization failed: normalized=%+v err=%v", normalized, err)
+	}
+	spec := schemaFieldProperty(normalized.field, "spec")
+	strategy := schemaFieldProperty(spec, "strategy")
+	ports := schemaFieldProperty(spec, "ports")
+	targetPort := schemaFieldProperty(ports.Items, "targetPort")
+	template := schemaFieldProperty(spec, "template")
+	templateSpec := schemaFieldProperty(template, "spec")
+	containers := schemaFieldProperty(templateSpec, "containers")
+	containerField := containers.Items
+	lifecyclePort := schemaFieldProperty(schemaFieldProperty(schemaFieldProperty(containerField, "lifecycle"), "httpGet"), "port")
+	probePort := schemaFieldProperty(schemaFieldProperty(schemaFieldProperty(containerField, "readinessProbe"), "httpGet"), "port")
+	env := schemaFieldProperty(containerField, "env")
+	valueFrom := schemaFieldProperty(env.Items, "valueFrom")
+	resourceFieldRef := schemaFieldProperty(valueFrom, "resourceFieldRef")
+	divisor := schemaFieldProperty(resourceFieldRef, "divisor")
+	maxSurge := schemaFieldProperty(strategy, "maxSurge")
+	maxUnavailable := schemaFieldProperty(strategy, "maxUnavailable")
+	if strategy == nil || targetPort == nil || lifecyclePort == nil || probePort == nil || divisor == nil || maxSurge == nil || maxUnavailable == nil {
+		t.Fatalf("scalar union fields were not retained: spec=%+v strategy=%+v targetPort=%+v lifecycle=%+v probe=%+v divisor=%+v fallbacks=%+v", spec, strategy, targetPort, lifecyclePort, probePort, divisor, normalized.fallbacks)
+	}
+	for name, field := range map[string]*SchemaField{
+		"targetPort":     targetPort,
+		"lifecycle.port": lifecyclePort,
+		"probe.port":     probePort,
+		"divisor":        divisor,
+		"maxSurge":       maxSurge,
+		"maxUnavailable": maxUnavailable,
+	} {
+		if field.Type != "string" || len(field.ScalarTypes) != 2 || field.ScalarTypes[0] != "string" {
+			t.Fatalf("%s did not retain normalized scalar variants: %+v", name, field)
+		}
+	}
+	if divisor.Format != "quantity" || targetPort.Format != "int-or-string" || lifecyclePort.Format != "int-or-string" || probePort.Format != "int-or-string" || maxSurge.Format != "int-or-string" || maxUnavailable.Format != "int-or-string" {
+		t.Fatalf("scalar union formats were not preserved: divisor=%q targetPort=%q lifecycle=%q probe=%q maxSurge=%q maxUnavailable=%q", divisor.Format, targetPort.Format, lifecyclePort.Format, probePort.Format, maxSurge.Format, maxUnavailable.Format)
+	}
+	for _, fallback := range normalized.fallbacks {
+		switch fallback.Path {
+		case "$.spec.strategy.maxSurge", "$.spec.strategy.maxUnavailable", "$.spec.ports.items.targetPort", "$.spec.template.spec.containers.items.lifecycle.httpGet.port", "$.spec.template.spec.containers.items.readinessProbe.httpGet.port", "$.spec.template.spec.containers.items.env.items.valueFrom.resourceFieldRef.divisor", "$.spec.strategy":
+			t.Fatalf("supported scalar or annotated allOf field used YAML fallback: %+v", fallback)
+		case "$.spec.strategy.trueUnion":
+			continue
+		}
+	}
+	foundUnionFallback := false
+	for _, fallback := range normalized.fallbacks {
+		if fallback.Path == "$.spec.strategy.trueUnion" {
+			foundUnionFallback = true
+		}
+	}
+	if !foundUnionFallback {
+		t.Fatalf("genuine multi-branch union did not remain a YAML fallback: %+v", normalized.fallbacks)
+	}
+}
+
+// TestNormalizeOpenAPISchemaSupportsExactScalarAnyOfUnions verifies only the supported primitive anyOf pairs enter the form model.
+func TestNormalizeOpenAPISchemaSupportsExactScalarAnyOfUnions(t *testing.T) {
+	normalized, err := normalizeOpenAPISchema(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"spec": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"port": map[string]interface{}{
+						"anyOf":  []interface{}{map[string]interface{}{"type": "integer"}, map[string]interface{}{"type": "string"}},
+						"format": "int-or-string",
+					},
+					"quantity": map[string]interface{}{
+						"anyOf":  []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "number"}},
+						"format": "quantity",
+					},
+					"objectOrArray": map[string]interface{}{
+						"anyOf": []interface{}{map[string]interface{}{"type": "object"}, map[string]interface{}{"type": "array"}},
+					},
+					"multiBranch": map[string]interface{}{
+						"anyOf": []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "integer"}, map[string]interface{}{"type": "number"}},
+					},
+				},
+			},
+		},
+	}, nil, "#/components/schemas/")
+	if err != nil || normalized.field == nil {
+		t.Fatalf("scalar anyOf normalization failed: normalized=%+v err=%v", normalized, err)
+	}
+	spec := schemaFieldProperty(normalized.field, "spec")
+	port := schemaFieldProperty(spec, "port")
+	quantity := schemaFieldProperty(spec, "quantity")
+	if port == nil || port.Type != "string" || len(port.ScalarTypes) != 2 || port.ScalarTypes[0] != "string" || port.ScalarTypes[1] != "integer" || port.Format != "int-or-string" {
+		t.Fatalf("string/integer anyOf was not normalized safely: %+v", port)
+	}
+	if quantity == nil || quantity.Type != "string" || len(quantity.ScalarTypes) != 2 || quantity.ScalarTypes[0] != "string" || quantity.ScalarTypes[1] != "number" || quantity.Format != "quantity" {
+		t.Fatalf("string/number anyOf was not normalized safely: %+v", quantity)
+	}
+	if schemaFieldProperty(spec, "objectOrArray") != nil || schemaFieldProperty(spec, "multiBranch") != nil {
+		t.Fatalf("unsupported anyOf branches were guessed into the form: %+v", spec)
+	}
+	fallbackPaths := map[string]bool{}
+	for _, fallback := range normalized.fallbacks {
+		fallbackPaths[fallback.Path] = true
+	}
+	if fallbackPaths["$.spec.port"] || fallbackPaths["$.spec.quantity"] || !fallbackPaths["$.spec.objectOrArray"] || !fallbackPaths["$.spec.multiBranch"] {
+		t.Fatalf("scalar anyOf fallback coverage was incorrect: %+v", normalized.fallbacks)
+	}
+}
+
+// TestNormalizeOpenAPISchemaResolvesBareDefinitionReferences verifies both OpenAPI reference prefixes resolve extracted definition names.
+func TestNormalizeOpenAPISchemaResolvesBareDefinitionReferences(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		prefix string
+	}{
+		{name: "v3", prefix: "#/components/schemas/"},
+		{name: "v2", prefix: "#/definitions/"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			normalized, err := normalizeOpenAPISchema(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"spec": map[string]interface{}{"allOf": []interface{}{map[string]interface{}{"$ref": test.prefix + "BareSpec"}}},
+				},
+			}, map[string]map[string]interface{}{
+				"BareSpec": {"type": "object", "properties": map[string]interface{}{"mode": map[string]interface{}{"type": "string"}}},
+			}, test.prefix)
+			if err != nil || normalized.field == nil || schemaFieldProperty(schemaFieldProperty(normalized.field, "spec"), "mode") == nil {
+				t.Fatalf("bare %s definition reference did not resolve: normalized=%+v err=%v", test.name, normalized, err)
+			}
+		})
+	}
+}
+
+// TestNormalizeOpenAPISchemaLeavesSchemaUnionsAsYAMLFallback verifies multi-branch allOf and oneOf are never guessed into form controls.
+func TestNormalizeOpenAPISchemaLeavesSchemaUnionsAsYAMLFallback(t *testing.T) {
+	normalized, err := normalizeOpenAPISchema(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"spec": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"mode":   map[string]interface{}{"type": "string"},
+					"union":  map[string]interface{}{"allOf": []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "integer"}}},
+					"choice": map[string]interface{}{"oneOf": []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "integer"}, map[string]interface{}{"type": "boolean"}}},
+				},
+			},
+		},
+	}, nil, "#/components/schemas/")
+	if err != nil || normalized.field == nil {
+		t.Fatalf("union normalization failed unexpectedly: normalized=%+v err=%v", normalized, err)
+	}
+	spec := schemaFieldProperty(normalized.field, "spec")
+	if spec == nil || schemaFieldProperty(spec, "mode") == nil || schemaFieldProperty(spec, "union") != nil || schemaFieldProperty(spec, "choice") != nil {
+		t.Fatalf("union branches were guessed into the form: field=%+v", spec)
+	}
+	fallbackPaths := map[string]bool{}
+	for _, fallback := range normalized.fallbacks {
+		fallbackPaths[fallback.Path] = true
+	}
+	if !fallbackPaths["$.spec.union"] || !fallbackPaths["$.spec.choice"] {
+		t.Fatalf("union fields did not remain explicit YAML fallbacks: %+v", normalized.fallbacks)
+	}
+}
+
 // TestLoadResourceSchemaFallsBackToOpenAPIV2 verifies the compatibility document is used when v3 is unavailable.
 func TestLoadResourceSchemaFallsBackToOpenAPIV2(t *testing.T) {
 	v2Schema := &openapi_v2.Schema{
@@ -174,9 +512,12 @@ func TestLoadResourceSchemaFallsBackToOpenAPIV2(t *testing.T) {
 		Properties: &openapi_v2.Properties{AdditionalProperties: []*openapi_v2.NamedSchema{{
 			Name: "spec",
 			Value: &openapi_v2.Schema{
-				Type:       &openapi_v2.TypeItem{Value: []string{"object"}},
-				Required:   []string{"mode"},
-				Properties: &openapi_v2.Properties{AdditionalProperties: []*openapi_v2.NamedSchema{{Name: "mode", Value: &openapi_v2.Schema{Type: &openapi_v2.TypeItem{Value: []string{"string"}}, Default: &openapi_v2.Any{Yaml: "active"}, Description: "Compatibility mode."}}}},
+				Type:     &openapi_v2.TypeItem{Value: []string{"object"}},
+				Required: []string{"mode"},
+				Properties: &openapi_v2.Properties{AdditionalProperties: []*openapi_v2.NamedSchema{
+					{Name: "mode", Value: &openapi_v2.Schema{Type: &openapi_v2.TypeItem{Value: []string{"string"}}, Default: &openapi_v2.Any{Yaml: "active"}, Description: "Compatibility mode."}},
+					{Name: "targetPort", Value: &openapi_v2.Schema{Type: &openapi_v2.TypeItem{Value: []string{"string"}}, Format: "int-or-string"}},
+				}},
 			},
 		}}},
 	}
@@ -185,7 +526,8 @@ func TestLoadResourceSchemaFallsBackToOpenAPIV2(t *testing.T) {
 	if err != nil || result.State != resourceSchemaStateAvailable || result.Source != resourceSchemaSourceOpenAPIV2 || result.Schema == nil {
 		t.Fatalf("OpenAPI v2 fallback failed: result=%+v err=%v", result, err)
 	}
-	if result.Schema.Description != "A compatibility schema." || schemaFieldProperty(schemaFieldProperty(result.Schema, "spec"), "mode").Default != "active" {
+	targetPort := schemaFieldProperty(schemaFieldProperty(result.Schema, "spec"), "targetPort")
+	if result.Schema.Description != "A compatibility schema." || schemaFieldProperty(schemaFieldProperty(result.Schema, "spec"), "mode").Default != "active" || targetPort == nil || targetPort.Type != "string" || len(targetPort.ScalarTypes) != 2 || targetPort.ScalarTypes[0] != "string" || targetPort.ScalarTypes[1] != "integer" || targetPort.Format != "int-or-string" {
 		t.Fatalf("v2 descriptions/defaults were not preserved: %+v", result.Schema)
 	}
 }
@@ -278,6 +620,67 @@ func TestLoadResourceSchemaUsesYAMLFallbackForUnsupportedFields(t *testing.T) {
 	result, err := loadResourceSchema(context.Background(), fake.NewSimpleDynamicClient(runtime.NewScheme()), "example", "v1", "widgets", discovery)
 	if err != nil || result.State != resourceSchemaStateAvailable || result.Schema == nil || len(result.Fallbacks) != 1 || result.Fallbacks[0].Path != "$.spec.value" || schemaFieldProperty(schemaFieldProperty(result.Schema, "spec"), "mode") == nil || schemaFieldProperty(schemaFieldProperty(result.Schema, "spec"), "value") != nil {
 		t.Fatalf("unsupported field did not remain a YAML fallback: result=%+v err=%v", result, err)
+	}
+}
+
+// TestLoadResourceSchemaNormalizesPreservedUnknownFields verifies preserved CRD data becomes a bounded string map without weakening status locks.
+func TestLoadResourceSchemaNormalizesPreservedUnknownFields(t *testing.T) {
+	crd := testCRD(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"spec": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"config": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"mode": map[string]interface{}{"type": "string"},
+						},
+						"additionalProperties": map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{"nested": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}}},
+						},
+						"x-kubernetes-preserve-unknown-fields": true,
+					},
+				},
+			},
+			"status": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"inputs": map[string]interface{}{
+						"type": "array",
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"transportOpts": map[string]interface{}{
+									"x-kubernetes-preserve-unknown-fields": true,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	client := fake.NewSimpleDynamicClient(runtime.NewScheme(), crd)
+	result, err := loadResourceSchema(context.Background(), client, "widgets.example.com", "v1", "widgets")
+	if err != nil || result.State != resourceSchemaStateAvailable || result.Schema == nil {
+		t.Fatalf("preserved-unknown schema did not remain available: result=%+v err=%v", result, err)
+	}
+	if len(result.Fallbacks) != 0 || result.Message != "" {
+		t.Fatalf("preserved-unknown fields unexpectedly used YAML fallback: message=%q fallbacks=%+v", result.Message, result.Fallbacks)
+	}
+	spec := schemaFieldProperty(result.Schema, "spec")
+	config := schemaFieldProperty(spec, "config")
+	mode := schemaFieldProperty(config, "mode")
+	if config == nil || config.Type != "object" || mode == nil || mode.Type != "string" || config.AdditionalProperties == nil || config.AdditionalProperties.Type != "string" || config.AdditionalProperties.Properties != nil || config.AdditionalProperties.Items != nil {
+		t.Fatalf("preserved-unknown field was not normalized to a string map: config=%+v mode=%+v", config, mode)
+	}
+	status := schemaFieldProperty(result.Schema, "status")
+	inputs := schemaFieldProperty(status, "inputs")
+	transportOpts := schemaFieldProperty(inputs.Items, "transportOpts")
+	if status == nil || !status.ReadOnly || inputs == nil || !inputs.ReadOnly || inputs.Items == nil || !inputs.Items.ReadOnly || transportOpts == nil || transportOpts.Type != "object" || !transportOpts.ReadOnly || transportOpts.AdditionalProperties == nil || transportOpts.AdditionalProperties.Type != "string" || !transportOpts.AdditionalProperties.ReadOnly {
+		t.Fatalf("status safety was not preserved around the normalized map: status=%+v inputs=%+v transportOpts=%+v", status, inputs, transportOpts)
 	}
 }
 
