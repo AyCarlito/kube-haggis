@@ -64,6 +64,28 @@ export function catalogEventResourcePath(definitions: ResourceDefinition[], name
 	return coreEvents ? catalogResourcePath(coreEvents, name) : catalogResourcePathForSlug('events', definitions, name)
 }
 
+/** Determines whether a catalog definition matches every term in a local search query. */
+export function resourceCatalogMatchesFilter(definition: ResourceDefinition, query: string): boolean {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (!terms.length) return true
+  const group = definition.group || 'core'
+  const searchableText = [
+    group,
+    `${group}/${definition.version}`,
+    definition.version,
+    definition.resource,
+    definition.kind,
+    ...(definition.shortNames ?? []),
+    ...(definition.categories ?? []),
+  ].join(' ').toLowerCase()
+  return terms.every((term) => searchableText.includes(term))
+}
+
+/** Filters already loaded catalog definitions without performing a discovery request. */
+export function filterResourceCatalog(definitions: ResourceDefinition[], query: string): ResourceDefinition[] {
+  return definitions.filter((definition) => resourceCatalogMatchesFilter(definition, query))
+}
+
 /** Groups catalog rows by API group and version in deterministic display order. */
 export function groupResourceCatalog(definitions: ResourceDefinition[]): CatalogGroup[] {
   const groups = new Map<string, Map<string, ResourceDefinition[]>>()

@@ -81,6 +81,7 @@ import {
   catalogEventResourcePath,
   catalogResourcePath,
   catalogResourcePathForSlug,
+  filterResourceCatalog,
   groupResourceCatalog,
   isAmbiguousCatalogRoute,
   parseResourceRoute,
@@ -1014,17 +1015,43 @@ function DiscoveryNotice({ catalog, loading, error, onRetry }: { catalog: Resour
 
 /** Renders the complete grouped API resource catalog without truncating large CRD sets. */
 function ResourceCatalogPage({ catalog, loading, error, onRetry, onOpen }: { catalog: ResourceCatalogResponse | null; loading: boolean; error: string; onRetry: () => void; onOpen: (definition: ResourceDefinition) => void }) {
+  const [filter, setFilter] = useState('')
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
+
   if (loading && !catalog) return <LoadingState label="Reading the Kubernetes API catalog" />
   if (error && !catalog) return <CatalogState title="Resource catalog unavailable" detail={error} onRetry={onRetry} />
   if (!catalog) return <CatalogState title="No API catalog loaded" detail="Choose a cluster context to read its discoverable resources." onRetry={onRetry} />
-  const groups = groupResourceCatalog(catalog.items)
+  const filteredDefinitions = filterResourceCatalog(catalog.items, filter)
+  const groups = groupResourceCatalog(filteredDefinitions)
+  const filterActive = filter.trim().length > 0
+
+  /** Toggles one API group's local expanded state without persisting it. */
+  function toggleGroup(group: string) {
+    setCollapsedGroups((current) => ({ ...current, [group]: current[group] === false }))
+  }
+
   return <div className="catalog-page">
     <section className="catalog-intro">
       <div><div className="eyebrow"><span className="eyebrow-mark" /> Kubernetes API / discovery</div><h1>Resource catalog</h1><p className="intro-copy">Every discovered top-level resource, served version, namespace scope, and subresource capability in this cluster. Short links are only retained when their resource name is unambiguous.</p></div>
       <div className="catalog-stamp"><span className="stamp-label">Catalog coverage</span><strong>{catalog.items.length}</strong><code>{catalog.state === 'available' ? 'all discovery sources online' : `${catalog.issues?.length ?? 0} source issues`}</code></div>
     </section>
     {catalog.issues?.length ? <div className="catalog-issues">{catalog.issues.map((issue, index) => <div className={`catalog-issue catalog-issue-${issue.state}`} key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={14} /><div><strong>{issue.group ? `${issue.group}/${issue.version}` : issue.version || 'API discovery'}</strong><span>{issue.message}</span></div><button type="button" className="text-button" onClick={onRetry}>Retry</button></div>)}</div> : null}
-    {!groups.length ? <div className="catalog-empty"><Box size={22} /><strong>No top-level resources were discovered</strong><span>Retry discovery when the Kubernetes API is reachable.</span><button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={14} /> Refresh catalog</button></div> : <div className="catalog-groups">{groups.map(({ group, versions }) => <section className="catalog-group" key={group}><div className="catalog-group-heading"><span className="panel-eyebrow">API group</span><h2>{group || 'Core'}</h2><code>{versions.reduce((total, version) => total + version.definitions.length, 0)} resources</code></div>{versions.map(({ version, definitions }) => <div className="catalog-version" key={`${group}/${version}`}><div className="catalog-version-heading"><strong>{version}</strong><span>{definitions.length} top-level resource{definitions.length === 1 ? '' : 's'}</span></div><div className="catalog-table"><div className="catalog-table-heading"><span>Resource</span><span>Kind</span><span>Scope</span><span>Discovery</span><span>Capabilities</span></div>{definitions.map((definition) => <CatalogResourceRow key={`${definition.group}/${definition.version}/${definition.resource}`} definition={definition} onOpen={onOpen} />)}</div></div>)}</section>)}</div>}
+    <div className="catalog-filter-bar">
+      <label className="catalog-filter-field" htmlFor="catalog-resource-filter">
+        <Search size={14} aria-hidden="true" />
+        <span className="sr-only">Filter API resource catalog</span>
+        <input id="catalog-resource-filter" type="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Search group, version, resource, kind..." />
+      </label>
+      {filterActive ? <button type="button" className="catalog-clear-filter" onClick={() => setFilter('')}><X size={13} /> Clear filter</button> : null}
+      <span className="catalog-filter-count" role="status" aria-live="polite"><strong>{filteredDefinitions.length}</strong>{filterActive ? ` of ${catalog.items.length} resources match` : ` resource${catalog.items.length === 1 ? '' : 's'}`}<small>{groups.length} API group{groups.length === 1 ? '' : 's'} shown</small></span>
+    </div>
+    {!groups.length ? <div className="catalog-empty catalog-filter-empty" role={filterActive ? 'status' : undefined}>{filterActive ? <Search size={22} /> : <Box size={22} />}<strong>{filterActive ? `No resources match “${filter}”` : 'No top-level resources were discovered'}</strong><span>{filterActive ? 'Try a group, version, resource name, kind, alias, or category.' : 'Retry discovery when the Kubernetes API is reachable.'}</span>{filterActive ? <button type="button" className="secondary-button" onClick={() => setFilter('')}><X size={14} /> Clear filter</button> : <button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={14} /> Refresh catalog</button>}</div> : <div className="catalog-groups" id="catalog-groups">{groups.map(({ group, versions }, groupIndex) => {
+      const groupLabel = group || 'Core'
+      const expanded = filterActive || collapsedGroups[group] !== false
+      const headingID = `catalog-group-heading-${groupIndex}`
+      const contentID = `catalog-group-content-${groupIndex}`
+      return <section className="catalog-group" key={group} aria-labelledby={headingID}><div className="catalog-group-heading"><span className="panel-eyebrow">API group</span><h2 id={headingID}>{groupLabel}</h2><code>{versions.reduce((total, version) => total + version.definitions.length, 0)} resources</code><button type="button" className="catalog-group-toggle" aria-expanded={expanded} aria-controls={contentID} aria-label={filterActive ? `${groupLabel} API group is expanded while filtering` : `${expanded ? 'Collapse' : 'Expand'} ${groupLabel} API group`} disabled={filterActive} onClick={() => toggleGroup(group)}><ChevronDown size={16} aria-hidden="true" /></button></div><div id={contentID} hidden={!expanded}>{versions.map(({ version, definitions }) => <div className="catalog-version" key={`${group}/${version}`}><div className="catalog-version-heading"><strong>{version}</strong><span>{definitions.length} top-level resource{definitions.length === 1 ? '' : 's'}</span></div><div className="catalog-table"><div className="catalog-table-heading"><span>Resource</span><span>Kind</span><span>Scope</span><span>Discovery</span><span>Capabilities</span></div>{definitions.map((definition) => <CatalogResourceRow key={`${definition.group}/${definition.version}/${definition.resource}`} definition={definition} onOpen={onOpen} />)}</div></div>)}</div></section>
+    })}</div>}
   </div>
 }
 

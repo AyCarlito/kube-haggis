@@ -3,9 +3,11 @@ import {
   catalogEventResourcePath,
   catalogResourcePath,
   catalogResourcePathForSlug,
+  filterResourceCatalog,
   groupResourceCatalog,
   isAmbiguousCatalogRoute,
   parseResourceRoute,
+  resourceCatalogMatchesFilter,
   resolveCatalogDefinition,
 } from './catalog'
 
@@ -18,7 +20,7 @@ function assertCatalog(condition: boolean, message: string): void {
 export function runCatalogModelTests(): void {
   const definitions: ResourceDefinition[] = [
     { group: '', version: 'v1', resource: 'pods', kind: 'Pod', namespaced: true, scope: 'Namespaced', verbs: ['get'], subresources: [{ name: 'log', verbs: ['get'] }] },
-    { group: 'example.com', version: 'v1', resource: 'widgets', kind: 'Widget', namespaced: true, scope: 'Namespaced', verbs: ['get'] },
+    { group: 'example.com', version: 'v1', resource: 'widgets', kind: 'Widget', namespaced: true, scope: 'Namespaced', verbs: ['get'], shortNames: ['wdg'], categories: ['all'] },
     { group: 'other.example.com', version: 'v1', resource: 'widgets', kind: 'OtherWidget', namespaced: false, scope: 'Cluster', verbs: ['get'] },
   ]
   const canonical = catalogResourcePath(definitions[1], 'blue widget')
@@ -42,6 +44,13 @@ export function runCatalogModelTests(): void {
   const groups = groupResourceCatalog(definitions)
   assertCatalog(groups.length === 3 && groups[0].group === '' && groups[1].group === 'example.com', 'catalog groups were not deterministic')
   assertCatalog(groups[0].versions[0].definitions[0].resource === 'pods', 'catalog group rows were not retained')
+  assertCatalog(resourceCatalogMatchesFilter(definitions[0], 'core pod'), 'core group and kind were not searchable together')
+  assertCatalog(resourceCatalogMatchesFilter(definitions[1], 'wdg all'), 'short names and categories were not searchable')
+  assertCatalog(!resourceCatalogMatchesFilter(definitions[1], 'daemonset'), 'unrelated catalog definition unexpectedly matched')
+  assertCatalog(filterResourceCatalog(definitions, 'v1 pods').length === 1, 'catalog version and resource name were not searchable')
+  const filtered = filterResourceCatalog(definitions, 'example widget wdg')
+  assertCatalog(filtered.length === 1 && filtered[0] === definitions[1], 'catalog filtering did not retain only matching definitions')
+  assertCatalog(groupResourceCatalog(filtered).length === 1 && groupResourceCatalog(filtered)[0].group === 'example.com', 'filtered catalog groups were not reduced to matching groups')
 }
 
 runCatalogModelTests()
