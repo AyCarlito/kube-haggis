@@ -58,6 +58,7 @@ import {
   fetchResourceSchema,
   fetchResourceEvents,
   fetchRelated,
+  fetchRelatedReverse,
   fetchResources,
   downloadPodFile,
   launchEphemeralContainer,
@@ -90,8 +91,8 @@ import type {
   ResourceSchemaResponse,
   ResourceSummary,
   RelatedAggregateState,
-  RelatedResource,
   RelatedResourcesResponse,
+  RelatedResource,
   RouteState,
   TerminalMessage,
   MetricsOverview,
@@ -2083,10 +2084,20 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
 /** Renders discovery-backed relationships and explicit read limitations for a resource. */
 function RelatedResourcesPanel({ context, definition, namespace, name, isNew, onOpenResource }: { context: string; definition: ResourceDefinition; namespace: string; name: string; isNew: boolean; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
   const [response, setResponse] = useState<RelatedResourcesResponse | null>(null)
+  const [reverseResponse, setReverseResponse] = useState<RelatedResourcesResponse | null>(null)
   const [loading, setLoading] = useState(!isNew)
+  const [reverseLoading, setReverseLoading] = useState(false)
   const [error, setError] = useState('')
+  const [reverseError, setReverseError] = useState('')
+  const reverseRequestID = useRef(0)
 
   useEffect(() => {
+    setResponse(null)
+    setReverseResponse(null)
+    setReverseLoading(false)
+    setError('')
+    setReverseError('')
+    reverseRequestID.current += 1
     if (isNew) {
       setLoading(false)
       return
@@ -2103,24 +2114,96 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
       .finally(() => active && setLoading(false))
     return () => {
       active = false
+      reverseRequestID.current += 1
     }
   }, [context, definition, namespace, name, isNew])
+
+  /** Loads broad reverse-owner relationships without delaying the direct relationship response. */
+  async function loadReverseRelationships() {
+    const requestID = reverseRequestID.current + 1
+    reverseRequestID.current = requestID
+    setReverseLoading(true)
+    setReverseError('')
+    try {
+      const data = await fetchRelatedReverse(context, definition, namespace, name)
+      if (requestID !== reverseRequestID.current) return
+      setReverseResponse(data)
+    } catch (loadError) {
+      if (requestID === reverseRequestID.current) setReverseError((loadError as Error).message)
+    } finally {
+      if (requestID === reverseRequestID.current) setReverseLoading(false)
+    }
+  }
 
   if (isNew) return <QuietState icon={<Network size={22} />} title="Save before reading relationships" detail="A new resource has no Kubernetes identity or native relationships until it is created." />
   if (loading && !response) return <div className="relationship-panel"><div className="panel relationship-summary-panel"><div className="relationship-loading"><LoaderCircle size={17} className="spin" /> Reading native relationships</div></div></div>
   if (error && !response) return <div className="relationship-panel"><div className="panel relationship-summary-panel"><PanelHeading eyebrow="Relationships" title="Related resources" action="Read failed" tone="warning" /><div className="inline-error"><AlertTriangle size={15} />{error}</div></div></div>
 
-  const items = response?.items ?? []
-  const notices = response?.notices ?? []
+  const displayedResponse = response && reverseResponse ? mergeRelatedResponses(response, reverseResponse) : response
+  const items = displayedResponse?.items ?? []
+  const notices = displayedResponse?.notices ?? []
+  const reverseDeferred = Boolean(response?.notices?.some((notice) => notice.deferred)) && !reverseResponse
   return <div className="relationship-panel">
     <div className="panel relationship-summary-panel">
-      <PanelHeading eyebrow="Relationships" title="Related resources" action={relatedAggregateLabel(response?.state || 'empty', items.length)} tone={relatedAggregateTone(response?.state || 'empty')} />
+      <PanelHeading eyebrow="Relationships" title="Related resources" action={relatedAggregateLabel(displayedResponse?.state || 'empty', items.length)} tone={relatedAggregateTone(displayedResponse?.state || 'empty')} />
       <p className="relationship-copy">Links are derived from Kubernetes owner metadata, native selectors, binding fields, and explicit PodSpec references. Only sanitized resource coordinates are returned; Secret values are never read into this view.</p>
       {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
+      {reverseDeferred && <button type="button" className="secondary-button" onClick={() => void loadReverseRelationships()} disabled={reverseLoading}>{reverseLoading ? <><LoaderCircle size={14} className="spin" /> Scanning reverse owners</> : <><Network size={14} /> Load owned descendants</>}</button>}
+      {reverseError && <div className="inline-error"><AlertTriangle size={15} />{reverseError}</div>}
+      {displayedResponse?.diagnostics && <div className="panel-note"><Activity size={13} /> {displayedResponse.diagnostics.queryCount}/{displayedResponse.diagnostics.queryBudget} relationship reads · {displayedResponse.diagnostics.durationMilliseconds} ms · {displayedResponse.diagnostics.concurrentLimit} concurrent max</div>}
     </div>
     {notices.length ? <div className="relationship-notices">{notices.map((notice, index) => <RelatedNotice key={`${notice.type}-${notice.source}-${index}`} notice={notice} />)}</div> : null}
-    {items.length ? <div className="relationship-list">{items.map((item, index) => <RelatedResourceRow key={`${item.type}-${item.source}-${item.namespace || ''}-${item.name || ''}-${item.uid || index}`} item={item} onOpenResource={onOpenResource} />)}</div> : notices.length ? <div className="relationship-limited"><AlertTriangle size={16} /><span>No resolved links are visible. The source states above explain what Kubernetes allowed this identity to read.</span></div> : <QuietState icon={<Network size={22} />} title="No related resources" detail={response?.message || 'No safe native relationship was found for this object.'} />}
+    {items.length ? <div className="relationship-list">{items.map((item, index) => <RelatedResourceRow key={`${item.type}-${item.source}-${item.namespace || ''}-${item.name || ''}-${item.uid || index}`} item={item} onOpenResource={onOpenResource} />)}</div> : notices.length ? <div className="relationship-limited"><AlertTriangle size={16} /><span>No resolved links are visible. The source states above explain what Kubernetes allowed this identity to read.</span></div> : <QuietState icon={<Network size={22} />} title="No related resources" detail={displayedResponse?.message || 'No safe native relationship was found for this object.'} />}
   </div>
+}
+
+/** Merges direct and deferred relationship responses without retaining the deferred placeholder. */
+function mergeRelatedResponses(initial: RelatedResourcesResponse, secondary: RelatedResourcesResponse): RelatedResourcesResponse {
+  const items = [...initial.items]
+  const itemKeys = new Set(items.map((item) => [item.type, item.source, item.apiVersion || '', item.kind || '', item.namespace || '', item.name || '', item.uid || ''].join('\u0000')))
+  secondary.items.forEach((item) => {
+    const key = [item.type, item.source, item.apiVersion || '', item.kind || '', item.namespace || '', item.name || '', item.uid || ''].join('\u0000')
+    if (itemKeys.has(key)) return
+    itemKeys.add(key)
+    items.push(item)
+  })
+
+  const notices = [...(initial.notices || []).filter((notice) => !notice.deferred), ...(secondary.notices || [])]
+  const noticeKeys = new Set<string>()
+  const uniqueNotices = notices.filter((notice) => {
+    const key = [notice.type, notice.source, notice.state, notice.message].join('\u0000')
+    if (noticeKeys.has(key)) return false
+    noticeKeys.add(key)
+    return true
+  })
+  const truncated = Boolean(initial.truncated || secondary.truncated)
+  let state = initial.state
+  if (truncated) {
+    state = 'partial'
+  } else if (secondary.state === 'permission-denied' && !items.length) {
+    state = 'permission-denied'
+  } else if (secondary.state !== 'error' && (secondary.state === 'available' || secondary.state === 'empty') && uniqueNotices.length === 0) {
+    state = items.length ? 'available' : 'empty'
+  } else if (items.length || uniqueNotices.length) {
+    state = 'partial'
+  }
+
+  const message = state === 'available'
+    ? 'Relationships resolved from Kubernetes metadata and native spec fields.'
+    : state === 'empty'
+      ? 'No native relationships were found for this resource.'
+      : state === 'partial'
+        ? 'Some relationship sources were incomplete; each limitation is listed below.'
+        : initial.message || secondary.message
+
+  const diagnostics = initial.diagnostics && secondary.diagnostics ? {
+    queryCount: initial.diagnostics.queryCount + secondary.diagnostics.queryCount,
+    queryBudget: Math.max(initial.diagnostics.queryBudget, secondary.diagnostics.queryBudget),
+    durationMilliseconds: initial.diagnostics.durationMilliseconds + secondary.diagnostics.durationMilliseconds,
+    deadlineMilliseconds: Math.max(initial.diagnostics.deadlineMilliseconds, secondary.diagnostics.deadlineMilliseconds),
+    concurrentLimit: Math.max(initial.diagnostics.concurrentLimit, secondary.diagnostics.concurrentLimit),
+  } : secondary.diagnostics || initial.diagnostics
+  return { ...initial, state, message, items, notices: uniqueNotices, truncated, diagnostics }
 }
 
 /** Describes one action option shown by a targeted workload form. */

@@ -170,6 +170,26 @@ export function fetchRelated(
   )
 }
 
+/** Loads the deferred broad reverse-owner relationship phase for one resource. */
+export function fetchRelatedReverse(
+  context: string,
+  definition: ResourceDefinition,
+  namespace: string,
+  name: string,
+): Promise<RelatedResourcesResponse> {
+  return fetchJson<RelatedResourcesResponse>(
+    apiUrl('/api/related/reverse', {
+      context,
+      group: definition.group,
+      version: definition.version,
+      resource: definition.resource,
+      namespace: definition.namespaced ? namespace : '',
+      name,
+      namespaced: String(definition.namespaced),
+    }),
+  )
+}
+
 /** Applies a YAML resource document through the generic backend mutation path. */
 export function applyResource(
   context: string,

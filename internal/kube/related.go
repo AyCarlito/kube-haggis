@@ -2,9 +2,12 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,11 +51,12 @@ const (
 
 // RelatedResourceList is the bounded, sanitized relationship response for one Kubernetes object.
 type RelatedResourceList struct {
-	State     string                      `json:"state"`
-	Message   string                      `json:"message,omitempty"`
-	Items     []RelatedResource           `json:"items"`
-	Notices   []RelatedRelationshipNotice `json:"notices,omitempty"`
-	Truncated bool                        `json:"truncated,omitempty"`
+	State       string                      `json:"state"`
+	Message     string                      `json:"message,omitempty"`
+	Items       []RelatedResource           `json:"items"`
+	Notices     []RelatedRelationshipNotice `json:"notices,omitempty"`
+	Truncated   bool                        `json:"truncated,omitempty"`
+	Diagnostics RelatedDiagnostics          `json:"diagnostics"`
 }
 
 // RelatedResource describes one resolved or explicitly unresolved relationship target.
@@ -73,16 +77,18 @@ type RelatedResource struct {
 
 // RelatedRelationshipNotice describes a relationship source that could not be fully read.
 type RelatedRelationshipNotice struct {
-	Type    string `json:"type"`
-	Source  string `json:"source"`
-	State   string `json:"state"`
-	Message string `json:"message"`
+	Type     string `json:"type"`
+	Source   string `json:"source"`
+	State    string `json:"state"`
+	Message  string `json:"message"`
+	Deferred bool   `json:"deferred,omitempty"`
 }
 
 // relatedCollector accumulates safe relationship results while preserving partial failures.
 type relatedCollector struct {
 	ctx               context.Context
 	client            dynamic.Interface
+	budget            *relatedCallBudget
 	definitions       []ResourceDefinition
 	object            *unstructured.Unstructured
 	currentDefinition ResourceDefinition
@@ -94,7 +100,15 @@ type relatedCollector struct {
 	notices           []RelatedRelationshipNotice
 	itemKeys          map[string]struct{}
 	noticeKeys        map[string]struct{}
+	targetMu          sync.Mutex
+	targetCache       map[string]relatedTargetResult
 	truncated         bool
+}
+
+// relatedTargetResult stores one memoized target lookup and its safe error.
+type relatedTargetResult struct {
+	object *unstructured.Unstructured
+	err    error
 }
 
 // discoverDefinitions converts preferred discovery output into generic resource definitions.
@@ -127,27 +141,61 @@ func discoverDefinitions(discoveryClient discovery.DiscoveryInterface) ([]Resour
 
 // RelatedResources returns read-only relationships for one discovered resource.
 func (s *Service) RelatedResources(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool) (RelatedResourceList, error) {
-	dynamicClient, discoveryClient, _, err := s.clients(contextName)
+	return s.relatedResources(ctx, contextName, group, version, resource, namespace, name, namespaced, true, false)
+}
+
+// RelatedReverseResources runs the deferred broad reverse-owner relationship operation.
+func (s *Service) RelatedReverseResources(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool) (RelatedResourceList, error) {
+	return s.relatedResources(ctx, contextName, group, version, resource, namespace, name, namespaced, false, true)
+}
+
+// relatedResources runs one direct or deferred relationship phase under safe request limits.
+func (s *Service) relatedResources(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced, includeDirect, includeReverse bool) (RelatedResourceList, error) {
+	started := time.Now()
+	requestContext, cancel := context.WithTimeout(ctx, relatedRequestDeadline)
+	defer cancel()
+
+	dynamicClient, discoveryClient, _, resolvedContext, revision, err := s.clientsWithRevision(contextName)
 	if err != nil {
 		return RelatedResourceList{}, err
 	}
-	definitions, discoveryErr := discoverDefinitions(discoveryClient)
+	definitions, discoveryErr := s.cachedDiscovery(requestContext, resolvedContext, revision, dynamicClient, discoveryClient)
 	resourceClient, err := resourceInterface(dynamicClient, schema.GroupVersionResource{Group: group, Version: version, Resource: resource}, namespace, namespaced, false)
 	if err != nil {
 		return RelatedResourceList{}, err
 	}
-	object, err := resourceClient.Get(ctx, name, metav1.GetOptions{})
+	budget := newRelatedCallBudget(requestContext)
+	var object *unstructured.Unstructured
+	err = budget.call(func() error {
+		var getErr error
+		object, getErr = resourceClient.Get(requestContext, name, metav1.GetOptions{})
+		return getErr
+	})
 	if err != nil {
-		return RelatedResourceList{}, err
+		result := relatedRequestFailure(err, budget, started, relatedRequestDeadline)
+		if discoveryErr != nil {
+			result.Notices = append(result.Notices, RelatedRelationshipNotice{Type: "discovery", Source: "API discovery", State: relatedNoticeState(discoveryErr), Message: "Some API resources could not be discovered; relationship coverage may be incomplete."})
+			result.State = relatedStatePartial
+		}
+		return result, nil
 	}
-	return collectRelatedResources(ctx, dynamicClient, definitions, discoveryErr, group, version, resource, namespace, namespaced, object), nil
+	result := collectRelatedResourcesWithBudget(requestContext, dynamicClient, definitions, discoveryErr, group, version, resource, namespace, namespaced, object, budget, includeDirect, includeReverse)
+	result.Diagnostics = relatedDiagnostics(budget, started, relatedRequestDeadline)
+	return result, nil
 }
 
 // collectRelatedResources aggregates native metadata and spec relationships using a dynamic client.
 func collectRelatedResources(ctx context.Context, client dynamic.Interface, definitions []ResourceDefinition, discoveryErr error, group, version, resource, namespace string, namespaced bool, object *unstructured.Unstructured) RelatedResourceList {
+	return collectRelatedResourcesWithBudget(ctx, client, definitions, discoveryErr, group, version, resource, namespace, namespaced, object, newRelatedCallBudget(ctx), true, true)
+}
+
+// collectRelatedResourcesWithBudget aggregates one relationship phase with explicit request controls.
+func collectRelatedResourcesWithBudget(ctx context.Context, client dynamic.Interface, definitions []ResourceDefinition, discoveryErr error, group, version, resource, namespace string, namespaced bool, object *unstructured.Unstructured, budget *relatedCallBudget, includeDirect, includeReverse bool) RelatedResourceList {
+	started := time.Now()
 	collector := &relatedCollector{
 		ctx:               ctx,
 		client:            client,
+		budget:            budget,
 		definitions:       append([]ResourceDefinition(nil), definitions...),
 		object:            object,
 		currentDefinition: relatedDefinition(definitions, group, version, resource),
@@ -159,6 +207,7 @@ func collectRelatedResources(ctx context.Context, client dynamic.Interface, defi
 		notices:           make([]RelatedRelationshipNotice, 0),
 		itemKeys:          make(map[string]struct{}),
 		noticeKeys:        make(map[string]struct{}),
+		targetCache:       make(map[string]relatedTargetResult),
 	}
 	if collector.currentDefinition.Kind == "" {
 		collector.currentDefinition.Kind = object.GetKind()
@@ -166,12 +215,21 @@ func collectRelatedResources(ctx context.Context, client dynamic.Interface, defi
 	if discoveryErr != nil {
 		collector.addNotice("discovery", "API discovery", relatedNoticeState(discoveryErr), "Some API resources could not be discovered; relationship coverage may be incomplete.")
 	}
-	collector.addOwnerRelationships()
-	collector.addOwnedDescendants()
-	collector.addSelectorRelationships()
-	collector.addStorageRelationships()
-	collector.addNativeReferences()
-	return collector.result()
+	if includeDirect {
+		collector.addOwnerRelationships()
+		collector.addSelectorRelationships()
+		collector.addStorageRelationships()
+		collector.addNativeReferences()
+	}
+	if includeReverse {
+		collector.addOwnedDescendants()
+	} else if includeDirect && object.GetUID() != "" {
+		collector.truncated = true
+		collector.addDeferredNotice(relatedTypeOwnedDescendant, relatedSourceOwnerReferences, relatedStatePartial, "Broad reverse-owner discovery was deferred until the secondary relationship operation is requested.")
+	}
+	result := collector.result()
+	result.Diagnostics = relatedDiagnostics(budget, started, 0)
+	return result
 }
 
 // definitionKey returns a stable sort and lookup key for a resource definition.
@@ -325,6 +383,8 @@ func (collector *relatedCollector) addOwnedDescendants() {
 		return
 	}
 	definitions := collector.scannableDefinitions()
+	scanDefinitions := make([]ResourceDefinition, 0, len(definitions))
+	scanNamespaces := make([]string, 0, len(definitions))
 	for _, definition := range definitions {
 		if definitionKey(definition) == definitionKey(collector.currentDefinition) || !definitionAllowsList(definition) {
 			continue
@@ -333,9 +393,30 @@ func (collector *relatedCollector) addOwnedDescendants() {
 		if !ok {
 			continue
 		}
-		items, err := collector.list(definition, namespace, metav1.ListOptions{Limit: relatedListLimit})
+		scanDefinitions = append(scanDefinitions, definition)
+		scanNamespaces = append(scanNamespaces, namespace)
+	}
+
+	results := make([]*unstructured.UnstructuredList, len(scanDefinitions))
+	errorsByDefinition := make([]error, len(scanDefinitions))
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(len(scanDefinitions))
+	for index := range scanDefinitions {
+		index := index
+		go func() {
+			defer waitGroup.Done()
+			results[index], errorsByDefinition[index] = collector.list(scanDefinitions[index], scanNamespaces[index], metav1.ListOptions{Limit: relatedListLimit})
+		}()
+	}
+	waitGroup.Wait()
+
+	for index, definition := range scanDefinitions {
+		items, err := results[index], errorsByDefinition[index]
 		if err != nil {
-			collector.addNotice(relatedTypeOwnedDescendant, relatedSourceOwnerReferences, relatedNoticeState(err), fmt.Sprintf("Could not scan %s for owned descendants.", definition.Kind))
+			collector.addRelationshipListNotice(relatedTypeOwnedDescendant, relatedSourceOwnerReferences, err, fmt.Sprintf("Could not scan %s for owned descendants.", definition.Kind))
+			continue
+		}
+		if items == nil {
 			continue
 		}
 		for index := range items.Items {
@@ -362,6 +443,20 @@ func (collector *relatedCollector) addOwnedDescendants() {
 		if items.GetContinue() != "" {
 			collector.markTruncated("Owned descendant results are capped by the Kubernetes list limit.")
 		}
+	}
+}
+
+// addRelationshipListNotice classifies bounded list failures without exposing backend error text.
+func (collector *relatedCollector) addRelationshipListNotice(relationshipType, source string, err error, fallback string) {
+	switch {
+	case errors.Is(err, errRelatedCallBudget):
+		collector.markTruncated("The relationship query reached its Kubernetes-call budget; remaining sources were not queried.")
+	case errors.Is(err, context.DeadlineExceeded):
+		collector.markTruncated("The relationship query deadline expired; remaining sources were not queried.")
+	case errors.Is(err, context.Canceled):
+		collector.markTruncated("The relationship query was canceled before all sources could be read.")
+	default:
+		collector.addNotice(relationshipType, source, relatedNoticeState(err), fallback)
 	}
 }
 
@@ -472,7 +567,7 @@ func (collector *relatedCollector) addPodsForSelector(relationshipType, source s
 	podDefinition, found := relationshipDefinition(collector.definitions, "", "v1", "pods")
 	items, err := collector.list(podDefinition, collector.object.GetNamespace(), metav1.ListOptions{Limit: relatedListLimit, LabelSelector: parsed.String()})
 	if err != nil {
-		collector.addNotice(relationshipType, source, relatedNoticeState(err), "Kubernetes denied or failed the matching Pod list.")
+		collector.addRelationshipListNotice(relationshipType, source, err, "Kubernetes denied or failed the matching Pod list.")
 		return
 	}
 	for index := range items.Items {
@@ -509,7 +604,7 @@ func (collector *relatedCollector) addPodServices() {
 	serviceDefinition, serviceFound := relationshipDefinition(collector.definitions, "", "v1", "services")
 	items, err := collector.list(serviceDefinition, collector.object.GetNamespace(), metav1.ListOptions{Limit: relatedListLimit})
 	if err != nil {
-		collector.addNotice(relatedTypeSelectedBy, relatedSourceSelector, relatedNoticeState(err), "Kubernetes denied or failed the matching Service list.")
+		collector.addRelationshipListNotice(relatedTypeSelectedBy, relatedSourceSelector, err, "Kubernetes denied or failed the matching Service list.")
 		return
 	}
 	for index := range items.Items {
@@ -860,16 +955,39 @@ func (collector *relatedCollector) targetNamespace(namespaced bool) string {
 
 // getTarget reads one target object without exposing its body to the relationship response.
 func (collector *relatedCollector) getTarget(definition ResourceDefinition, namespace, name string) (*unstructured.Unstructured, error) {
+	key := strings.Join([]string{definitionKey(definition), namespace, name}, "\x00")
+	collector.targetMu.Lock()
+	if result, found := collector.targetCache[key]; found {
+		collector.targetMu.Unlock()
+		return result.object, result.err
+	}
+	collector.targetMu.Unlock()
+
 	resourceClient, err := resourceInterface(collector.client, schema.GroupVersionResource{Group: definition.Group, Version: definition.Version, Resource: definition.Resource}, namespace, definition.Namespaced, false)
 	if err != nil {
 		return nil, err
 	}
-	return resourceClient.Get(collector.ctx, name, metav1.GetOptions{})
+	var object *unstructured.Unstructured
+	err = collector.budget.call(func() error {
+		var getErr error
+		object, getErr = resourceClient.Get(collector.ctx, name, metav1.GetOptions{})
+		return getErr
+	})
+	collector.targetMu.Lock()
+	collector.targetCache[key] = relatedTargetResult{object: object, err: err}
+	collector.targetMu.Unlock()
+	return object, err
 }
 
 // list lists one bounded namespaced or cluster-scoped relationship collection.
 func (collector *relatedCollector) list(definition ResourceDefinition, namespace string, options metav1.ListOptions) (*unstructured.UnstructuredList, error) {
-	return listResource(collector.ctx, collector.client, schema.GroupVersionResource{Group: definition.Group, Version: definition.Version, Resource: definition.Resource}, namespace, definition.Namespaced, options)
+	var items *unstructured.UnstructuredList
+	err := collector.budget.call(func() error {
+		var listErr error
+		items, listErr = listResource(collector.ctx, collector.client, schema.GroupVersionResource{Group: definition.Group, Version: definition.Version, Resource: definition.Resource}, namespace, definition.Namespaced, options)
+		return listErr
+	})
+	return items, err
 }
 
 // add appends one relationship target while enforcing a stable result cap and deduplicating exact rows.
@@ -888,6 +1006,16 @@ func (collector *relatedCollector) add(item RelatedResource) {
 
 // addNotice records one bounded relationship source failure without duplicating identical messages.
 func (collector *relatedCollector) addNotice(relationshipType, source, state, message string) {
+	collector.addNoticeWithDeferred(relationshipType, source, state, message, false)
+}
+
+// addDeferredNotice records a safe source that is intentionally available as a later operation.
+func (collector *relatedCollector) addDeferredNotice(relationshipType, source, state, message string) {
+	collector.addNoticeWithDeferred(relationshipType, source, state, message, true)
+}
+
+// addNoticeWithDeferred records one bounded relationship notice with its phase marker.
+func (collector *relatedCollector) addNoticeWithDeferred(relationshipType, source, state, message string, deferred bool) {
 	key := strings.Join([]string{relationshipType, source, state, message}, "\x00")
 	if _, found := collector.noticeKeys[key]; found {
 		return
@@ -897,7 +1025,7 @@ func (collector *relatedCollector) addNotice(relationshipType, source, state, me
 		return
 	}
 	collector.noticeKeys[key] = struct{}{}
-	collector.notices = append(collector.notices, RelatedRelationshipNotice{Type: relationshipType, Source: source, State: state, Message: message})
+	collector.notices = append(collector.notices, RelatedRelationshipNotice{Type: relationshipType, Source: source, State: state, Message: message, Deferred: deferred})
 }
 
 // markTruncated makes a bounded scan visible to callers through one explicit notice.
@@ -939,6 +1067,9 @@ func (collector *relatedCollector) result() RelatedResourceList {
 			unavailable = true
 		}
 	}
+	if collector.truncated {
+		nonResolved = true
+	}
 	state := relatedStateEmpty
 	message := "No native relationships were found for this resource."
 	switch {
@@ -964,17 +1095,72 @@ func (collector *relatedCollector) result() RelatedResourceList {
 	return RelatedResourceList{State: state, Message: message, Items: collector.items, Notices: collector.notices, Truncated: collector.truncated}
 }
 
+// relatedRequestFailure converts an essential read failure into a usable safe panel result.
+func relatedRequestFailure(err error, budget *relatedCallBudget, started time.Time, deadline time.Duration) RelatedResourceList {
+	state := relatedStateError
+	noticeState := relatedNoticeState(err)
+	message := "The current resource could not be read for relationship discovery."
+	noticeMessage := "Kubernetes could not read the current resource needed for relationship discovery."
+	truncated := false
+	switch {
+	case errors.Is(err, errRelatedCallBudget):
+		state = relatedStatePartial
+		noticeState = relatedStatePartial
+		message = "Relationship discovery stopped at the safe Kubernetes-call budget."
+		noticeMessage = "The relationship query reached its Kubernetes-call budget before the current resource could be read."
+		truncated = true
+	case errors.Is(err, context.DeadlineExceeded):
+		state = relatedStatePartial
+		noticeState = relatedStatePartial
+		message = "Relationship discovery reached its safe request deadline."
+		noticeMessage = "The relationship query deadline expired before the current resource could be read."
+		truncated = true
+	case errors.Is(err, context.Canceled):
+		state = relatedStatePartial
+		noticeState = relatedStatePartial
+		message = "Relationship discovery was canceled before all sources could be read."
+		noticeMessage = "The relationship query was canceled before the current resource could be read."
+		truncated = true
+	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
+		state = relatedStatePermissionDenied
+		noticeState = relatedItemPermissionDenied
+		noticeMessage = "Kubernetes RBAC denied access to the current resource needed for relationship discovery."
+	case apierrors.IsNotFound(err):
+		state = relatedStateUnavailable
+		noticeState = relatedItemUnresolved
+		noticeMessage = "The current resource no longer exists or is not visible in this context."
+	}
+	return RelatedResourceList{
+		State:       state,
+		Message:     message,
+		Items:       []RelatedResource{},
+		Notices:     []RelatedRelationshipNotice{{Type: "resource", Source: "current resource", State: noticeState, Message: noticeMessage}},
+		Truncated:   truncated,
+		Diagnostics: relatedDiagnostics(budget, started, deadline),
+	}
+}
+
 // relatedNoticeState maps Kubernetes access errors to safe relationship notice states.
 func relatedNoticeState(err error) string {
-	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+	switch {
+	case errors.Is(err, errRelatedCallBudget), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return relatedStatePartial
+	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
 		return relatedItemPermissionDenied
+	default:
+		return relatedItemError
 	}
-	return relatedItemError
 }
 
 // relatedItemErrorState maps a target GET error to an explicit relationship item state.
 func relatedItemErrorState(err error) (string, string) {
 	switch {
+	case errors.Is(err, errRelatedCallBudget):
+		return relatedStatePartial, "The relationship query reached its Kubernetes-call budget; this target lookup was skipped."
+	case errors.Is(err, context.DeadlineExceeded):
+		return relatedStatePartial, "The relationship query deadline expired before this target could be read."
+	case errors.Is(err, context.Canceled):
+		return relatedStatePartial, "The relationship query was canceled before this target could be read."
 	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
 		return relatedItemPermissionDenied, "Kubernetes RBAC denied access to this relationship target."
 	case apierrors.IsNotFound(err):

@@ -3,8 +3,11 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -140,11 +143,124 @@ func TestCollectRelatedResourcesDoesNotReturnSecretData(t *testing.T) {
 	}
 }
 
+// TestCollectRelatedResourcesDefersReverseOwnerDiscovery verifies direct links return before broad scans.
+func TestCollectRelatedResourcesDefersReverseOwnerDiscovery(t *testing.T) {
+	deployment := relatedObject("apps/v1", "Deployment", "api", "default", "deployment-uid", nil)
+	replicaSet := relatedObjectWithOwners("apps/v1", "ReplicaSet", "api-rs", "default", "replicaset-uid", nil, []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "api", UID: "deployment-uid"}})
+	client := newRelatedDynamicClient(deployment, replicaSet)
+
+	result := collectRelatedResourcesWithBudget(context.Background(), client, relatedDefinitions(), nil, "apps", "v1", "replicasets", "default", true, replicaSet, newRelatedCallBudget(context.Background()), true, false)
+	if result.State != relatedStatePartial || !result.Truncated {
+		t.Fatalf("direct relationship result did not expose deferred reverse discovery: %+v", result)
+	}
+	if !hasRelatedItem(result.Items, relatedTypeOwner, "api", relatedItemResolved) {
+		t.Fatalf("direct owner was not resolved before deferral: %+v", result.Items)
+	}
+	if hasRelatedItem(result.Items, relatedTypeOwnedDescendant, "api-rs", relatedItemResolved) || !hasDeferredNotice(result.Notices) {
+		t.Fatalf("reverse-owner phase was not deferred explicitly: %+v", result)
+	}
+	if result.Diagnostics.QueryCount != 1 {
+		t.Fatalf("unexpected direct-phase query count: %+v", result.Diagnostics)
+	}
+}
+
+// TestCollectRelatedResourcesEnforcesCallBudget verifies broad discovery never exceeds the deterministic call cap.
+func TestCollectRelatedResourcesEnforcesCallBudget(t *testing.T) {
+	definitions := syntheticRelatedDefinitions(64)
+	current := relatedObject("fixture.example/v1", "Fixture", "current", "default", "current-uid", nil)
+	client := newRelatedDynamicClientForDefinitions(definitions, current)
+
+	result := collectRelatedResourcesWithBudget(context.Background(), client, definitions, nil, "fixture.example", "v1", "resources-0", "default", true, current, newRelatedCallBudget(context.Background()), false, true)
+	if result.Diagnostics.QueryCount != relatedCallBudgetLimit {
+		t.Fatalf("relationship query exceeded or failed to use call budget: %+v", result.Diagnostics)
+	}
+	if !result.Truncated || !hasNoticeState(result.Notices, relatedStatePartial) {
+		t.Fatalf("call budget exhaustion was not explicit: %+v", result)
+	}
+	if listActionCount(client) > relatedCallBudgetLimit {
+		t.Fatalf("fake Kubernetes client observed too many list calls: %d", listActionCount(client))
+	}
+}
+
+// TestCollectRelatedResourcesMemoizesTargetLookups verifies repeated native references share one target GET.
+func TestCollectRelatedResourcesMemoizesTargetLookups(t *testing.T) {
+	pod := relatedObject("v1", "Pod", "api", "default", "pod-uid", map[string]interface{}{
+		"spec": map[string]interface{}{
+			"imagePullSecrets": []interface{}{map[string]interface{}{"name": "shared-secret"}},
+			"volumes":          []interface{}{map[string]interface{}{"secret": map[string]interface{}{"secretName": "shared-secret"}}},
+		},
+	})
+	secret := relatedObject("v1", "Secret", "shared-secret", "default", "secret-uid", nil)
+	client := newRelatedDynamicClient(pod, secret)
+
+	result := collectRelatedResourcesWithBudget(context.Background(), client, relatedDefinitions(), nil, "", "v1", "pods", "default", true, pod, newRelatedCallBudget(context.Background()), true, false)
+	if len(result.Items) != 2 || result.Diagnostics.QueryCount != 2 {
+		t.Fatalf("repeated target lookup was not memoized: result=%+v actions=%#v", result, client.Actions())
+	}
+	if getActionCount(client, "secrets", "shared-secret") != 1 {
+		t.Fatalf("expected one Secret GET, actions=%+v", client.Actions())
+	}
+}
+
+// TestRelatedCallBudgetCapsConcurrentOperations verifies the semaphore does not admit more concurrent calls than configured.
+func TestRelatedCallBudgetCapsConcurrentOperations(t *testing.T) {
+	budget := newRelatedCallBudget(context.Background())
+	started := make(chan struct{}, relatedConcurrencyLimit+1)
+	release := make(chan struct{})
+	var waitGroup sync.WaitGroup
+	for index := 0; index < relatedConcurrencyLimit+1; index++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			if err := budget.call(func() error {
+				started <- struct{}{}
+				<-release
+				return nil
+			}); err != nil {
+				t.Errorf("bounded operation failed: %v", err)
+			}
+		}()
+	}
+	for index := 0; index < relatedConcurrencyLimit; index++ {
+		<-started
+	}
+	select {
+	case <-started:
+		t.Fatal("more operations started than the concurrency limit")
+	default:
+	}
+	close(release)
+	waitGroup.Wait()
+	if budget.count() != relatedConcurrencyLimit+1 {
+		t.Fatalf("unexpected admitted operation count: %d", budget.count())
+	}
+}
+
+// BenchmarkDirectRelationshipsWith1000Definitions measures direct relationship work against a large discovery fixture.
+func BenchmarkDirectRelationshipsWith1000Definitions(b *testing.B) {
+	// The direct-relationship p95 target is 100ms on the local fake-cluster fixture.
+	const directRelationshipP95Target = 100 * time.Millisecond
+	definitions := syntheticRelatedDefinitions(1000)
+	owner := relatedObject("apps/v1", "Deployment", "api", "default", "deployment-uid", nil)
+	current := relatedObjectWithOwners("fixture.example/v1", "Fixture", "current", "default", "current-uid", nil, []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "api", UID: "deployment-uid"}})
+	client := newRelatedDynamicClientForDefinitions(definitions, current, owner)
+	b.ReportAllocs()
+	b.ReportMetric(float64(directRelationshipP95Target.Milliseconds()), "p95-target-ms")
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		result := collectRelatedResourcesWithBudget(context.Background(), client, definitions, nil, "fixture.example", "v1", "resources-0", "default", true, current, newRelatedCallBudget(context.Background()), true, false)
+		if result.State != relatedStatePartial || !hasRelatedItem(result.Items, relatedTypeOwner, "api", relatedItemResolved) {
+			b.Fatalf("direct relationship benchmark fixture failed: %+v", result)
+		}
+	}
+}
+
 // relatedDefinitions returns the native definitions exercised by relationship tests.
 func relatedDefinitions() []ResourceDefinition {
 	return []ResourceDefinition{
 		{Group: "", Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "services", Kind: "Service", Namespaced: true, Verbs: []string{"get", "list"}},
+		{Group: "", Version: "v1", Resource: "configmaps", Kind: "ConfigMap", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "secrets", Kind: "Secret", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "persistentvolumeclaims", Kind: "PersistentVolumeClaim", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "persistentvolumes", Kind: "PersistentVolume", Namespaced: false, Verbs: []string{"get", "list"}},
@@ -158,11 +274,32 @@ func relatedDefinitions() []ResourceDefinition {
 
 // newRelatedDynamicClient creates a dynamic fake with list kinds for native relationship resources.
 func newRelatedDynamicClient(objects ...runtime.Object) *fake.FakeDynamicClient {
+	return newRelatedDynamicClientForDefinitions(relatedDefinitions(), objects...)
+}
+
+// newRelatedDynamicClientForDefinitions creates a dynamic fake with caller-provided list kinds.
+func newRelatedDynamicClientForDefinitions(definitions []ResourceDefinition, objects ...runtime.Object) *fake.FakeDynamicClient {
 	listKinds := map[schema.GroupVersionResource]string{}
-	for _, definition := range relatedDefinitions() {
+	for _, definition := range definitions {
 		listKinds[schema.GroupVersionResource{Group: definition.Group, Version: definition.Version, Resource: definition.Resource}] = definition.Kind + "List"
 	}
 	return fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, objects...)
+}
+
+// syntheticRelatedDefinitions creates a deterministic large discovery fixture for budget and benchmark tests.
+func syntheticRelatedDefinitions(count int) []ResourceDefinition {
+	definitions := relatedDefinitions()
+	for index := 0; len(definitions) < count; index++ {
+		definitions = append(definitions, ResourceDefinition{
+			Group:      "fixture.example",
+			Version:    "v1",
+			Resource:   fmt.Sprintf("resources-%d", index),
+			Kind:       fmt.Sprintf("Fixture%d", index),
+			Namespaced: true,
+			Verbs:      []string{"get", "list"},
+		})
+	}
+	return definitions
 }
 
 // relatedObject creates an unstructured object with safe metadata and a supplied top-level shape.
@@ -232,4 +369,37 @@ func hasNoticeState(notices []RelatedRelationshipNotice, state string) bool {
 		}
 	}
 	return false
+}
+
+// hasDeferredNotice reports whether a response advertises its secondary relationship phase.
+func hasDeferredNotice(notices []RelatedRelationshipNotice) bool {
+	for _, notice := range notices {
+		if notice.Deferred {
+			return true
+		}
+	}
+	return false
+}
+
+// listActionCount counts Kubernetes list calls observed by a dynamic fake.
+func listActionCount(client *fake.FakeDynamicClient) int {
+	count := 0
+	for _, action := range client.Actions() {
+		if _, ok := action.(clienttesting.ListAction); ok {
+			count++
+		}
+	}
+	return count
+}
+
+// getActionCount counts target GET calls for one resource and name.
+func getActionCount(client *fake.FakeDynamicClient, resource, name string) int {
+	count := 0
+	for _, action := range client.Actions() {
+		getAction, ok := action.(clienttesting.GetAction)
+		if ok && getAction.GetResource().Resource == resource && getAction.GetName() == name {
+			count++
+		}
+	}
+	return count
 }

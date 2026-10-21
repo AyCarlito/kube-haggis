@@ -486,15 +486,26 @@ export interface RelatedRelationshipNotice {
   source: string
   state: RelatedItemState
   message: string
+  deferred?: boolean
 }
 
-/** Contains bounded related-resource targets, source notices, and aggregate state. */
+/** Contains safe relationship query counts and timing data. */
+export interface RelatedDiagnostics {
+  queryCount: number
+  queryBudget: number
+  durationMilliseconds: number
+  deadlineMilliseconds: number
+  concurrentLimit: number
+}
+
+/** Contains bounded related-resource targets, source notices, aggregate state, and diagnostics. */
 export interface RelatedResourcesResponse {
   state: RelatedAggregateState
   message?: string
   items: RelatedResource[]
   notices?: RelatedRelationshipNotice[]
   truncated?: boolean
+  diagnostics?: RelatedDiagnostics
 }
 
 /** Represents one browser message exchanged with a native Pod terminal. */

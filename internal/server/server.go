@@ -28,6 +28,7 @@ type Server struct {
 	audit          *audit.Store
 	overview       func(context.Context, string) (kube.ClusterOverview, error)
 	related        relatedLoader
+	relatedReverse relatedLoader
 	resourceSchema resourceSchemaLoader
 	resourceGet    resourceGetLoader
 	resourceApply  resourceApplyLoader
@@ -71,6 +72,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/resources", s.handleResources)
 	mux.HandleFunc("/api/resources/delete", s.handleBulkResourceDelete)
 	mux.HandleFunc("/api/related", s.handleRelated)
+	mux.HandleFunc("/api/related/reverse", s.handleRelatedReverse)
 	mux.HandleFunc("/api/watch", s.handleWatch)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/events/watch", s.handleEventWatch)
@@ -233,6 +235,30 @@ func (s *Server) handleRelated(writer http.ResponseWriter, request *http.Request
 	loadRelated := s.related
 	if loadRelated == nil {
 		loadRelated = s.kube.RelatedResources
+	}
+	relationships, err := loadRelated(
+		request.Context(),
+		query.Get("context"),
+		query.Get("group"),
+		query.Get("version"),
+		query.Get("resource"),
+		query.Get("namespace"),
+		query.Get("name"),
+		query.Get("namespaced") != "false",
+	)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, relationships)
+}
+
+// handleRelatedReverse returns the deferred broad reverse-owner relationship phase.
+func (s *Server) handleRelatedReverse(writer http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	loadRelated := s.relatedReverse
+	if loadRelated == nil {
+		loadRelated = s.kube.RelatedReverseResources
 	}
 	relationships, err := loadRelated(
 		request.Context(),

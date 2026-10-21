@@ -235,14 +235,16 @@ type configLoadResult struct {
 
 // Service owns kubeconfig loading and creates dynamic clients for contexts.
 type Service struct {
-	kubeconfigPath  string
-	mu              sync.Mutex
-	rules           *clientcmd.ClientConfigLoadingRules
-	config          *clientcmdapi.Config
-	fingerprint     configSourceFingerprint
-	loaded          bool
-	revision        uint64
-	lastReloadError string
+	kubeconfigPath   string
+	mu               sync.Mutex
+	rules            *clientcmd.ClientConfigLoadingRules
+	config           *clientcmdapi.Config
+	fingerprint      configSourceFingerprint
+	loaded           bool
+	revision         uint64
+	lastReloadError  string
+	discoveryCache   map[discoveryCacheKey]discoveryCacheEntry
+	discoveryFlights map[discoveryCacheKey]*discoveryFlight
 }
 
 const (
@@ -256,7 +258,11 @@ const (
 
 // NewService creates a Kubernetes service using standard kubeconfig rules.
 func NewService(kubeconfigPath string) *Service {
-	return &Service{kubeconfigPath: kubeconfigPath}
+	return &Service{
+		kubeconfigPath:   kubeconfigPath,
+		discoveryCache:   make(map[discoveryCacheKey]discoveryCacheEntry),
+		discoveryFlights: make(map[discoveryCacheKey]*discoveryFlight),
+	}
 }
 
 // Contexts returns all contexts and the kubeconfig current-context value.
@@ -277,12 +283,11 @@ func (s *Service) ReloadContexts() (ContextSnapshot, error) {
 
 // Discovery returns the preferred resource definitions advertised by a cluster.
 func (s *Service) Discovery(ctx context.Context, contextName string) ([]ResourceDefinition, error) {
-	dynamicClient, discoveryClient, _, err := s.clients(contextName)
+	dynamicClient, discoveryClient, _, resolvedContext, revision, err := s.clientsWithRevision(contextName)
 	if err != nil {
 		return nil, err
 	}
-	definitions, discoveryErr := discoverDefinitions(discoveryClient)
-	markCustomResourceDefinitions(ctx, dynamicClient, definitions)
+	definitions, discoveryErr := s.cachedDiscovery(ctx, resolvedContext, revision, dynamicClient, discoveryClient)
 	if discoveryErr != nil && len(definitions) == 0 {
 		return nil, discoveryErr
 	}
@@ -641,42 +646,51 @@ func (s *Service) loadConfig() (*clientcmdapi.Config, error) {
 
 // clients creates dynamic and discovery clients for one kubeconfig context.
 func (s *Service) clients(contextName string) (dynamic.Interface, discovery.DiscoveryInterface, *rest.Config, error) {
+	dynamicClient, discoveryClient, restConfig, _, _, err := s.clientsWithRevision(contextName)
+	return dynamicClient, discoveryClient, restConfig, err
+}
+
+// clientsWithRevision creates clients and returns the resolved context and config revision.
+func (s *Service) clientsWithRevision(contextName string) (dynamic.Interface, discovery.DiscoveryInterface, *rest.Config, string, uint64, error) {
 	s.mu.Lock()
 	config, _, err := s.ensureConfigLocked(false)
 	if err != nil {
 		s.mu.Unlock()
-		return nil, nil, nil, err
+		return nil, nil, nil, "", 0, err
 	}
 	if strings.TrimSpace(contextName) == "" {
 		contextName = config.CurrentContext
 	}
 	if contextName == "" {
 		s.mu.Unlock()
-		return nil, nil, nil, fmt.Errorf("kubeconfig has no current context")
+		return nil, nil, nil, "", 0, fmt.Errorf("kubeconfig has no current context")
 	}
 	if _, found := config.Contexts[contextName]; !found {
 		s.mu.Unlock()
-		return nil, nil, nil, fmt.Errorf("context %q was not found", contextName)
+		return nil, nil, nil, "", 0, fmt.Errorf("context %q was not found", contextName)
 	}
 	configCopy := *config
 	rules := s.rules
+	revision := s.revision
 	s.mu.Unlock()
 
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: contextName}
 	clientConfig := clientcmd.NewNonInteractiveClientConfig(configCopy, contextName, overrides, rules)
 	restConfig, err := clientConfig.ClientConfig()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build client config for %q: %w", contextName, err)
+		return nil, nil, nil, "", 0, fmt.Errorf("build client config for %q: %w", contextName, err)
 	}
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create dynamic client: %w", err)
+		return nil, nil, nil, "", 0, fmt.Errorf("create dynamic client: %w", err)
 	}
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	discoveryConfig := rest.CopyConfig(restConfig)
+	discoveryConfig.Timeout = discoveryCacheRequestTimeout
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(discoveryConfig)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create discovery client: %w", err)
+		return nil, nil, nil, "", 0, fmt.Errorf("create discovery client: %w", err)
 	}
-	return dynamicClient, discoveryClient, restConfig, nil
+	return dynamicClient, discoveryClient, restConfig, contextName, revision, nil
 }
 
 // ensureConfigLocked loads a new snapshot when source metadata changes or a reload is forced.
@@ -703,6 +717,7 @@ func (s *Service) ensureConfigLocked(force bool) (*clientcmdapi.Config, configLo
 	s.fingerprint = fingerprint
 	s.loaded = true
 	s.revision++
+	s.discoveryCache = make(map[discoveryCacheKey]discoveryCacheEntry)
 	s.lastReloadError = ""
 	return config, configLoadResult{Reloaded: wasLoaded || force}, nil
 }
