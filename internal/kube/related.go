@@ -42,12 +42,16 @@ const (
 	relatedTypeBoundClaim        = "bound-claim"
 	relatedTypeReference         = "reference"
 	relatedTypeIngressBackend    = "ingress-backend"
+	relatedTypeEndpointSlice     = "endpoint-slice"
+	relatedTypeEndpointPod       = "endpoint-pod"
 	relatedTypeInvolvedObject    = "involved-object"
 	relatedSourceOwnerReferences = "metadata.ownerReferences"
 	relatedSourceSelector        = "spec.selector"
 	relatedSourceVolumeName      = "spec.volumeName"
 	relatedSourceClaimRef        = "spec.claimRef"
 	relatedSourceIngressBackend  = "spec.backend.service.name"
+	relatedSourceEndpointSlice   = "metadata.labels.kubernetes.io/service-name"
+	relatedSourceEndpointPod     = "endpoints[].targetRef"
 	relatedSourceInvolvedObject  = "involvedObject"
 )
 
@@ -703,8 +707,12 @@ func (collector *relatedCollector) addSelectorRelationships() {
 	switch {
 	case collector.currentGroup == "" && collector.currentVersion == "v1" && kind == "Service":
 		collector.addServicePods()
+		collector.addServiceEndpointSlices()
 	case collector.currentGroup == "" && collector.currentVersion == "v1" && kind == "Pod":
 		collector.addPodServices()
+	case collector.currentGroup == "discovery.k8s.io" && (collector.currentVersion == "v1" || collector.currentVersion == "v1beta1") && kind == "EndpointSlice":
+		collector.addEndpointSliceService()
+		collector.addEndpointSlicePods()
 	case isSelectorWorkload(collector.currentGroup, collector.currentVersion, kind):
 		collector.addWorkloadPods()
 	}
@@ -722,6 +730,138 @@ func (collector *relatedCollector) addServicePods() {
 		return
 	}
 	collector.addPodsForSelector(relatedTypeSelectorMatch, relatedSourceSelector, selector)
+}
+
+// addServiceEndpointSlices lists EndpointSlices labeled for the current Service.
+func (collector *relatedCollector) addServiceEndpointSlices() {
+	if !collector.currentNamespaced || collector.object.GetNamespace() == "" {
+		collector.addNotice(relatedTypeEndpointSlice, relatedSourceEndpointSlice, relatedItemUnavailable, "EndpointSlice matching requires the Service namespace.")
+		return
+	}
+	definition, found := relatedEndpointSliceDefinition(collector.definitions)
+	if !found {
+		collector.addNotice(relatedTypeEndpointSlice, relatedSourceEndpointSlice, relatedItemUnavailable, "The EndpointSlice API was not present in discovery.")
+		return
+	}
+	if !definitionAllowsList(definition) {
+		collector.addNotice(relatedTypeEndpointSlice, relatedSourceEndpointSlice, relatedItemPermissionDenied, "Discovery did not advertise list access for EndpointSlices.")
+		return
+	}
+	selector := labels.Set{"kubernetes.io/service-name": collector.object.GetName()}.AsSelector().String()
+	items, err := collector.list(definition, collector.object.GetNamespace(), metav1.ListOptions{Limit: relatedListLimit, LabelSelector: selector})
+	if err != nil {
+		collector.addRelationshipListNotice(relatedTypeEndpointSlice, relatedSourceEndpointSlice, err, "Kubernetes denied or failed the matching EndpointSlice list.")
+		return
+	}
+	for index := range items.Items {
+		item := &items.Items[index]
+		if item.GetLabels()["kubernetes.io/service-name"] != collector.object.GetName() {
+			continue
+		}
+		collector.add(RelatedResource{
+			Type:       relatedTypeEndpointSlice,
+			Source:     relatedSourceEndpointSlice,
+			State:      relatedItemResolved,
+			Definition: relatedDefinitionPointer(definition),
+			APIVersion: item.GetAPIVersion(),
+			Kind:       relatedObjectKind(item, definition.Kind),
+			Name:       item.GetName(),
+			Namespace:  item.GetNamespace(),
+			UID:        string(item.GetUID()),
+		})
+	}
+	if items.GetContinue() != "" {
+		collector.markTruncated("EndpointSlice results are capped by the Kubernetes list limit.")
+	}
+}
+
+// addEndpointSliceService resolves the Service named by an EndpointSlice label.
+func (collector *relatedCollector) addEndpointSliceService() {
+	serviceName := strings.TrimSpace(collector.object.GetLabels()["kubernetes.io/service-name"])
+	if serviceName == "" {
+		collector.addNotice(relatedTypeEndpointSlice, relatedSourceEndpointSlice, relatedItemUnavailable, "The EndpointSlice has no kubernetes.io/service-name label.")
+		return
+	}
+	if collector.object.GetNamespace() == "" {
+		collector.addNotice(relatedTypeEndpointSlice, relatedSourceEndpointSlice, relatedItemUnavailable, "The EndpointSlice has no namespace for safe Service resolution.")
+		return
+	}
+	definition, _ := relationshipDefinition(collector.definitions, "", "v1", "services")
+	collector.addNamedTarget(relatedTypeEndpointSlice, relatedSourceEndpointSlice, definition, collector.object.GetNamespace(), serviceName, "Service")
+}
+
+// addEndpointSlicePods resolves Pod targets declared by bounded EndpointSlice endpoint references.
+func (collector *relatedCollector) addEndpointSlicePods() {
+	endpoints, found, err := unstructured.NestedSlice(collector.object.Object, "endpoints")
+	if err != nil {
+		collector.addNotice(relatedTypeEndpointPod, relatedSourceEndpointPod, relatedItemError, "EndpointSlice endpoints were malformed and Pod targets could not be resolved safely.")
+		return
+	}
+	if !found {
+		return
+	}
+	for index, raw := range endpoints {
+		if index >= relatedResultLimit {
+			collector.markTruncated("EndpointSlice Pod targets are capped by the safe relationship result limit.")
+			break
+		}
+		endpoint, ok := raw.(map[string]interface{})
+		if !ok {
+			collector.addNotice(relatedTypeEndpointPod, relatedSourceEndpointPod, relatedItemError, "An EndpointSlice endpoint was malformed and its Pod target was skipped.")
+			continue
+		}
+		targetRef, found, targetErr := unstructured.NestedMap(endpoint, "targetRef")
+		if targetErr != nil {
+			collector.addNotice(relatedTypeEndpointPod, relatedSourceEndpointPod, relatedItemError, "An EndpointSlice targetRef was malformed and its Pod target was skipped.")
+			continue
+		}
+		if !found {
+			continue
+		}
+		apiVersion, _, apiVersionErr := relatedReferenceString(targetRef, "apiVersion")
+		kind, _, kindErr := relatedReferenceString(targetRef, "kind")
+		name, _, nameErr := relatedReferenceString(targetRef, "name")
+		namespace, _, namespaceErr := relatedReferenceString(targetRef, "namespace")
+		uid, _, uidErr := relatedReferenceString(targetRef, "uid")
+		if apiVersionErr != nil || kindErr != nil || nameErr != nil || namespaceErr != nil || uidErr != nil {
+			collector.addNotice(relatedTypeEndpointPod, relatedSourceEndpointPod, relatedItemError, "An EndpointSlice targetRef contained malformed Pod identity fields.")
+			continue
+		}
+		if kind != "Pod" {
+			continue
+		}
+		if apiVersion == "" {
+			apiVersion = "v1"
+		}
+		if name == "" {
+			collector.addNotice(relatedTypeEndpointPod, relatedSourceEndpointPod, relatedItemUnresolved, "An EndpointSlice Pod target did not include a name.")
+			continue
+		}
+		if namespace == "" {
+			namespace = collector.object.GetNamespace()
+		}
+		if namespace == "" {
+			collector.addNotice(relatedTypeEndpointPod, relatedSourceEndpointPod, relatedItemUnavailable, "An EndpointSlice Pod target did not include a namespace.")
+			continue
+		}
+		definition, _ := relationshipDefinition(collector.definitions, "", "v1", "pods")
+		if apiVersion != "v1" {
+			collector.addNotice(relatedTypeEndpointPod, relatedSourceEndpointPod, relatedItemUnavailable, "The EndpointSlice Pod target used an unsupported API version.")
+			continue
+		}
+		collector.addNamedTargetWithUID(relatedTypeEndpointPod, relatedSourceEndpointPod, definition, namespace, name, uid, "Pod")
+	}
+}
+
+// relatedEndpointSliceDefinition selects the preferred discovered EndpointSlice version for one relationship query.
+func relatedEndpointSliceDefinition(definitions []ResourceDefinition) (ResourceDefinition, bool) {
+	for _, version := range []string{"v1", "v1beta1"} {
+		definition := relatedDefinition(definitions, "discovery.k8s.io", version, "endpointslices")
+		if definition.Kind == "EndpointSlice" {
+			return definition, true
+		}
+	}
+	return ResourceDefinition{}, false
 }
 
 // addWorkloadPods lists Pods matching an explicit common workload selector.

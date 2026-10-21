@@ -161,6 +161,35 @@ func TestCollectRelatedResourcesResolvesServiceSelector(t *testing.T) {
 	}
 }
 
+// TestCollectRelatedResourcesResolvesServiceEndpointSlices verifies the native Service label relationship in both directions.
+func TestCollectRelatedResourcesResolvesServiceEndpointSlices(t *testing.T) {
+	service := relatedObject("v1", "Service", "api", "default", "service-uid", map[string]interface{}{
+		"spec": map[string]interface{}{"selector": map[string]interface{}{"app": "api"}},
+	})
+	matchingSlice := relatedObject("discovery.k8s.io/v1", "EndpointSlice", "api-1", "default", "slice-uid", nil)
+	matchingSlice.SetLabels(map[string]string{"kubernetes.io/service-name": "api"})
+	matchingSlice.Object["endpoints"] = []interface{}{map[string]interface{}{"targetRef": map[string]interface{}{"apiVersion": "v1", "kind": "Pod", "name": "api-0", "namespace": "default", "uid": "pod-uid"}}}
+	otherSlice := relatedObject("discovery.k8s.io/v1", "EndpointSlice", "worker-1", "default", "other-slice-uid", nil)
+	otherSlice.SetLabels(map[string]string{"kubernetes.io/service-name": "worker"})
+	pod := relatedObject("v1", "Pod", "api-0", "default", "pod-uid", nil)
+	client := newRelatedDynamicClient(service, matchingSlice, otherSlice, pod)
+
+	serviceResult := collectRelatedResources(context.Background(), client, relatedDefinitions(), nil, "", "v1", "services", "default", true, service)
+	if !hasRelatedItem(serviceResult.Items, relatedTypeEndpointSlice, "api-1", relatedItemResolved) || hasRelatedItem(serviceResult.Items, relatedTypeEndpointSlice, "worker-1", relatedItemResolved) {
+		t.Fatalf("Service EndpointSlice relationships were incorrect: %+v", serviceResult)
+	}
+
+	sliceResult := collectRelatedResources(context.Background(), client, relatedDefinitions(), nil, "discovery.k8s.io", "v1", "endpointslices", "default", true, matchingSlice)
+	serviceItem := findRelatedItem(sliceResult.Items, relatedTypeEndpointSlice, "api")
+	if serviceItem == nil || serviceItem.State != relatedItemResolved || serviceItem.Definition == nil || serviceItem.Definition.Resource != "services" || serviceItem.Namespace != "default" {
+		t.Fatalf("EndpointSlice Service relationship was not resolved with exact identity: %+v", sliceResult)
+	}
+	podItem := findRelatedItem(sliceResult.Items, relatedTypeEndpointPod, "api-0")
+	if podItem == nil || podItem.State != relatedItemResolved || podItem.Definition == nil || podItem.Definition.Resource != "pods" || podItem.Namespace != "default" || podItem.UID != "pod-uid" {
+		t.Fatalf("EndpointSlice Pod target relationship was not resolved with UID verification: %+v", sliceResult)
+	}
+}
+
 // TestCollectRelatedResourcesResolvesCronJobAndStorageBindings verifies owner and PVC/PV native fields.
 func TestCollectRelatedResourcesResolvesCronJobAndStorageBindings(t *testing.T) {
 	cronJob := relatedObject("batch/v1", "CronJob", "nightly", "default", "cronjob-uid", map[string]interface{}{
@@ -461,6 +490,7 @@ func relatedDefinitions() []ResourceDefinition {
 		{Group: "", Version: "v1", Resource: "persistentvolumeclaims", Kind: "PersistentVolumeClaim", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "persistentvolumes", Kind: "PersistentVolume", Namespaced: false, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "serviceaccounts", Kind: "ServiceAccount", Namespaced: true, Verbs: []string{"get", "list"}},
+		{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices", Kind: "EndpointSlice", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses", Kind: "Ingress", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet", Namespaced: true, Verbs: []string{"get", "list"}},

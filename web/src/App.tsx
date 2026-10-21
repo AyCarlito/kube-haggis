@@ -4209,6 +4209,8 @@ function relatedTypeLabel(type: string): string {
     'bound-claim': 'Bound claim',
     reference: 'Native reference',
     'ingress-backend': 'Ingress backend',
+    'endpoint-slice': 'EndpointSlice',
+    'endpoint-pod': 'Endpoint Pod',
     aggregation: 'Relationship scan',
     discovery: 'API discovery',
   }
