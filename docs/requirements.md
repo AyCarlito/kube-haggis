@@ -54,6 +54,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Bounded read-only operational packs for built-in networking, policy, autoscaling, quota, storage, ServiceAccount/RBAC, and Pod posture views.
 - Bounded global search with canonical GVR result links, partial-source states, explicit submit behavior, and revision-bound local saved views.
 - Short-lived server-bound mutation review handles with exact request bindings, one-use consumption, expiry, and frontend token clearing.
+- Local diagnostics with correlation IDs, safe request telemetry, readiness/liveness separation, discovery/session health, and bounded error history.
 
 ### Partially Implemented
 
@@ -262,7 +263,7 @@ Ensure final mutations cannot bypass or reuse an unrelated client-side dry-run r
 - Preserve existing Secret masking and redaction rules in reviews, diffs, conflicts, logs, and audit history.
 - Keep force deletion and automatic conflict overwrites unavailable unless separately approved by the requirements.
 
-### F8. Local diagnostics and API health visibility
+### F8. Local diagnostics and API health visibility (Implemented)
 
 Provide safe, local-only diagnostics for discovery, watches, API latency, stream sessions, and backend failures.
 

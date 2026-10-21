@@ -60,6 +60,17 @@ func (s *Store) Close() error {
 	return s.database.Close()
 }
 
+// Ping verifies that the local SQLite audit store is available without reading mutation data.
+func (s *Store) Ping(ctx context.Context) error {
+	if s == nil || s.database == nil {
+		return fmt.Errorf("audit store is unavailable")
+	}
+	if err := s.database.PingContext(ctx); err != nil {
+		return fmt.Errorf("audit store is unavailable")
+	}
+	return nil
+}
+
 // Record appends one redacted mutation entry to the audit database.
 func (s *Store) Record(ctx context.Context, entry Entry) error {
 	if s == nil || s.database == nil {

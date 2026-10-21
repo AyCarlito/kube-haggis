@@ -41,6 +41,108 @@ export interface AuditResponse {
   items: AuditEntry[]
 }
 
+/** Identifies the safe retry guidance attached to an API failure. */
+export type RetryClassification = 'retry' | 'check-and-retry' | 'refresh-and-review'
+
+/** Describes the browser-safe kubeconfig source summary in local diagnostics. */
+export interface DiagnosticsKubeconfig {
+  source: string
+  state: string
+  revision: number
+}
+
+/** Describes the selected kubeconfig context without cluster credentials. */
+export interface DiagnosticsContext {
+  current: string
+  selected: string
+  state: string
+}
+
+/** Describes safe revision-scoped discovery-cache age and aggregate state. */
+export interface DiagnosticsDiscovery {
+  context: string
+  revision: number
+  state: string
+  ageSeconds?: number
+  loadedAt?: string
+  itemCount: number
+  issueCount: number
+}
+
+/** Describes one safe server-side watch lifecycle transition. */
+export interface DiagnosticsWatchEvent {
+  at: string
+  context?: string
+  resource?: string
+  state: string
+  reconnect?: boolean
+  errorCategory?: string
+}
+
+/** Describes the latest safe state for one context and resource watch. */
+export interface DiagnosticsWatchView {
+  context?: string
+  resource?: string
+  state: string
+  lastAt: string
+  errorCategory?: string
+  reconnects: number
+  active: boolean
+}
+
+/** Contains bounded current and recent server-side watch lifecycle information. */
+export interface DiagnosticsWatches {
+  active: number
+  current: DiagnosticsWatchView[]
+  recent: DiagnosticsWatchEvent[]
+}
+
+/** Contains active native terminal, log, port-forward, and watch counts. */
+export interface DiagnosticsSessions {
+  terminal: number
+  logs: number
+  portForward: number
+  watch: number
+}
+
+/** Contains safe local audit-store availability. */
+export interface DiagnosticsAudit {
+  state: string
+}
+
+/** Contains bounded request counters, status totals, operations, and timings. */
+export interface DiagnosticsRequests {
+  total: number
+  errors: number
+  averageDurationMilliseconds: number
+  maxDurationMilliseconds: number
+  statuses: Record<string, number>
+  operations: Record<string, number>
+  errorCategories: Record<string, number>
+}
+
+/** Describes one recent safe backend error category without its original message. */
+export interface DiagnosticsErrorEvent {
+  at: string
+  status?: number
+  category: string
+  operation: string
+}
+
+/** Contains all bounded local diagnostics exposed by the diagnostics endpoint. */
+export interface DiagnosticsResponse {
+  generatedAt: string
+  uptimeSeconds: number
+  kubeconfig: DiagnosticsKubeconfig
+  context: DiagnosticsContext
+  discovery: DiagnosticsDiscovery
+  watches: DiagnosticsWatches
+  recentErrors: DiagnosticsErrorEvent[]
+  sessions: DiagnosticsSessions
+  audit: DiagnosticsAudit
+  requests: DiagnosticsRequests
+}
+
 /** Identifies the safe state of the backend kubeconfig source snapshot. */
 export type KubeconfigSourceState = 'ready' | 'changed' | 'error'
 
@@ -980,6 +1082,8 @@ export interface TerminalMessage {
   type: 'input' | 'resize' | 'output' | 'error' | 'closed'
   data?: string
   message?: string
+  requestId?: string
+  retry?: RetryClassification
   rows?: number
   cols?: number
 }
@@ -988,6 +1092,8 @@ export interface TerminalMessage {
 export interface PortForwardMessage {
   type: 'ready' | 'error' | 'closed'
   message?: string
+  requestId?: string
+  retry?: RetryClassification
   targetPort?: number
   localPort?: number
 }
@@ -995,7 +1101,7 @@ export interface PortForwardMessage {
 /** Represents the browser route used by the single-page application. */
 export interface RouteState {
   path: string
-  view?: 'history' | 'catalog' | 'search'
+  view?: 'history' | 'catalog' | 'search' | 'diagnostics'
   search?: string
   group?: string
   version?: string

@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,6 +45,8 @@ type Server struct {
 	pvcAction      pvcActionLoader
 	reviewStoreMu  sync.Mutex
 	reviewStore    *mutationReviewStore
+	diagnosticsMu  sync.Mutex
+	diagnostics    *diagnosticsStore
 }
 
 // relatedLoader describes the read-only relationship aggregation seam used by the HTTP handler.
@@ -63,13 +66,15 @@ type resourceDeleteLoader func(context.Context, string, string, string, string, 
 
 // New creates an HTTP server for the KubeHaggis API.
 func New(kubernetes *kube.Service, webDir string, logger *slog.Logger, auditStore *audit.Store) *Server {
-	return &Server{kube: kubernetes, webDir: webDir, logger: logger, audit: auditStore, reviewStore: newMutationReviewStore()}
+	return &Server{kube: kubernetes, webDir: webDir, logger: logger, audit: auditStore, reviewStore: newMutationReviewStore(), diagnostics: newDiagnosticsStore()}
 }
 
 // Handler returns the complete API and frontend HTTP handler tree.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/readiness", s.handleReadiness)
+	mux.HandleFunc("/api/diagnostics", s.handleDiagnostics)
 	mux.HandleFunc("/api/contexts", s.handleContexts)
 	mux.HandleFunc("/api/contexts/reload", s.handleContextsReload)
 	mux.HandleFunc("/api/audit", s.handleAudit)
@@ -101,7 +106,7 @@ func (s *Server) Handler() http.Handler {
 
 // handleHealth reports that the local HTTP process is alive.
 func (s *Server) handleHealth(writer http.ResponseWriter, request *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok", "name": "KubeHaggis"})
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok", "name": "KubeHaggis", "liveness": "alive"})
 }
 
 // handleContexts returns kubeconfig contexts without exposing credentials.
@@ -109,7 +114,9 @@ func (s *Server) handleContexts(writer http.ResponseWriter, request *http.Reques
 	snapshot, err := s.kube.Contexts()
 	payload := contextSnapshotPayload(snapshot)
 	if err != nil {
-		payload["error"] = err.Error()
+		addSafeContextError(payload, writer, err)
+	} else if snapshot.Kubeconfig.Error != "" {
+		addSafeContextError(payload, writer, errors.New(snapshot.Kubeconfig.Error))
 	}
 	writeJSON(writer, http.StatusOK, payload)
 }
@@ -125,9 +132,20 @@ func (s *Server) handleContextsReload(writer http.ResponseWriter, request *http.
 	s.invalidateMutationReviews()
 	payload := contextSnapshotPayload(snapshot)
 	if err != nil {
-		payload["error"] = err.Error()
+		addSafeContextError(payload, writer, err)
+	} else if snapshot.Kubeconfig.Error != "" {
+		addSafeContextError(payload, writer, errors.New(snapshot.Kubeconfig.Error))
 	}
 	writeJSON(writer, http.StatusOK, payload)
+}
+
+// addSafeContextError preserves context response status while adding only safe error metadata.
+func addSafeContextError(payload map[string]interface{}, writer http.ResponseWriter, err error) {
+	const contextErrorStatus = http.StatusBadGateway
+	payload["error"] = safeErrorResponseMessage(err, contextErrorStatus)
+	for key, value := range safeErrorFields(writer, err, contextErrorStatus) {
+		payload[key] = value
+	}
 }
 
 // contextSnapshotPayload builds the public context response from safe reload metadata.
@@ -136,6 +154,7 @@ func contextSnapshotPayload(snapshot kube.ContextSnapshot) map[string]interface{
 		"currentContext": snapshot.CurrentContext,
 		"contexts":       snapshot.Contexts,
 		"sourceState":    snapshot.Kubeconfig.State,
+		"source":         snapshot.Kubeconfig.Source,
 		"revision":       snapshot.Kubeconfig.Revision,
 		"reloaded":       snapshot.Kubeconfig.Reloaded,
 	}
@@ -320,7 +339,7 @@ func (s *Server) handleRelatedReverse(writer http.ResponseWriter, request *http.
 // handleWatch streams generic resource changes as server-sent events.
 func (s *Server) handleWatch(writer http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
-	streamWatch(writer, request, "KubeHaggis watch connected", func(ctx context.Context) (watch.Interface, error) {
+	s.streamWatch(writer, request, "KubeHaggis watch connected", func(ctx context.Context) (watch.Interface, error) {
 		return s.kube.WatchResources(
 			ctx,
 			query.Get("context"),
@@ -348,15 +367,39 @@ func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request)
 // handleEventWatch streams Events associated with one resource UID.
 func (s *Server) handleEventWatch(writer http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
-	streamWatch(writer, request, "KubeHaggis Event watch connected", func(ctx context.Context) (watch.Interface, error) {
+	s.streamWatch(writer, request, "KubeHaggis Event watch connected", func(ctx context.Context) (watch.Interface, error) {
 		return s.kube.WatchEventsForResource(ctx, query.Get("context"), query.Get("namespace"), query.Get("uid"), query.Get("resourceVersion"))
 	})
 }
 
 // streamWatch adapts one Kubernetes watch to a safe, lifecycle-aware SSE stream.
 func streamWatch(writer http.ResponseWriter, request *http.Request, connectedMessage string, open func(context.Context) (watch.Interface, error)) {
+	streamWatchWithDiagnostics(nil, writer, request, connectedMessage, open)
+}
+
+// streamWatch runs a watch without server diagnostics for isolated handler tests.
+func (s *Server) streamWatch(writer http.ResponseWriter, request *http.Request, connectedMessage string, open func(context.Context) (watch.Interface, error)) {
+	streamWatchWithDiagnostics(s, writer, request, connectedMessage, open)
+}
+
+// streamWatchWithDiagnostics adapts one Kubernetes watch to SSE and bounded lifecycle telemetry.
+func streamWatchWithDiagnostics(server *Server, writer http.ResponseWriter, request *http.Request, connectedMessage string, open func(context.Context) (watch.Interface, error)) {
+	var watchHandle diagnosticWatchHandle
+	operation := requestOperationClass(request.Method, request.URL.Path)
+	telemetry := requestTelemetryFor(request)
+	if server != nil {
+		watchHandle = server.diagnosticStore().startWatch(telemetry.Context, telemetry.Resource, operation)
+		defer func() {
+			server.diagnosticStore().finishWatch(watchHandle, "closed", "", operation)
+		}()
+	}
 	watcher, err := open(request.Context())
 	if err != nil {
+		if server != nil {
+			category := safeErrorCategory(err)
+			server.diagnosticStore().finishWatch(watchHandle, "error", category, operation)
+			watchHandle = diagnosticWatchHandle{}
+		}
 		writeWatchOpenError(writer, err)
 		return
 	}
@@ -367,10 +410,19 @@ func streamWatch(writer http.ResponseWriter, request *http.Request, connectedMes
 	writer.Header().Set("Connection", "keep-alive")
 	flusher, ok := writer.(http.Flusher)
 	if !ok {
+		if server != nil {
+			category := "stream-error"
+			server.diagnosticStore().finishWatch(watchHandle, "error", category, operation)
+			watchHandle = diagnosticWatchHandle{}
+		}
 		writeError(writer, fmt.Errorf("streaming is not supported by this server"))
 		return
 	}
 	if _, err := writer.Write([]byte(": " + connectedMessage + "\n\n")); err != nil {
+		if server != nil {
+			server.diagnosticStore().finishWatch(watchHandle, "error", "stream-error", operation)
+			watchHandle = diagnosticWatchHandle{}
+		}
 		return
 	}
 	flusher.Flush()
@@ -385,15 +437,32 @@ func streamWatch(writer http.ResponseWriter, request *http.Request, connectedMes
 					"type":  "CLOSED",
 					"error": watchSignal("watch-closed"),
 				})
+				if server != nil {
+					server.diagnosticStore().finishWatch(watchHandle, "closed", "watch-closed", operation)
+					watchHandle = diagnosticWatchHandle{}
+				}
 				return
 			}
 			if event.Type == watch.Error {
+				reason := watchErrorReason(event.Object)
 				if !writeWatchEvent(writer, flusher, safeWatchErrorEvent(event.Object)) {
+					if server != nil {
+						server.diagnosticStore().finishWatch(watchHandle, "error", "stream-error", operation)
+						watchHandle = diagnosticWatchHandle{}
+					}
 					return
+				}
+				if server != nil {
+					server.diagnosticStore().finishWatch(watchHandle, "error", reason, operation)
+					watchHandle = diagnosticWatchHandle{}
 				}
 				return
 			}
 			if !writeWatchEvent(writer, flusher, map[string]interface{}{"type": eventType(event.Type), "object": event.Object}) {
+				if server != nil {
+					server.diagnosticStore().finishWatch(watchHandle, "error", "stream-error", operation)
+					watchHandle = diagnosticWatchHandle{}
+				}
 				return
 			}
 		}
@@ -511,6 +580,11 @@ func (s *Server) handleLogs(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer stream.Close()
+	telemetry := requestTelemetryFor(request)
+	sessionID := s.diagnosticStore().startSession("logs", telemetry.Context, telemetry.Resource)
+	defer func() {
+		s.diagnosticStore().finishSession(sessionID, "", telemetry.Operation)
+	}()
 	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-cache")
 	if flusher, ok := writer.(http.Flusher); ok {
@@ -522,11 +596,20 @@ func (s *Server) handleLogs(writer http.ResponseWriter, request *http.Request) {
 				flusher.Flush()
 			}
 			if readErr != nil {
+				if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, context.Canceled) {
+					category := safeErrorCategory(readErr)
+					s.diagnosticStore().finishSession(sessionID, category, telemetry.Operation)
+					sessionID = ""
+				}
 				return
 			}
 		}
 	}
-	_, _ = io.Copy(writer, stream)
+	if _, copyErr := io.Copy(writer, stream); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, context.Canceled) {
+		category := safeErrorCategory(copyErr)
+		s.diagnosticStore().finishSession(sessionID, category, telemetry.Operation)
+		sessionID = ""
+	}
 }
 
 // handleResource returns or mutates one generic resource object.
@@ -748,10 +831,34 @@ func (s *Server) handleFrontend(writer http.ResponseWriter, request *http.Reques
 func (s *Server) withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		started := time.Now()
-		next.ServeHTTP(writer, request)
-		if s.logger != nil {
-			s.logger.Info("http request", "method", request.Method, "path", request.URL.Path, "duration", time.Since(started).String())
-		}
+		requestID := requestIDFor(request)
+		request = request.WithContext(context.WithValue(request.Context(), requestIDContextKey{}, requestID))
+		request.Header.Set("X-Request-ID", requestID)
+		writer.Header().Set("X-Request-ID", requestID)
+		captured := newRequestResponseWriter(writer)
+		telemetry := requestTelemetryFor(request)
+		defer func() {
+			telemetry.Status = captured.Status()
+			telemetry.Duration = time.Since(started)
+			telemetry.ErrorCategory = captured.errorCategory
+			if telemetry.ErrorCategory == "" {
+				telemetry.ErrorCategory = errorCategoryForStatus(telemetry.Status)
+			}
+			s.diagnosticStore().recordRequest(telemetry)
+			if s.logger != nil {
+				s.logger.Info("http request",
+					"request_id", telemetry.RequestID,
+					"method", telemetry.Method,
+					"status", telemetry.Status,
+					"duration_ms", float64(telemetry.Duration)/float64(time.Millisecond),
+					"context", telemetry.Context,
+					"resource", telemetry.Resource,
+					"operation", telemetry.Operation,
+					"error_category", telemetry.ErrorCategory,
+				)
+			}
+		}()
+		next.ServeHTTP(captured, request)
 	})
 }
 
@@ -826,16 +933,23 @@ func writeError(writer http.ResponseWriter, err error) {
 	case strings.Contains(message, "mutation review") || strings.Contains(message, "review handle"):
 		status = http.StatusBadRequest
 	}
-	writeJSON(writer, status, map[string]string{"error": err.Error()})
+	category := errorCategoryForStatus(status)
+	payload := safeErrorFieldsForCategory(writer, category, status)
+	payload["error"] = safeErrorResponseMessage(err, status)
+	writeJSON(writer, status, payload)
 }
 
 // writeSearchError returns a fixed safe message for search failures and validation errors.
 func writeSearchError(writer http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
+	category := "dependency-unavailable"
 	message := "Global search is unavailable; retry the search."
 	if strings.Contains(strings.ToLower(err.Error()), "search filter") || strings.Contains(strings.ToLower(err.Error()), "label selector") {
 		status = http.StatusBadRequest
+		category = "validation"
 		message = "Search filters are invalid; check the label selector and filter lengths."
 	}
-	writeJSON(writer, status, map[string]string{"error": message})
+	payload := safeErrorFieldsForCategory(writer, category, status)
+	payload["error"] = message
+	writeJSON(writer, status, payload)
 }

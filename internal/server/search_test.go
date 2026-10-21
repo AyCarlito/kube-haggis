@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -114,5 +115,34 @@ func TestSearchHandlerReturnsBoundedPartialGVRResults(t *testing.T) {
 	handler.ServeHTTP(invalid, httptest.NewRequest(http.MethodGet, "/api/search?context=test&labelSelector=app+in+%28", nil))
 	if invalid.Code != http.StatusBadRequest || strings.Contains(invalid.Body.String(), "private-value") || !strings.Contains(invalid.Body.String(), "Search filters are invalid") {
 		t.Fatalf("invalid search filter was not safely rejected: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+// TestWriteSearchErrorAddsSafeCorrelationMetadata verifies fixed search failures carry request diagnostics.
+func TestWriteSearchErrorAddsSafeCorrelationMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		err       error
+		status    int
+		category  string
+		retry     string
+		requestID string
+	}{
+		{name: "backend", err: errors.New("search provider private-search-token failed"), status: http.StatusBadGateway, category: "dependency-unavailable", retry: "retry", requestID: "search-backend-7"},
+		{name: "validation", err: errors.New("search filter private-search-token is invalid"), status: http.StatusBadRequest, category: "validation", retry: "check-and-retry", requestID: "search-filter-8"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := (&Server{}).withLogging(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writeSearchError(writer, test.err)
+			}))
+			request := httptest.NewRequest(http.MethodGet, "/api/search", nil)
+			request.Header.Set("X-Request-ID", test.requestID)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			body := response.Body.String()
+			if response.Code != test.status || strings.Contains(body, "private-search-token") || !strings.Contains(body, `"errorCategory":"`+test.category+`"`) || !strings.Contains(body, `"retry":"`+test.retry+`"`) || !strings.Contains(body, `"requestId":"`+test.requestID+`"`) {
+				t.Fatalf("search error metadata was unsafe or incomplete: status=%d body=%s", response.Code, body)
+			}
+		})
 	}
 }

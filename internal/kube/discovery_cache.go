@@ -25,6 +25,7 @@ type discoveryCacheEntry struct {
 	definitions []ResourceDefinition
 	issues      []DiscoveryIssue
 	err         error
+	loadedAt    time.Time
 }
 
 // discoveryFlight represents one in-progress discovery load shared by callers.
@@ -32,6 +33,7 @@ type discoveryFlight struct {
 	done       chan struct{}
 	result     discoveryCacheEntry
 	generation uint64
+	startedAt  time.Time
 }
 
 // cloneResourceDefinitions returns an isolated copy of discovery metadata.
@@ -79,7 +81,7 @@ func (s *Service) cachedDiscoveryCatalog(ctx context.Context, contextName string
 	generation := s.discoveryGenerations[key]
 	flight, found := s.discoveryFlights[key]
 	if !found || flight.generation != generation {
-		flight = &discoveryFlight{done: make(chan struct{}), generation: generation}
+		flight = &discoveryFlight{done: make(chan struct{}), generation: generation, startedAt: time.Now().UTC()}
 		s.discoveryFlights[key] = flight
 		found = false
 	}
@@ -127,6 +129,7 @@ func (s *Service) loadDiscovery(key discoveryCacheKey, flight *discoveryFlight, 
 	}
 
 	s.mu.Lock()
+	entry.loadedAt = time.Now().UTC()
 	flight.result = entry
 	if s.revision == key.revision && s.discoveryGenerations[key] == flight.generation && !errors.Is(entry.err, context.DeadlineExceeded) && !errors.Is(entry.err, context.Canceled) {
 		s.discoveryCache[key] = entry

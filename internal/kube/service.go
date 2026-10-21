@@ -201,6 +201,7 @@ type ClusterOverview struct {
 // KubeconfigReloadStatus reports safe kubeconfig source state without exposing file contents.
 type KubeconfigReloadStatus struct {
 	State    string `json:"state"`
+	Source   string `json:"source"`
 	Revision uint64 `json:"revision"`
 	Reloaded bool   `json:"reloaded"`
 	Error    string `json:"error,omitempty"`
@@ -211,6 +212,28 @@ type ContextSnapshot struct {
 	Contexts       []ContextSummary
 	CurrentContext string
 	Kubeconfig     KubeconfigReloadStatus
+}
+
+// DiscoveryCacheSnapshot describes safe age and health metadata for one cached catalog.
+type DiscoveryCacheSnapshot struct {
+	Context    string     `json:"context"`
+	Revision   uint64     `json:"revision"`
+	State      string     `json:"state"`
+	AgeSeconds *int64     `json:"ageSeconds,omitempty"`
+	LoadedAt   *time.Time `json:"loadedAt,omitempty"`
+	ItemCount  int        `json:"itemCount"`
+	IssueCount int        `json:"issueCount"`
+}
+
+// DiagnosticsSnapshot contains kubeconfig, context, and discovery state without credentials.
+type DiagnosticsSnapshot struct {
+	KubeconfigSource   string                 `json:"kubeconfigSource"`
+	KubeconfigState    string                 `json:"kubeconfigState"`
+	KubeconfigRevision uint64                 `json:"kubeconfigRevision"`
+	CurrentContext     string                 `json:"currentContext"`
+	SelectedContext    string                 `json:"selectedContext"`
+	ContextState       string                 `json:"contextState"`
+	Discovery          DiscoveryCacheSnapshot `json:"discovery"`
 }
 
 // configSourceFingerprint stores metadata for every kubeconfig source in loading order.
@@ -285,6 +308,106 @@ func (s *Service) ReloadContexts() (ContextSnapshot, error) {
 	defer s.mu.Unlock()
 	config, result, err := s.ensureConfigLocked(true)
 	return s.contextSnapshotLocked(config, result, err), err
+}
+
+// Diagnostics returns safe current kubeconfig, selected-context, and discovery-cache metadata.
+func (s *Service) Diagnostics(contextName string) DiagnosticsSnapshot {
+	if s == nil {
+		return DiagnosticsSnapshot{KubeconfigState: kubeconfigStateError, ContextState: "unavailable", Discovery: DiscoveryCacheSnapshot{State: "unavailable"}}
+	}
+
+	s.mu.Lock()
+	config, _, loadErr := s.ensureConfigLocked(false)
+	snapshot := DiagnosticsSnapshot{
+		KubeconfigSource:   s.kubeconfigSourceLocked(),
+		KubeconfigState:    kubeconfigStateReady,
+		KubeconfigRevision: s.revision,
+		ContextState:       "unavailable",
+	}
+	if loadErr != nil || (config == nil && s.lastReloadError != "") {
+		snapshot.KubeconfigState = kubeconfigStateError
+	}
+	if config != nil {
+		snapshot.CurrentContext = config.CurrentContext
+		snapshot.SelectedContext = strings.TrimSpace(contextName)
+		snapshot.ContextState = "not-selected"
+		if snapshot.SelectedContext == "" {
+			snapshot.SelectedContext = config.CurrentContext
+		}
+		switch {
+		case snapshot.SelectedContext == "":
+			snapshot.ContextState = "missing"
+		case config.Contexts[snapshot.SelectedContext] == nil:
+			snapshot.ContextState = "unavailable"
+		default:
+			snapshot.ContextState = "available"
+		}
+	}
+	s.mu.Unlock()
+
+	snapshot.Discovery = s.DiscoveryCacheStatus(snapshot.SelectedContext)
+	return snapshot
+}
+
+// DiscoveryCacheStatus returns safe state and age metadata without triggering a discovery request.
+func (s *Service) DiscoveryCacheStatus(contextName string) DiscoveryCacheSnapshot {
+	status := DiscoveryCacheSnapshot{Context: strings.TrimSpace(contextName), State: "not-checked"}
+	if s == nil {
+		status.State = "unavailable"
+		return status
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	config, _, err := s.ensureConfigLocked(false)
+	if err != nil || config == nil {
+		status.State = "unavailable"
+		return status
+	}
+	if status.Context == "" {
+		status.Context = config.CurrentContext
+	}
+	if status.Context == "" {
+		status.State = "missing"
+		return status
+	}
+	if config.Contexts[status.Context] == nil {
+		status.State = "unavailable"
+		return status
+	}
+	status.Revision = s.revision
+	key := discoveryCacheKey{contextName: status.Context, revision: s.revision}
+	if entry, found := s.discoveryCache[key]; found {
+		catalog := resourceCatalogFromEntry(entry)
+		status.State = catalog.State
+		status.ItemCount = len(catalog.Items)
+		status.IssueCount = len(catalog.Issues)
+		if !entry.loadedAt.IsZero() {
+			loadedAt := entry.loadedAt
+			status.LoadedAt = &loadedAt
+			age := time.Since(loadedAt)
+			if age < 0 {
+				age = 0
+			}
+			seconds := int64(age / time.Second)
+			status.AgeSeconds = &seconds
+		}
+		return status
+	}
+	if flight, found := s.discoveryFlights[key]; found {
+		status.State = "loading"
+		if !flight.startedAt.IsZero() {
+			startedAt := flight.startedAt
+			status.LoadedAt = &startedAt
+			age := time.Since(startedAt)
+			if age < 0 {
+				age = 0
+			}
+			seconds := int64(age / time.Second)
+			status.AgeSeconds = &seconds
+		}
+	}
+	return status
 }
 
 // Discovery returns the preferred resource definitions advertised by a cluster.
@@ -766,6 +889,7 @@ func (s *Service) newLoadingRules() *clientcmd.ClientConfigLoadingRules {
 func (s *Service) contextSnapshotLocked(config *clientcmdapi.Config, result configLoadResult, loadErr error) ContextSnapshot {
 	status := KubeconfigReloadStatus{
 		State:    kubeconfigStateReady,
+		Source:   s.kubeconfigSourceLocked(),
 		Revision: s.revision,
 		Reloaded: result.Reloaded,
 	}
@@ -792,6 +916,17 @@ func (s *Service) contextSnapshotLocked(config *clientcmdapi.Config, result conf
 	}
 	snapshot.CurrentContext = config.CurrentContext
 	return snapshot
+}
+
+// kubeconfigSourceLocked identifies the configured source class without exposing source paths.
+func (s *Service) kubeconfigSourceLocked() string {
+	if strings.TrimSpace(s.kubeconfigPath) != "" {
+		return "explicit"
+	}
+	if strings.TrimSpace(os.Getenv("KUBECONFIG")) != "" {
+		return "environment"
+	}
+	return "default"
 }
 
 // fingerprintLoadingRules records source metadata without reading source contents.

@@ -53,6 +53,7 @@ import {
   deleteResources,
   fetchAudit,
   fetchContexts,
+  fetchDiagnostics,
   fetchGlobalSearch,
   fetchResourceCatalog,
   fetchOverview,
@@ -71,6 +72,7 @@ import {
   uploadPodFile,
   resourceEventsWatchUrl,
   reloadContexts as reloadKubeconfig,
+  responseApiError,
   resourceConflictFromError,
   terminalUrl,
   watchUrl,
@@ -95,6 +97,7 @@ import type {
   ClusterOverview,
   ContextSummary,
   ContextsResponse,
+  DiagnosticsResponse,
   CustomResourceCapabilities,
   CustomResourcePrinterColumn,
   EphemeralContainerRequest,
@@ -137,6 +140,7 @@ import type {
   RelatedResourcesResponse,
   RelatedResource,
   RouteState,
+  RetryClassification,
   TerminalMessage,
   MetricsOverview,
   MetricsState,
@@ -223,6 +227,7 @@ const navGroups = [
       { label: 'Nodes', resource: 'nodes', icon: Server },
       { label: 'Events', resource: 'events', icon: Activity },
       { label: 'Mutation history', path: '/history', icon: History },
+      { label: 'Diagnostics', path: '/diagnostics', icon: Settings2 },
     ],
   },
   {
@@ -414,6 +419,8 @@ export default function App() {
   const validResourceName = route.name && route.name !== 'undefined' && route.name !== 'null' ? route.name : undefined
   const content = !contexts || (contexts.contexts.length > 0 && !selectedContext) ? (
     <LoadingState label="Reading local kubeconfig" />
+  ) : route.view === 'diagnostics' ? (
+    <DiagnosticsPage context={selectedContext} revision={contextRevision} />
   ) : route.view === 'history' ? (
     <MutationHistoryPage contexts={contexts} selectedContext={selectedContext} activeContext={activeContext} revision={contextRevision} />
   ) : route.view === 'search' ? (
@@ -510,7 +517,7 @@ export default function App() {
           <div className="crumbs">
             <span className="crumb-muted">KubeHaggis</span>
             <span className="crumb-slash">/</span>
-            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'search' ? 'Global search' : route.view === 'catalog' ? 'API catalog' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
+            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'diagnostics' ? 'Diagnostics' : route.view === 'search' ? 'Global search' : route.view === 'catalog' ? 'API catalog' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
           </div>
           <div className="topbar-tools">
             <ContextPicker contexts={contexts?.contexts ?? []} value={selectedContext} onChange={changeContext} />
@@ -526,7 +533,7 @@ export default function App() {
             <button className="icon-button kubeconfig-reload" onClick={() => void reloadKubeconfigSources()} disabled={contextLoading} aria-label="Reload kubeconfig" title="Reload kubeconfig">
               {contextLoading ? <LoaderCircle size={17} className="spin" /> : <RefreshCw size={17} />}
             </button>
-            <button className="icon-button" aria-label="Settings">
+            <button className="icon-button" onClick={() => navigate('/diagnostics')} aria-label="Open diagnostics" title="Open diagnostics">
               <Settings2 size={18} />
             </button>
           </div>
@@ -1348,6 +1355,233 @@ function MutationHistoryPage({ contexts, selectedContext, activeContext, revisio
       </section>
     </div>
   )
+}
+
+/** Renders bounded local diagnostics for API health, discovery, watches, and native sessions. */
+function DiagnosticsPage({ context, revision }: { context: string; revision: number }) {
+  const [response, setResponse] = useState<DiagnosticsResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [refreshNonce, setRefreshNonce] = useState(0)
+
+  useEffect(() => {
+    let active = true
+    const load = () => {
+      setLoading(true)
+      fetchDiagnostics(context)
+        .then((nextResponse) => {
+          if (!active) return
+          setResponse(nextResponse)
+          setError('')
+        })
+        .catch((loadError: Error) => active && setError(loadError.message || 'The local diagnostics endpoint could not be reached.'))
+        .finally(() => active && setLoading(false))
+    }
+    load()
+    const interval = window.setInterval(load, 15000)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+    }
+  }, [context, revision, refreshNonce])
+
+  if (loading && !response) return <LoadingState label="Reading local diagnostics" />
+  if (error && !response) return <DiagnosticsUnavailableState error={error} onRetry={() => setRefreshNonce((value) => value + 1)} />
+  if (!response) return <DiagnosticsUnavailableState error="The local diagnostics endpoint returned no snapshot." onRetry={() => setRefreshNonce((value) => value + 1)} />
+
+  const discoveryTone = diagnosticsStateTone(response.discovery.state)
+  const dependencyReady = response.kubeconfig.state !== 'error' && response.context.state === 'available' && response.discovery.state === 'available' && response.audit.state === 'available'
+  const sessions = response.sessions
+  const recentErrors = [...response.recentErrors].reverse()
+  const recentWatches = [...response.watches.recent].reverse()
+  return (
+    <div className="diagnostics-page">
+      <section className="diagnostics-intro">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-mark" /> Local instrument / bounded memory</div>
+          <h1>Diagnostics</h1>
+          <p className="intro-copy">A local-only read on the KubeHaggis process, its Kubernetes dependencies, and the native streams currently open. Bodies, credentials, review handles, Secret values, and Pod output never enter this panel.</p>
+        </div>
+        <div className="diagnostics-stamp">
+          <span className="stamp-label">Process signal</span>
+          <code>alive / {formatUptime(response.uptimeSeconds)}</code>
+          <span className={`stamp-status diagnostics-status-${dependencyReady ? 'good' : 'warning'}`}><span className="signal-dot" />{dependencyReady ? 'Dependencies ready' : 'Dependencies need attention'}</span>
+        </div>
+      </section>
+
+      <section className="diagnostics-signal-strip panel">
+        <div className="diagnostics-signal diagnostics-signal-good"><span className="diagnostics-signal-dot" /><div><strong>Local process</strong><span>Liveness endpoint is responding</span></div><code>alive</code></div>
+        <div className={`diagnostics-signal diagnostics-signal-${dependencyReady ? 'good' : 'warning'}`}><span className="diagnostics-signal-dot" /><div><strong>Dependency posture</strong><span>{dependencyReady ? 'Kubeconfig, context, discovery, and audit are available' : 'One or more local dependencies need attention'}</span></div><code>{dependencyReady ? 'ready' : 'degraded'}</code></div>
+        <div className="diagnostics-signal diagnostics-signal-neutral"><span className="diagnostics-signal-dot" /><div><strong>Request correlation</strong><span>Every HTTP request returns a safe X-Request-ID</span></div><code>enabled</code></div>
+      </section>
+
+      {error && <div className="diagnostics-refresh-warning" role="status"><AlertTriangle size={14} /> Refresh failed: {error}. Showing the last safely loaded snapshot.</div>}
+
+      <section className="diagnostics-summary-grid">
+        <DiagnosticsSummaryCard label="Kubeconfig" value={`r${response.kubeconfig.revision}`} detail={`${titleCase(response.kubeconfig.state)} / ${response.kubeconfig.source || 'unknown source'}`} tone={response.kubeconfig.state === 'error' ? 'warning' : 'good'} icon={<Database size={17} />} />
+        <DiagnosticsSummaryCard label="Discovery cache" value={diagnosticsStateLabel(response.discovery.state)} detail={`${response.discovery.itemCount} resources / ${diagnosticsAgeLabel(response.discovery.ageSeconds)}`} tone={discoveryTone} icon={<Box size={17} />} />
+        <DiagnosticsSummaryCard label="Audit store" value={diagnosticsStateLabel(response.audit.state)} detail="SQLite mutation history" tone={response.audit.state === 'available' ? 'good' : 'warning'} icon={<History size={17} />} />
+        <DiagnosticsSummaryCard label="Active sessions" value={String(diagnosticsSessionTotal(sessions))} detail={`${sessions.watch} watches / ${sessions.terminal + sessions.logs + sessions.portForward} native streams`} tone={diagnosticsSessionTotal(sessions) ? 'neutral' : 'good'} icon={<Activity size={17} />} />
+      </section>
+
+      <div className="diagnostics-grid">
+        <section className="diagnostics-panel panel">
+          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Dependency ledger</span><h2>What the local server can reach</h2></div><button className="icon-button diagnostics-refresh" onClick={() => setRefreshNonce((value) => value + 1)} disabled={loading} aria-label="Refresh diagnostics" title="Refresh diagnostics">{loading ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}</button></div>
+          <div className="diagnostics-detail-list">
+            <DiagnosticsDetailRow label="Kubeconfig source" value={response.kubeconfig.source || 'unknown'} note={`revision ${response.kubeconfig.revision}`} tone={response.kubeconfig.state === 'error' ? 'warning' : 'good'} />
+            <DiagnosticsDetailRow label="Selected context" value={response.context.selected || 'none selected'} note={response.context.state} tone={response.context.state === 'available' ? 'good' : 'warning'} />
+            <DiagnosticsDetailRow label="Discovery cache" value={diagnosticsStateLabel(response.discovery.state)} note={`${response.discovery.itemCount} resources / ${response.discovery.issueCount} issues`} tone={discoveryTone} />
+            <DiagnosticsDetailRow label="Cache age" value={diagnosticsAgeLabel(response.discovery.ageSeconds)} note={response.discovery.loadedAt ? `loaded ${relativeTime(response.discovery.loadedAt)}` : 'no completed load recorded'} tone={response.discovery.state === 'available' ? 'good' : 'neutral'} />
+            <DiagnosticsDetailRow label="Audit store" value={diagnosticsStateLabel(response.audit.state)} note="mutation outcomes remain redacted" tone={response.audit.state === 'available' ? 'good' : 'warning'} />
+          </div>
+        </section>
+
+        <section className="diagnostics-panel panel">
+          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Native stream board</span><h2>Sessions in flight</h2></div><span className="panel-action panel-action-neutral"><span />{diagnosticsSessionTotal(sessions)} active</span></div>
+          <div className="diagnostics-session-grid">
+            <DiagnosticsSessionCard icon={<TerminalSquare size={16} />} label="Terminal" count={sessions.terminal} detail="Pod exec / attach" />
+            <DiagnosticsSessionCard icon={<TerminalSquare size={16} />} label="Logs" count={sessions.logs} detail="Pod log streams" />
+            <DiagnosticsSessionCard icon={<Network size={16} />} label="Port-forward" count={sessions.portForward} detail="Loopback forwards" />
+            <DiagnosticsSessionCard icon={<Activity size={16} />} label="Watch" count={sessions.watch} detail="SSE Kubernetes watches" />
+          </div>
+          <div className="diagnostics-panel-note"><LockKeyhole size={14} /> Only counts and safe context/GVR lifecycle metadata are retained.</div>
+        </section>
+      </div>
+
+      <section className="diagnostics-panel diagnostics-requests panel">
+        <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">HTTP instrument</span><h2>Request counters &amp; timing</h2></div><span className="panel-action panel-action-neutral"><span />{response.requests.total} requests</span></div>
+        <div className="diagnostics-request-grid">
+          <DiagnosticsRequestMetric label="Requests" value={String(response.requests.total)} note="bounded total" />
+          <DiagnosticsRequestMetric label="Classified errors" value={String(response.requests.errors)} note="safe categories only" tone={response.requests.errors ? 'warning' : 'good'} />
+          <DiagnosticsRequestMetric label="Average" value={`${formatMilliseconds(response.requests.averageDurationMilliseconds)} ms`} note="completed requests" />
+          <DiagnosticsRequestMetric label="Slowest" value={`${formatMilliseconds(response.requests.maxDurationMilliseconds)} ms`} note="observed maximum" />
+        </div>
+        <div className="diagnostics-counter-columns">
+          <DiagnosticsCounterList title="Status" values={response.requests.statuses} />
+          <DiagnosticsCounterList title="Operation class" values={response.requests.operations} />
+          <DiagnosticsCounterList title="Error category" values={response.requests.errorCategories} emptyLabel="No classified errors" />
+        </div>
+      </section>
+
+      <div className="diagnostics-grid">
+        <section className="diagnostics-panel panel">
+          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Watch ledger</span><h2>Recent lifecycle</h2></div><span className="panel-action panel-action-neutral"><span />{response.watches.active} active</span></div>
+          {!recentWatches.length ? <DiagnosticsEmptyState label="No server watch transitions yet" detail="Open a resource list or Event panel to see safe lifecycle state here." /> : <div className="diagnostics-event-list">{recentWatches.slice(0, 8).map((event, index) => <div className="diagnostics-event-row" key={`${event.at}-${event.state}-${index}`}><span className={`diagnostics-event-mark diagnostics-event-${event.errorCategory ? 'warning' : 'good'}`} /><div><strong>{diagnosticsWatchStateLabel(event.state, event.reconnect)}</strong><span>{event.resource || 'watch'}{event.context ? ` / ${event.context}` : ''}</span></div><code>{event.errorCategory || relativeTime(event.at)}</code></div>)}</div>}
+          {response.watches.current.length > 0 && <div className="diagnostics-watch-current">{response.watches.current.slice(0, 6).map((watch, index) => <div key={`${watch.resource}-${watch.context}-${index}`}><span className={`status-pill status-${watch.active ? 'good' : watch.errorCategory ? 'warning' : 'neutral'}`}><span />{watch.active ? 'Active' : diagnosticsStateLabel(watch.state)}</span><code>{watch.resource || 'watch'}</code><small>{watch.reconnects} reconnect{watch.reconnects === 1 ? '' : 's'}</small></div>)}</div>}
+        </section>
+
+        <section className="diagnostics-panel panel">
+          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Failure ledger</span><h2>Recent safe errors</h2></div><span className="panel-action panel-action-neutral"><span />{recentErrors.length} retained</span></div>
+          {!recentErrors.length ? <DiagnosticsEmptyState label="No classified errors" detail="Backend failures appear here as categories, never as raw Kubernetes responses." /> : <div className="diagnostics-event-list">{recentErrors.slice(0, 8).map((event, index) => <div className="diagnostics-event-row" key={`${event.at}-${event.category}-${index}`}><span className="diagnostics-event-mark diagnostics-event-warning" /><div><strong>{diagnosticsStateLabel(event.category)}</strong><span>{event.operation || 'request'}{event.status ? ` / HTTP ${event.status}` : ''}</span></div><code>{relativeTime(event.at)}</code></div>)}</div>}
+        </section>
+      </div>
+
+      <div className="diagnostics-footer-line"><span><RefreshCw size={13} /> Snapshot {relativeTime(response.generatedAt)}</span><span><Gauge size={13} /> Local only / no external telemetry</span><span><LockKeyhole size={13} /> Sensitive payloads excluded</span></div>
+    </div>
+  )
+}
+
+/** Renders the explicit disconnected state for a local diagnostics endpoint. */
+function DiagnosticsUnavailableState({ error, onRetry }: { error: string; onRetry: () => void }) {
+  return <div className="state-page"><div className="state-card"><span className="state-icon state-icon-warning"><Gauge size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> Local instrument disconnected</span><h1>Diagnostics are offline.</h1><p>The local diagnostics snapshot could not be read. No dependency details are guessed while the local API is disconnected.</p><div className="error-block"><code>{error}</code></div><button className="secondary-button" onClick={onRetry}><RefreshCw size={15} /> Try again</button></div></div>
+}
+
+/** Renders one large diagnostics summary card. */
+function DiagnosticsSummaryCard({ label, value, detail, tone, icon }: { label: string; value: string; detail: string; tone: 'good' | 'warning' | 'neutral'; icon: ReactNode }) {
+  return <article className={`diagnostics-summary-card diagnostics-summary-${tone}`}><div className="diagnostics-summary-top"><span>{icon}</span><span>{label}</span></div><strong>{value}</strong><code>{detail}</code></article>
+}
+
+/** Renders one safe dependency row with state tone and bounded notes. */
+function DiagnosticsDetailRow({ label, value, note, tone }: { label: string; value: string; note: string; tone: 'good' | 'warning' | 'neutral' }) {
+  return <div className="diagnostics-detail-row"><div><strong>{label}</strong><span>{note}</span></div><span className={`diagnostics-detail-value diagnostics-detail-${tone}`}>{value}</span></div>
+}
+
+/** Renders one active native-session count. */
+function DiagnosticsSessionCard({ icon, label, count, detail }: { icon: ReactNode; label: string; count: number; detail: string }) {
+  return <div className="diagnostics-session-card"><span>{icon}</span><div><strong>{label}</strong><small>{detail}</small></div><b>{count}</b></div>
+}
+
+/** Renders one request timing metric. */
+function DiagnosticsRequestMetric({ label, value, note, tone = 'neutral' }: { label: string; value: string; note: string; tone?: 'good' | 'warning' | 'neutral' }) {
+  return <div className={`diagnostics-request-metric diagnostics-request-${tone}`}><span>{label}</span><strong>{value}</strong><code>{note}</code></div>
+}
+
+/** Renders a deterministic bounded counter map as compact rows. */
+function DiagnosticsCounterList({ title, values, emptyLabel = 'No observations' }: { title: string; values: Record<string, number>; emptyLabel?: string }) {
+  const entries = Object.entries(values).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, 8)
+  return <div className="diagnostics-counter-list"><span className="panel-eyebrow">{title}</span>{entries.length ? entries.map(([key, value]) => <div key={key}><code>{key || 'unknown'}</code><strong>{value}</strong></div>) : <small>{emptyLabel}</small>}</div>
+}
+
+/** Renders an explicit empty state inside a diagnostics panel. */
+function DiagnosticsEmptyState({ label, detail }: { label: string; detail: string }) {
+  return <div className="diagnostics-empty"><Check size={17} /><strong>{label}</strong><span>{detail}</span></div>
+}
+
+/** Returns the visual tone for one safe diagnostics state. */
+function diagnosticsStateTone(state: string): 'good' | 'warning' | 'neutral' {
+  if (state === 'available' || state === 'ready' || state === 'active') return 'good'
+  if (state === 'partial' || state === 'error' || state === 'unavailable' || state === 'permission-denied' || state === 'degraded') return 'warning'
+  return 'neutral'
+}
+
+/** Converts a diagnostics state into a compact operator label. */
+function diagnosticsStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    available: 'Available',
+    active: 'Active',
+    changed: 'Changed',
+    degraded: 'Degraded',
+    error: 'Error',
+    loading: 'Loading',
+    missing: 'Missing',
+    not_checked: 'Not checked',
+    'not-checked': 'Not checked',
+    'permission-denied': 'RBAC denied',
+    unavailable: 'Unavailable',
+  }
+  return labels[state] || titleCase(state || 'Unknown')
+}
+
+/** Formats a bounded discovery-cache age without inventing freshness. */
+function diagnosticsAgeLabel(seconds?: number): string {
+  if (seconds === undefined) return 'not loaded'
+  if (seconds < 60) return `${seconds}s old`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m old`
+  return `${Math.floor(seconds / 3600)}h old`
+}
+
+/** Formats process uptime using compact field-console time units. */
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  return `${Math.floor(seconds / 3600)}h ${Math.floor(seconds / 60) % 60}m`
+}
+
+/** Formats a request duration without noisy decimal precision. */
+function formatMilliseconds(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  if (value < 10) return value.toFixed(1)
+  return Math.round(value).toString()
+}
+
+/** Returns the total count of active diagnostics sessions. */
+function diagnosticsSessionTotal(sessions: DiagnosticsResponse['sessions']): number {
+  return sessions.terminal + sessions.logs + sessions.portForward + sessions.watch
+}
+
+/** Converts a watch lifecycle event into safe operator-facing copy. */
+function diagnosticsWatchStateLabel(state: string, reconnect = false): string {
+  if (state === 'opened') return reconnect ? 'Watch reconnected' : 'Watch opened'
+  if (state === 'error') return 'Watch error classified'
+  if (state === 'closed') return 'Watch closed'
+  return diagnosticsStateLabel(state)
+}
+
+/** Adds only safe correlation and retry metadata to a native stream failure message. */
+function streamFailureMessage(message: { message?: string; requestId?: string; retry?: RetryClassification }, fallback: string): string {
+  const details = [message.requestId ? `request ID ${message.requestId}` : '', message.retry ? `retry: ${message.retry}` : ''].filter(Boolean).join('; ')
+  const text = message.message || fallback
+  return details ? `${text} (${details})` : text
 }
 
 /** Renders the explicit disconnected state for an unavailable local audit store. */
@@ -3968,10 +4202,7 @@ function PodLogsPanel({ context, namespace, pod }: { context: string; namespace:
       setError('')
       try {
         const response = await fetch(logsUrl(context, namespace, pod, container, follow, previous, tailLines), { signal: controller.signal })
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => ({}))) as { error?: string }
-          throw new Error(payload.error || `Log request failed with ${response.status}`)
-        }
+        if (!response.ok) throw await responseApiError(response, `Log request failed with ${response.status}`)
         if (!response.body) {
           setLogs(await response.text())
           return
@@ -3988,7 +4219,7 @@ function PodLogsPanel({ context, namespace, pod }: { context: string; namespace:
         output += decoder.decode()
         setLogs(output)
       } catch (loadError) {
-        if ((loadError as Error).name !== 'AbortError') setError((loadError as Error).message)
+        if ((loadError as Error).name !== 'AbortError') setError((loadError as Error).name === 'ApiError' ? (loadError as Error).message : 'The local API could not be reached (retry: retry)')
       } finally {
         if (!controller.signal.aborted) setLoading(false)
       }
@@ -4103,7 +4334,7 @@ function PodTerminalPanel({ context, namespace, pod, object }: { context: string
         return
       }
       if (message.type === 'output') terminalRef.current?.write(message.data || '')
-      if (message.type === 'error') setError(message.message || 'The terminal session failed.')
+      if (message.type === 'error') setError(streamFailureMessage(message, 'The terminal session failed.'))
       if (message.type === 'closed') setStatus('closed')
     }
     socket.onerror = () => setError((current) => current || 'The terminal connection failed.')
@@ -4217,7 +4448,7 @@ function PodPortForwardPanel({ context, namespace, pod, object }: { context: str
         return
       }
       if (message.type === 'error') {
-        setError(message.message || 'The port-forward session failed.')
+        setError(streamFailureMessage(message, 'The port-forward session failed.'))
         setStatus('closed')
         socket.close()
         return

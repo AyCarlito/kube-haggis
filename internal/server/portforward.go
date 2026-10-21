@@ -27,6 +27,8 @@ type portForwardRequest struct {
 type portForwardMessage struct {
 	Type       string `json:"type"`
 	Message    string `json:"message,omitempty"`
+	RequestID  string `json:"requestId,omitempty"`
+	Retry      string `json:"retry,omitempty"`
 	TargetPort int    `json:"targetPort,omitempty"`
 	LocalPort  int    `json:"localPort,omitempty"`
 }
@@ -48,11 +50,18 @@ func (s *Server) portForwardHandler() http.Handler {
 // handlePortForward starts a native Pod forward and keeps it alive for the browser session.
 func (s *Server) handlePortForward(socket *websocket.Conn) {
 	request := socket.Request()
+	requestID := requestIDFor(request)
 	forwardRequest, err := parsePortForwardRequest(request)
 	if err != nil {
-		_ = sendPortForwardMessage(socket, portForwardMessage{Type: "error", Message: err.Error()})
+		category := safeErrorCategory(err)
+		_ = sendPortForwardMessage(socket, portForwardMessage{Type: "error", Message: safeStreamErrorMessage(err), RequestID: requestID, Retry: retryClassification(http.StatusBadRequest, category)})
 		return
 	}
+	telemetry := requestTelemetryFor(request)
+	sessionID := s.diagnosticStore().startSession("port-forward", telemetry.Context, telemetry.Resource)
+	defer func() {
+		s.diagnosticStore().finishSession(sessionID, "", telemetry.Operation)
+	}()
 
 	stopForwarding := make(chan struct{})
 	var stopOnce sync.Once
@@ -81,9 +90,15 @@ func (s *Server) handlePortForward(socket *websocket.Conn) {
 	case forwardErr := <-forwardErrors:
 		message := "port-forward session closed before listeners became ready"
 		if forwardErr != nil {
-			message = forwardErr.Error()
+			message = safeStreamErrorMessage(forwardErr)
+			s.diagnosticStore().finishSession(sessionID, safeErrorCategory(forwardErr), telemetry.Operation)
+			sessionID = ""
 		}
-		_ = sendPortForwardMessage(socket, portForwardMessage{Type: "error", Message: message})
+		category := "dependency-unavailable"
+		if forwardErr != nil {
+			category = safeErrorCategory(forwardErr)
+		}
+		_ = sendPortForwardMessage(socket, portForwardMessage{Type: "error", Message: message, RequestID: requestID, Retry: retryClassification(http.StatusBadGateway, category)})
 		return
 	case <-request.Context().Done():
 		return
@@ -91,6 +106,7 @@ func (s *Server) handlePortForward(socket *websocket.Conn) {
 
 	if err := sendPortForwardMessage(socket, portForwardMessage{
 		Type:       "ready",
+		RequestID:  requestID,
 		TargetPort: forwardRequest.targetPort,
 		LocalPort:  forwardRequest.localPort,
 	}); err != nil {
@@ -102,9 +118,12 @@ func (s *Server) handlePortForward(socket *websocket.Conn) {
 		return
 	}
 	if sessionErr != nil && !isPortForwardNormalError(sessionErr) {
-		_ = sendPortForwardMessage(socket, portForwardMessage{Type: "error", Message: sessionErr.Error()})
+		category := safeErrorCategory(sessionErr)
+		s.diagnosticStore().finishSession(sessionID, category, telemetry.Operation)
+		sessionID = ""
+		_ = sendPortForwardMessage(socket, portForwardMessage{Type: "error", Message: safeStreamErrorMessage(sessionErr), RequestID: requestID, Retry: retryClassification(http.StatusBadGateway, category)})
 	}
-	_ = sendPortForwardMessage(socket, portForwardMessage{Type: "closed"})
+	_ = sendPortForwardMessage(socket, portForwardMessage{Type: "closed", RequestID: requestID})
 }
 
 // parsePortForwardRequest validates the browser-facing port-forward query parameters.
