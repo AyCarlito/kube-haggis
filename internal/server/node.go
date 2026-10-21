@@ -13,6 +13,30 @@ import (
 // nodeActionLoader describes the native Node operation seam used by the HTTP handler.
 type nodeActionLoader func(context.Context, string, string, kube.NodeActionRequest) (kube.NodeActionResult, error)
 
+// nodeActionReviewBinding binds a normalized cluster-scoped Node operation to its exact action parameters.
+func nodeActionReviewBinding(contextName, name string, request kube.NodeActionRequest) reviewBinding {
+	request.Action = strings.ToLower(strings.TrimSpace(request.Action))
+	request.ExpectedResourceVersion = strings.TrimSpace(request.ExpectedResourceVersion)
+	request.TaintKey = strings.TrimSpace(request.TaintKey)
+	request.TaintValue = strings.TrimSpace(request.TaintValue)
+	request.TaintEffect = strings.TrimSpace(request.TaintEffect)
+	request.DryRun = false
+	scope := request.Action
+	if request.Action == "drain" {
+		scope = strings.TrimSpace(name)
+	}
+	return reviewBinding{
+		Context:                 strings.TrimSpace(contextName),
+		Version:                 "v1",
+		Resource:                "nodes",
+		Name:                    strings.TrimSpace(name),
+		ExpectedResourceVersion: request.ExpectedResourceVersion,
+		Action:                  "node-action",
+		ParametersHash:          hashReviewParameters(request),
+		ConfirmationScope:       scope,
+	}
+}
+
 // handleNodeAction runs one explicitly selected Node operation after the write-mode guard.
 func (s *Server) handleNodeAction(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
@@ -35,6 +59,15 @@ func (s *Server) handleNodeAction(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	query := request.URL.Query()
+	contextName := s.mutationReviewContext(request)
+	binding := nodeActionReviewBinding(contextName, query.Get("name"), payload)
+	if !payload.DryRun {
+		if err := s.consumeMutationReview(request, binding); err != nil {
+			s.recordMutation(request, nodeAuditOperation(payload.Action), "", "v1", "nodes", "", query.Get("name"), false, false, "mutation review was rejected")
+			writeError(writer, err)
+			return
+		}
+	}
 	loadAction := s.nodeAction
 	if loadAction == nil {
 		if s.kube == nil {
@@ -48,6 +81,9 @@ func (s *Server) handleNodeAction(writer http.ResponseWriter, request *http.Requ
 	if err != nil {
 		s.recordMutation(request, operation, "", "v1", "nodes", "", query.Get("name"), payload.DryRun, false, nodeAuditDetail(err))
 		writeError(writer, err)
+		return
+	}
+	if payload.DryRun && result.Status == "dry-run passed" && !s.writeMutationReviewHeader(writer, binding) {
 		return
 	}
 	if result.Status == "dry-run blocked" {

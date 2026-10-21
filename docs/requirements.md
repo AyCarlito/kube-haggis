@@ -8,7 +8,7 @@ The application is desktop-first and responsive. The application name is `KubeHa
 
 ## Implementation Status
 
-The repository currently contains the first usable vertical slice. The backend and browser UI are real Kubernetes integrations, not mock data, but the full agreed first-release operation set is not complete yet.
+The repository contains the completed agreed first-release operation set. The backend and browser UI are real Kubernetes integrations, not mock data. Planned follow-on requirements are documented separately below and are not yet implemented.
 
 ### Implemented
 
@@ -47,6 +47,14 @@ The repository currently contains the first usable vertical slice. The backend a
 - Deterministic fake-cluster and HTTP handler coverage for discovery, watches, mutations, permission failures, conflicts, dry-runs, and sensitive-error redaction.
 - Dedicated resource-version conflict review with safe current-object refresh, bounded difference summaries, local-draft preservation, and explicit retry preparation.
 - Local-only visual identity using the provided `haggis.svg` asset.
+- Revision-scoped discovery caching, bounded related-resource query planning, deferred reverse-owner scans, safe relationship diagnostics, and large-discovery benchmark coverage.
+- Complete discovery-backed GVR catalog with subresource capabilities, partial-discovery states, scope validation, and canonical resource routes.
+- Version-aware CRD capabilities with served/preferred/storage metadata, bounded printer columns, subresource details, and schema-form YAML fallbacks.
+- Reliable resource and Event watches with bounded relist recovery, freshness states, cancellation, and safe failure signals.
+- Bounded read-only operational packs for built-in networking, policy, autoscaling, quota, storage, ServiceAccount/RBAC, and Pod posture views.
+- Bounded global search with canonical GVR result links, partial-source states, explicit submit behavior, and revision-bound local saved views.
+- Short-lived server-bound mutation review handles with exact request bindings, one-use consumption, expiry, and frontend token clearing.
+- Local diagnostics with correlation IDs, safe request telemetry, readiness/liveness separation, discovery/session health, and bounded error history.
 
 ### Partially Implemented
 
@@ -164,3 +172,104 @@ The generic API layer must work with built-in resources and CRDs without requiri
 - Admission policy and webhook management
 - CRD installation, schema editing, and deletion safeguards
 - Custom-resource-specific actions exposed through configured Kubernetes subresources
+
+## Planned Follow-On Requirements
+
+The following requirements extend the completed first-release scope. Each heading indicates whether the follow-on requirement is implemented or planned.
+
+### F1. Related-resource query performance (Implemented)
+
+Improve the performance and predictability of the related-resource view without removing relationship coverage.
+
+- Cache API discovery per kubeconfig context and configuration revision, with single-flight loading and explicit invalidation after reload.
+- Resolve direct owners, selectors, storage bindings, and explicit references before attempting broad reverse-owner discovery.
+- Memoize target lookups within one relationship request and cap concurrent Kubernetes calls.
+- Enforce a per-request deadline and Kubernetes-call budget; an initial target is a two-second full-request deadline and no more than 32 Kubernetes calls.
+- Defer broad reverse-owner discovery to a secondary operation when it would delay the initial detail view.
+- Return partial or truncated relationship results with an explicit reason instead of failing the complete panel.
+- Include safe query-count and timing information for diagnostics.
+- Add a benchmark fixture with at least 1,000 discovered resources and establish a p95 latency target for direct relationships.
+
+### F2. Complete discovery-backed resource catalog (Implemented)
+
+Expose every discoverable built-in and custom top-level resource through a complete, unambiguous resource catalog.
+
+- Display resources grouped by API group, version, kind, scope, and resource name.
+- Use complete group/version/resource identity in routes and API requests; preserve existing short routes only when they are unambiguous.
+- Show discovered verbs, short names, categories, and supported subresource capabilities.
+- Treat subresources such as `status`, `scale`, `exec`, and `log` as capabilities rather than ordinary listable resources.
+- Derive namespace scope from discovery and reject caller-supplied scope values that contradict discovery.
+- Surface partial discovery, unavailable APIs, and RBAC-denied resources explicitly with retry or refresh actions.
+- Handle clusters with large numbers of CRDs without silently truncating the catalog.
+- Keep generic CRUD and YAML fallback available without adding a typed backend implementation for every resource kind.
+
+### F3. Version-aware CRD and custom-resource capabilities (Implemented)
+
+Make CRD metadata useful for browsing, forms, and resource operations while keeping CRD installation and schema mutation out of scope.
+
+- Show CRD group, kind, plural, scope, served versions, preferred version, and storage version.
+- Detect and expose `status` and `scale` subresources and make status-only fields visibly read-only where applicable.
+- Use safe CRD printer columns in custom-resource list views when available.
+- Generate forms from supported structural schemas and explain field-level fallbacks for unsupported schema constructs.
+- Preserve YAML as the complete fallback for recursive, union, preserve-unknown, or otherwise unsupported schemas.
+- Handle custom resources across all served versions without confusing version identity or resource-version concurrency.
+- Keep CRD installation, schema editing, and CRD deletion safeguards as separate future work.
+
+### F4. Reliable watches and freshness states (Implemented)
+
+Make live resource and Event data resilient to network failures, watch closure, and expired resource versions.
+
+- Reconnect closed watches with bounded exponential backoff.
+- Relist before restarting after resource-version expiration, HTTP 410 responses, or an unrecoverable watch error.
+- Distinguish live, reconnecting, stale, refreshing, and unavailable states in the UI.
+- Display the last successful refresh time for watched panels.
+- Cancel watches deterministically on navigation, context changes, kubeconfig reloads, and component disposal.
+- Cover watch closure, relist, HTTP 410, network recovery, and cancellation with deterministic tests.
+
+### F5. Built-in operational read packs (Implemented)
+
+Add structured, read-only views for high-value built-in resources while retaining generic YAML, Events, and related-resource fallback.
+
+- Add operational views for Ingress and EndpointSlice backend visibility.
+- Add NetworkPolicy summaries and affected Pod selector visibility.
+- Add HorizontalPodAutoscaler target and status visibility.
+- Add PodDisruptionBudget status and disruption-allowance visibility.
+- Add ResourceQuota and LimitRange usage summaries.
+- Add PersistentVolume and StorageClass relationship and lifecycle visibility.
+- Add ServiceAccount and read-only RBAC relationship visibility.
+- Add richer Pod scheduling, readiness, probes, termination reasons, volumes, and security-context summaries.
+- Show missing APIs, unsupported versions, and RBAC denial per panel without hiding unrelated information.
+- Use the generic dynamic resource layer and bounded extractors rather than a typed backend implementation for every kind.
+
+### F6. Global search and saved views (Implemented)
+
+Provide a bounded cross-resource search workflow for operators working across namespaces and resource kinds.
+
+- Search discovered resources by API group, kind, namespace, name, and labels.
+- Clearly identify partial results, loading states, and RBAC limitations.
+- Preserve search, scope, and filter state in deep-linkable URLs.
+- Allow locally persisted saved views for common resource, namespace, and label-selector combinations.
+- Do not issue an unbounded request to every discovered resource on every keystroke; use debouncing, bounded fan-out, or a controlled cache.
+- Keep cluster context and kubeconfig revision associated with saved views so stale views fail safely.
+
+### F7. Server-bound mutation review (Implemented)
+
+Ensure final mutations cannot bypass or reuse an unrelated client-side dry-run review.
+
+- Return a short-lived opaque review handle or equivalent server-verifiable token from a successful review.
+- Bind the review to context, group/version/resource, namespace/name, expected resource version, action parameters, and a sanitized body hash where applicable.
+- Require the review handle for the final mutation and reject missing, expired, stale, or mismatched reviews.
+- Invalidate review state after resource refresh, context switch, write-mode reset, or draft/action changes.
+- Preserve existing Secret masking and redaction rules in reviews, diffs, conflicts, logs, and audit history.
+- Keep force deletion and automatic conflict overwrites unavailable unless separately approved by the requirements.
+
+### F8. Local diagnostics and API health visibility (Implemented)
+
+Provide safe, local-only diagnostics for discovery, watches, API latency, stream sessions, and backend failures.
+
+- Assign a correlation ID to every HTTP request and return it in `X-Request-ID`.
+- Include safe request method, status, duration, context, resource identity, operation class, and error-category fields in backend logs.
+- Never include request bodies, Secret values, credentials, authorization headers, Pod output, or raw sensitive Kubernetes status data in diagnostics.
+- Add a diagnostics endpoint and UI panel showing kubeconfig revision, selected context, discovery-cache age, watch status, recent safe error categories, active native sessions, and audit-store availability.
+- Show correlation IDs and safe retry classifications in UI failures.
+- Distinguish liveness from dependency/readiness state for local health checks.

@@ -81,12 +81,23 @@ func TestHandleWorkloadActionRecordsRedactedFailure(t *testing.T) {
 	defer store.Close()
 	server := &Server{
 		audit: store,
-		workloadAction: func(context.Context, string, string, string, string, string, string, kube.WorkloadActionRequest) (kube.WorkloadActionResult, error) {
+		workloadAction: func(_ context.Context, _ string, _ string, _ string, _ string, _ string, _ string, request kube.WorkloadActionRequest) (kube.WorkloadActionResult, error) {
+			if request.DryRun {
+				return kube.WorkloadActionResult{Action: "image", Resource: "deployments", Namespace: "default", Name: "api", DryRun: true, Status: "dry-run passed"}, nil
+			}
 			return kube.WorkloadActionResult{}, errString("image was denied by Kubernetes RBAC for private:secret-value")
 		},
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/workload/action?context=field&group=apps&version=v1&resource=deployments&namespace=default&name=api", strings.NewReader(`{"action":"image","image":"private:secret-value"}`))
+	reviewRequest := httptest.NewRequest(http.MethodPost, "/api/workload/action?context=field&group=apps&version=v1&resource=deployments&namespace=default&name=api", strings.NewReader(`{"action":"image","dryRun":true,"expectedResourceVersion":"7","container":"app","image":"private:secret-value"}`))
+	reviewRequest.Header.Set("X-KubeHaggis-Write", "enabled")
+	reviewResponse := httptest.NewRecorder()
+	server.handleWorkloadAction(reviewResponse, reviewRequest)
+	if reviewResponse.Code != http.StatusOK || reviewResponse.Header().Get(mutationReviewHeader) == "" {
+		t.Fatalf("workload review failed: status=%d body=%s", reviewResponse.Code, reviewResponse.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/workload/action?context=field&group=apps&version=v1&resource=deployments&namespace=default&name=api", strings.NewReader(`{"action":"image","expectedResourceVersion":"7","container":"app","image":"private:secret-value"}`))
 	request.Header.Set("X-KubeHaggis-Write", "enabled")
+	request.Header.Set(mutationReviewHeader, reviewResponse.Header().Get(mutationReviewHeader))
 	response := httptest.NewRecorder()
 
 	server.handleWorkloadAction(response, request)
@@ -95,10 +106,12 @@ func TestHandleWorkloadActionRecordsRedactedFailure(t *testing.T) {
 		t.Fatalf("expected RBAC response, got %d %s", response.Code, response.Body.String())
 	}
 	entries, err := store.List(context.Background(), 10)
-	if err != nil || len(entries) != 1 {
+	if err != nil || len(entries) != 2 {
 		t.Fatalf("unexpected failure audit entries: %v %+v", err, entries)
 	}
-	if strings.Contains(entries[0].Detail, "secret-value") || strings.Contains(entries[0].Detail, "private") {
-		t.Fatalf("failure audit leaked request data: %q", entries[0].Detail)
+	for _, entry := range entries {
+		if strings.Contains(entry.Detail, "secret-value") || strings.Contains(entry.Detail, "private") {
+			t.Fatalf("failure audit leaked request data: %q", entry.Detail)
+		}
 	}
 }

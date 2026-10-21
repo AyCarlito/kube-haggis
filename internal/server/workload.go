@@ -13,6 +13,29 @@ import (
 // workloadActionLoader describes the native workload operation seam used by the HTTP handler.
 type workloadActionLoader func(context.Context, string, string, string, string, string, string, kube.WorkloadActionRequest) (kube.WorkloadActionResult, error)
 
+// workloadActionReviewBinding binds a normalized targeted workload request to its exact action parameters.
+func workloadActionReviewBinding(contextName, group, version, resource, namespace, name string, request kube.WorkloadActionRequest) reviewBinding {
+	request.Action = strings.ToLower(strings.TrimSpace(request.Action))
+	request.ExpectedResourceVersion = strings.TrimSpace(request.ExpectedResourceVersion)
+	request.Container = strings.TrimSpace(request.Container)
+	request.Image = strings.TrimSpace(request.Image)
+	request.Schedule = strings.TrimSpace(request.Schedule)
+	request.DryRun = false
+	return reviewBinding{
+		Context:                 strings.TrimSpace(contextName),
+		Group:                   strings.TrimSpace(group),
+		Version:                 strings.TrimSpace(version),
+		Resource:                strings.TrimSpace(resource),
+		Namespace:               strings.TrimSpace(namespace),
+		Name:                    strings.TrimSpace(name),
+		Namespaced:              true,
+		ExpectedResourceVersion: request.ExpectedResourceVersion,
+		Action:                  "workload-action",
+		ParametersHash:          hashReviewParameters(request),
+		ConfirmationScope:       request.Action,
+	}
+}
+
 // handleWorkloadAction runs one explicitly selected workload operation after the write-mode guard.
 func (s *Server) handleWorkloadAction(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
@@ -35,6 +58,15 @@ func (s *Server) handleWorkloadAction(writer http.ResponseWriter, request *http.
 		return
 	}
 	query := request.URL.Query()
+	contextName := s.mutationReviewContext(request)
+	binding := workloadActionReviewBinding(contextName, query.Get("group"), query.Get("version"), query.Get("resource"), query.Get("namespace"), query.Get("name"), payload)
+	if !payload.DryRun {
+		if err := s.consumeMutationReview(request, binding); err != nil {
+			s.recordMutation(request, workloadAuditOperation(payload.Action), query.Get("group"), query.Get("version"), query.Get("resource"), query.Get("namespace"), query.Get("name"), false, false, "mutation review was rejected")
+			writeError(writer, err)
+			return
+		}
+	}
 	loadAction := s.workloadAction
 	if loadAction == nil {
 		if s.kube == nil {
@@ -48,6 +80,9 @@ func (s *Server) handleWorkloadAction(writer http.ResponseWriter, request *http.
 	if err != nil {
 		s.recordMutation(request, operation, query.Get("group"), query.Get("version"), query.Get("resource"), query.Get("namespace"), query.Get("name"), payload.DryRun, false, workloadAuditDetail(err))
 		writeError(writer, err)
+		return
+	}
+	if payload.DryRun && result.Status == "dry-run passed" && !s.writeMutationReviewHeader(writer, binding) {
 		return
 	}
 	detail := "workload action applied"

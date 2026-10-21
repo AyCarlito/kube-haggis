@@ -4,6 +4,8 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpRight,
+  Bookmark,
+  BookmarkPlus,
   Box,
   Bug,
   Check,
@@ -51,13 +53,17 @@ import {
   deleteResources,
   fetchAudit,
   fetchContexts,
-  fetchDiscovery,
+  fetchDiagnostics,
+  fetchGlobalSearch,
+  fetchResourceCatalog,
   fetchOverview,
   fetchPVCOperations,
   fetchResource,
   fetchResourceSchema,
   fetchResourceEvents,
+  fetchOperationalReadPack,
   fetchRelated,
+  fetchRelatedReverse,
   fetchResources,
   downloadPodFile,
   launchEphemeralContainer,
@@ -66,33 +72,78 @@ import {
   uploadPodFile,
   resourceEventsWatchUrl,
   reloadContexts as reloadKubeconfig,
+  responseApiError,
   resourceConflictFromError,
   terminalUrl,
   watchUrl,
 } from './api'
+import {
+  catalogEventResourcePath,
+  catalogResourcePath,
+  catalogResourcePathForSlug,
+  groupResourceCatalog,
+  isAmbiguousCatalogRoute,
+  parseResourceRoute,
+  resolveCatalogDefinition,
+} from './catalog'
+import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchHref, searchQueryEquals, searchResultKey, searchResultResourcePath } from './search'
+import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
+import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
+import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
+import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
 import type {
   AuditEntry,
   AuditResponse,
   ClusterOverview,
   ContextSummary,
   ContextsResponse,
+  DiagnosticsErrorEvent,
+  DiagnosticsResponse,
+  DiagnosticsWatchEvent,
+  DiagnosticsWatchView,
+  CustomResourceCapabilities,
+  CustomResourcePrinterColumn,
   EphemeralContainerRequest,
   EventSummary,
   PortForwardMessage,
   ResourceDefinition,
+  ResourceCatalogResponse,
   ResourceDeleteItem,
   ResourceDeleteResponse,
   BulkDeleteResponse,
   ResourceConflictResponse,
+  ResourceEventsResponse,
   ResourceListResponse,
   ResourceObject,
   ResourceSchemaField,
   ResourceSchemaResponse,
+  OperationalReadPackResponse,
+  OperationalReadPackPanel as OperationalReadPackPanelModel,
+  IngressReadPackData,
+  EndpointSliceReadPackData,
+  NetworkPolicyReadPackData,
+  HorizontalPodAutoscalerReadPackData,
+  PodDisruptionBudgetReadPackData,
+  ResourceQuotaReadPackData,
+  LimitRangeReadPackData,
+  PersistentVolumeReadPackData,
+  StorageClassReadPackData,
+  ServiceAccountReadPackData,
+  PodReadPackData,
+  OperationalReadPackReference,
+  OperationalCondition,
+  PodContainerSummary,
   ResourceSummary,
+  SavedSearchView,
+  SearchQuery,
+  SearchResponse,
+  SearchResult,
+  SearchSource,
   RelatedAggregateState,
-  RelatedResource,
   RelatedResourcesResponse,
+  RelatedResource,
   RouteState,
+  RetryClassification,
   TerminalMessage,
   MetricsOverview,
   MetricsState,
@@ -113,19 +164,19 @@ import type {
 } from './types'
 
 const commonDefinitions: ResourceDefinition[] = [
-  { group: 'apps', version: 'v1', resource: 'deployments', kind: 'Deployment', namespaced: true, verbs: [] },
-  { group: 'apps', version: 'v1', resource: 'statefulsets', kind: 'StatefulSet', namespaced: true, verbs: [] },
-  { group: 'apps', version: 'v1', resource: 'daemonsets', kind: 'DaemonSet', namespaced: true, verbs: [] },
-  { group: 'batch', version: 'v1', resource: 'jobs', kind: 'Job', namespaced: true, verbs: [] },
-  { group: 'batch', version: 'v1', resource: 'cronjobs', kind: 'CronJob', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'pods', kind: 'Pod', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'services', kind: 'Service', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'configmaps', kind: 'ConfigMap', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'secrets', kind: 'Secret', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'persistentvolumeclaims', kind: 'PersistentVolumeClaim', namespaced: true, verbs: [] },
-  { group: '', version: 'v1', resource: 'nodes', kind: 'Node', namespaced: false, verbs: [] },
-  { group: '', version: 'v1', resource: 'namespaces', kind: 'Namespace', namespaced: false, verbs: [] },
-  { group: '', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, verbs: [] },
+  { group: 'apps', version: 'v1', resource: 'deployments', kind: 'Deployment', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: 'apps', version: 'v1', resource: 'statefulsets', kind: 'StatefulSet', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: 'apps', version: 'v1', resource: 'daemonsets', kind: 'DaemonSet', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: 'batch', version: 'v1', resource: 'jobs', kind: 'Job', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: 'batch', version: 'v1', resource: 'cronjobs', kind: 'CronJob', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'pods', kind: 'Pod', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'services', kind: 'Service', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'configmaps', kind: 'ConfigMap', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'secrets', kind: 'Secret', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'persistentvolumeclaims', kind: 'PersistentVolumeClaim', namespaced: true, scope: 'Namespaced', verbs: [] },
+  { group: '', version: 'v1', resource: 'nodes', kind: 'Node', namespaced: false, scope: 'Cluster', verbs: [] },
+  { group: '', version: 'v1', resource: 'namespaces', kind: 'Namespace', namespaced: false, scope: 'Cluster', verbs: [] },
+  { group: '', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, scope: 'Namespaced', verbs: [] },
 ]
 
 /** Identifies the safe summary columns available in every generic resource table. */
@@ -173,10 +224,13 @@ const navGroups = [
     label: 'Observe',
     items: [
       { label: 'Cluster overview', resource: undefined, icon: Gauge },
+      { label: 'Global search', path: '/search', icon: Search },
+      { label: 'API resource catalog', path: '/catalog', icon: Box },
       { label: 'Pods', resource: 'pods', icon: CircleDot },
       { label: 'Nodes', resource: 'nodes', icon: Server },
       { label: 'Events', resource: 'events', icon: Activity },
       { label: 'Mutation history', path: '/history', icon: History },
+      { label: 'Diagnostics', path: '/diagnostics', icon: Settings2 },
     ],
   },
   {
@@ -205,11 +259,16 @@ export default function App() {
   const [contexts, setContexts] = useState<ContextsResponse | null>(null)
   const [selectedContext, setSelectedContext] = useState('')
   const [selectedNamespace, setSelectedNamespace] = useState('all')
-  const [definitions, setDefinitions] = useState<ResourceDefinition[]>(commonDefinitions)
+  const [definitions, setDefinitions] = useState<ResourceDefinition[]>([])
+  const [catalog, setCatalog] = useState<ResourceCatalogResponse | null>(null)
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogError, setCatalogError] = useState('')
+  const [catalogRefreshNonce, setCatalogRefreshNonce] = useState(0)
   const [writeEnabled, setWriteEnabled] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [contextLoading, setContextLoading] = useState(true)
   const [contextRequestError, setContextRequestError] = useState('')
+  const [kubeconfigReloadEpoch, setKubeconfigReloadEpoch] = useState(0)
   const contextRequestID = useRef(0)
   const contextLoadingRef = useRef(true)
 
@@ -263,22 +322,36 @@ export default function App() {
     const routeNamespace = new URLSearchParams(window.location.search).get('namespace')
     setSelectedNamespace(routeNamespace || readNamespace(selectedContext))
     setWriteEnabled(false)
-    fetchDiscovery(selectedContext)
-      .then((nextDefinitions) => {
-        if (active && nextDefinitions.length > 0) setDefinitions(nextDefinitions)
+    setCatalog(null)
+    setDefinitions([])
+    setCatalogLoading(true)
+    setCatalogError('')
+    fetchResourceCatalog(selectedContext, catalogRefreshNonce > 0)
+      .then((nextCatalog) => {
+        if (active) {
+          setCatalog(nextCatalog)
+          setDefinitions(nextCatalog.items)
+          setCatalogError('')
+        }
       })
-      .catch(() => {
-        if (active) setDefinitions((currentDefinitions) => currentDefinitions.length ? currentDefinitions : commonDefinitions)
+      .catch((loadError: Error) => {
+        if (active) {
+          setCatalog(null)
+          setDefinitions([])
+          setCatalogError(loadError.message)
+        }
       })
+      .finally(() => active && setCatalogLoading(false))
     return () => {
       active = false
     }
-  }, [selectedContext, contextRevision])
+  }, [selectedContext, contextRevision, catalogRefreshNonce])
 
   /** Forces a kubeconfig reload while preserving the selected context and namespace. */
   async function reloadKubeconfigSources() {
     const requestID = contextRequestID.current + 1
     contextRequestID.current = requestID
+    setKubeconfigReloadEpoch((value) => value + 1)
     contextLoadingRef.current = true
     setContextLoading(true)
     setContextRequestError('')
@@ -296,6 +369,11 @@ export default function App() {
         setContextLoading(false)
       }
     }
+  }
+
+  /** Retries API discovery and invalidates the server-side catalog cache. */
+  function retryCatalog() {
+    setCatalogRefreshNonce((value) => value + 1)
   }
 
   /** Navigates to a route while preserving the selected context and namespace. */
@@ -338,15 +416,30 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
-  const activeDefinition = route.resource ? resolveDefinition(route.resource, definitions) : undefined
+  const activeDefinition = route.resource ? resolveCatalogDefinition(route, definitions) : undefined
+  const ambiguousShortRoute = route.resource ? isAmbiguousCatalogRoute(route, definitions) : false
   const activeContext = contexts?.contexts.find((item) => item.name === selectedContext)
   const validResourceName = route.name && route.name !== 'undefined' && route.name !== 'null' ? route.name : undefined
   const content = !contexts || (contexts.contexts.length > 0 && !selectedContext) ? (
     <LoadingState label="Reading local kubeconfig" />
+  ) : route.view === 'diagnostics' ? (
+    <DiagnosticsPage context={selectedContext} revision={contextRevision} />
   ) : route.view === 'history' ? (
     <MutationHistoryPage contexts={contexts} selectedContext={selectedContext} activeContext={activeContext} revision={contextRevision} />
+  ) : route.view === 'search' ? (
+    <GlobalSearchPage context={selectedContext} namespace={selectedNamespace} revision={contextRevision} searchKey={route.search || ''} definitions={definitions} catalog={catalog} catalogLoading={catalogLoading} onNamespace={changeNamespace} onOpen={(result) => navigate(searchResultResourcePath(result), result.resource, result.name, result.namespace || undefined)} />
+  ) : route.view === 'catalog' ? (
+    <ResourceCatalogPage catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} onOpen={(definition) => navigate(catalogResourcePath(definition), definition.resource)} />
   ) : contexts.error || contexts.contexts.length === 0 ? (
     <SetupState error={contexts.error} />
+  ) : route.resource && catalogLoading && !catalog ? (
+    <LoadingState label="Reading the Kubernetes API catalog" />
+  ) : route.resource && catalogError && !catalog ? (
+    <CatalogState title="Resource catalog unavailable" detail={catalogError} onRetry={retryCatalog} />
+  ) : route.resource && ambiguousShortRoute ? (
+    <CatalogState title="Resource route is ambiguous" detail={`The short route /resources/${route.resource} matches more than one discovered API resource. Open the catalog and choose its full group/version/resource identity.`} onRetry={() => navigate('/catalog')} />
+  ) : route.resource && !activeDefinition ? (
+    <CatalogState title="Resource is not in the catalog" detail="This deep link does not match a currently discovered group, version, and resource. Refresh discovery before retrying." onRetry={retryCatalog} />
   ) : validResourceName && activeDefinition ? (
     <ResourceDetailPage
       context={selectedContext}
@@ -354,18 +447,22 @@ export default function App() {
       definition={activeDefinition}
       name={validResourceName}
       writeEnabled={writeEnabled}
-      onBack={() => navigate(`/resources/${activeDefinition.resource}`, activeDefinition.resource)}
-      onOpenEvent={(event) => navigate(`/resources/events/${encodeURIComponent(event.name)}`, 'events', event.name, event.namespace || undefined)}
-      onOpenResource={(definition, resourceName, resourceNamespace) => navigate(`/resources/${definition.resource}/${encodeURIComponent(resourceName)}`, definition.resource, resourceName, resourceNamespace)}
+      revision={contextRevision}
+      reloadEpoch={kubeconfigReloadEpoch}
+      onBack={() => navigate(catalogResourcePath(activeDefinition), activeDefinition.resource)}
+      onOpenEvent={(event) => navigate(catalogEventResourcePath(definitions, event.name), 'events', event.name, event.namespace || undefined)}
+      onOpenResource={(definition, resourceName, resourceNamespace) => navigate(catalogResourcePath(definition, resourceName), definition.resource, resourceName, resourceNamespace)}
     />
   ) : route.resource && activeDefinition ? (
     <ResourceListPage
       context={selectedContext}
       namespace={selectedNamespace}
       definition={activeDefinition}
+      revision={contextRevision}
+      reloadEpoch={kubeconfigReloadEpoch}
       writeEnabled={writeEnabled}
-      onOpen={(name, itemNamespace) => navigate(`/resources/${activeDefinition.resource}/${encodeURIComponent(name)}`, activeDefinition.resource, name, activeDefinition.namespaced && selectedNamespace === 'all' ? itemNamespace : undefined)}
-      onCreate={() => navigate(`/resources/${activeDefinition.resource}/new`, activeDefinition.resource, 'new')}
+      onOpen={(name, itemNamespace) => navigate(catalogResourcePath(activeDefinition, name), activeDefinition.resource, name, activeDefinition.namespaced && selectedNamespace === 'all' ? itemNamespace : undefined)}
+      onCreate={() => navigate(catalogResourcePath(activeDefinition, 'new'), activeDefinition.resource, 'new')}
     />
   ) : (
     <OverviewPage context={selectedContext} contexts={contexts} activeContext={activeContext} revision={contextRevision} />
@@ -392,7 +489,7 @@ export default function App() {
               {group.items.map((item) => {
                 const Icon = item.icon
                 const isActive = 'path' in item ? route.path === item.path : item.resource ? route.resource === item.resource : !route.resource && !route.view
-                const destination = 'path' in item && item.path ? item.path : item.resource ? `/resources/${item.resource}` : '/'
+                const destination = 'path' in item && item.path ? item.path : item.resource === 'events' ? catalogEventResourcePath(definitions) : item.resource ? catalogResourcePathForSlug(item.resource, definitions) : '/'
                 return (
                   <a
                     className={`nav-item ${isActive ? 'nav-item-active' : ''}`}
@@ -423,7 +520,7 @@ export default function App() {
           <div className="crumbs">
             <span className="crumb-muted">KubeHaggis</span>
             <span className="crumb-slash">/</span>
-            <span>{route.view === 'history' ? 'Mutation history' : route.resource ? titleCase(route.resource) : 'Cluster overview'}</span>
+            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'diagnostics' ? 'Diagnostics' : route.view === 'search' ? 'Global search' : route.view === 'catalog' ? 'API catalog' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
           </div>
           <div className="topbar-tools">
             <ContextPicker contexts={contexts?.contexts ?? []} value={selectedContext} onChange={changeContext} />
@@ -439,13 +536,14 @@ export default function App() {
             <button className="icon-button kubeconfig-reload" onClick={() => void reloadKubeconfigSources()} disabled={contextLoading} aria-label="Reload kubeconfig" title="Reload kubeconfig">
               {contextLoading ? <LoaderCircle size={17} className="spin" /> : <RefreshCw size={17} />}
             </button>
-            <button className="icon-button" aria-label="Settings">
+            <button className="icon-button" onClick={() => navigate('/diagnostics')} aria-label="Open diagnostics" title="Open diagnostics">
               <Settings2 size={18} />
             </button>
           </div>
         </header>
         <div className="page-scroll">
           {contexts && !(contexts.error && contexts.contexts.length === 0) && (contextLoading || contexts.sourceState === 'changed' || Boolean(contexts.reloadError) || Boolean(contextRequestError) || (Boolean(selectedContext) && contexts.contexts.length > 0 && !activeContext)) ? <KubeconfigNotice state={contexts.sourceState} error={contexts.reloadError || contextRequestError} selectedContext={selectedContext} selectedContextAvailable={Boolean(activeContext)} loading={contextLoading} onReload={() => void reloadKubeconfigSources()} /> : null}
+          {selectedContext && (catalogLoading || Boolean(catalogError) || (catalog && catalog.state !== 'available')) ? <DiscoveryNotice catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} /> : null}
           {content}
         </div>
       </main>
@@ -818,6 +916,325 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
   return <div className="state-page"><div className="state-card"><span className="state-icon"><Box size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> Quiet field</span><h1>{title}</h1><p>{detail}</p></div></div>
 }
 
+/** Renders explicit discovery health while keeping usable catalog rows visible. */
+function DiscoveryNotice({ catalog, loading, error, onRetry }: { catalog: ResourceCatalogResponse | null; loading: boolean; error: string; onRetry: () => void }) {
+  const issueCount = catalog?.issues?.length ?? 0
+  let title = 'API catalog is partial'
+  let detail = `${issueCount} discovery source${issueCount === 1 ? '' : 's'} need attention. Known resources remain available.`
+  let tone = 'partial'
+  if (loading) {
+    title = 'Reading the Kubernetes API catalog'
+    detail = 'Loading every served API group and version. The catalog will not be reduced to a preferred-version shortcut.'
+    tone = 'loading'
+  } else if (error) {
+    title = 'API catalog could not be loaded'
+    detail = 'The current resource route stays unresolved until discovery succeeds. Retry after the API server or permissions recover.'
+    tone = 'error'
+  } else if (catalog?.state === 'permission-denied') {
+    title = 'API catalog access is restricted'
+    detail = 'Kubernetes RBAC denied discovery for the available API sources. Retry after access changes.'
+    tone = 'error'
+  } else if (catalog?.state === 'unavailable') {
+    title = 'Some Kubernetes APIs are unavailable'
+    detail = 'The catalog retained any successful discovery results. Retry to check unavailable API groups again.'
+    tone = 'unavailable'
+  } else if (catalog?.state === 'error') {
+    title = 'API discovery returned an error'
+    detail = 'Some group or version metadata could not be read. Retry to refresh the catalog.'
+    tone = 'error'
+  }
+  return <div className={`discovery-notice discovery-notice-${tone}`} role="status"><span className="discovery-notice-mark">{loading ? <LoaderCircle size={15} className="spin" /> : <AlertTriangle size={15} />}</span><div><strong>{title}</strong><span>{detail}</span>{catalog?.issues?.slice(0, 3).map((issue, index) => <code key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}>{issue.message}</code>)}{error && <code>{error}</code>}</div>{!loading && <button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={14} /> Retry discovery</button>}</div>
+}
+
+/** Renders the complete grouped API resource catalog without truncating large CRD sets. */
+function ResourceCatalogPage({ catalog, loading, error, onRetry, onOpen }: { catalog: ResourceCatalogResponse | null; loading: boolean; error: string; onRetry: () => void; onOpen: (definition: ResourceDefinition) => void }) {
+  if (loading && !catalog) return <LoadingState label="Reading the Kubernetes API catalog" />
+  if (error && !catalog) return <CatalogState title="Resource catalog unavailable" detail={error} onRetry={onRetry} />
+  if (!catalog) return <CatalogState title="No API catalog loaded" detail="Choose a cluster context to read its discoverable resources." onRetry={onRetry} />
+  const groups = groupResourceCatalog(catalog.items)
+  return <div className="catalog-page">
+    <section className="catalog-intro">
+      <div><div className="eyebrow"><span className="eyebrow-mark" /> Kubernetes API / discovery</div><h1>Resource catalog</h1><p className="intro-copy">Every discovered top-level resource, served version, namespace scope, and subresource capability in this cluster. Short links are only retained when their resource name is unambiguous.</p></div>
+      <div className="catalog-stamp"><span className="stamp-label">Catalog coverage</span><strong>{catalog.items.length}</strong><code>{catalog.state === 'available' ? 'all discovery sources online' : `${catalog.issues?.length ?? 0} source issues`}</code></div>
+    </section>
+    {catalog.issues?.length ? <div className="catalog-issues">{catalog.issues.map((issue, index) => <div className={`catalog-issue catalog-issue-${issue.state}`} key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={14} /><div><strong>{issue.group ? `${issue.group}/${issue.version}` : issue.version || 'API discovery'}</strong><span>{issue.message}</span></div><button type="button" className="text-button" onClick={onRetry}>Retry</button></div>)}</div> : null}
+    {!groups.length ? <div className="catalog-empty"><Box size={22} /><strong>No top-level resources were discovered</strong><span>Retry discovery when the Kubernetes API is reachable.</span><button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={14} /> Refresh catalog</button></div> : <div className="catalog-groups">{groups.map(({ group, versions }) => <section className="catalog-group" key={group}><div className="catalog-group-heading"><span className="panel-eyebrow">API group</span><h2>{group || 'Core'}</h2><code>{versions.reduce((total, version) => total + version.definitions.length, 0)} resources</code></div>{versions.map(({ version, definitions }) => <div className="catalog-version" key={`${group}/${version}`}><div className="catalog-version-heading"><strong>{version}</strong><span>{definitions.length} top-level resource{definitions.length === 1 ? '' : 's'}</span></div><div className="catalog-table"><div className="catalog-table-heading"><span>Resource</span><span>Kind</span><span>Scope</span><span>Discovery</span><span>Capabilities</span></div>{definitions.map((definition) => <CatalogResourceRow key={`${definition.group}/${definition.version}/${definition.resource}`} definition={definition} onOpen={onOpen} />)}</div></div>)}</section>)}</div>}
+  </div>
+}
+
+/** Renders one complete GVR row with verbs, aliases, categories, and subresources. */
+function CatalogResourceRow({ definition, onOpen }: { definition: ResourceDefinition; onOpen: (definition: ResourceDefinition) => void }) {
+  const scope = definition.scope || (definition.namespaced ? 'Namespaced' : 'Cluster')
+  const subresources = definition.subresources ?? []
+  const custom = definition.customResourceCapabilities
+  return <button type="button" className="catalog-row" onClick={() => onOpen(definition)}><span className="catalog-resource-cell"><strong>{definition.resource}</strong><code>{definition.group ? `${definition.group}/${definition.version}` : definition.version}</code></span><span className="catalog-kind-cell">{definition.kind || 'Unknown kind'}</span><span><span className={`catalog-scope catalog-scope-${scope.toLowerCase()}`}>{scope}</span></span><span className="catalog-meta-cell"><span className="catalog-chip-list">{(definition.verbs ?? []).map((verb) => <code key={verb}>{verb}</code>)}</span>{definition.shortNames?.length ? <small>aliases: {definition.shortNames.join(', ')}</small> : null}{definition.categories?.length ? <small>categories: {definition.categories.join(', ')}</small> : null}{custom ? <><small>CRD / {customResourceCapabilityLabel(custom)}</small><span className="catalog-chip-list">{custom.statusSubresource && <code>status</code>}{custom.scaleSubresource && <code>scale</code>}{custom.printerColumns?.length ? <code>{custom.printerColumns.length} printer columns</code> : null}</span></> : null}</span><span className="catalog-meta-cell">{subresources.length ? <span className="catalog-chip-list">{subresources.map((subresource) => <code key={subresource.name}>{subresource.name}</code>)}</span> : <small>No discovered subresources</small>}{subresources.map((subresource) => <small key={`${subresource.name}-verbs`}>{subresource.name}: {(subresource.verbs ?? []).join(', ') || 'verbs not advertised'}</small>)}{custom?.printerColumnWarnings?.length ? <small>Some printer columns use the generic table fallback.</small> : null}</span></button>
+}
+
+/** Renders a retryable resource-catalog failure without substituting a guessed resource. */
+function CatalogState({ title, detail, onRetry }: { title: string; detail: string; onRetry: () => void }) {
+  return <div className="state-page"><div className="state-card"><span className="state-icon state-icon-warning"><AlertTriangle size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> API catalog</span><h1>{title}</h1><p>{detail}</p><button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={15} /> Retry discovery</button></div></div>
+}
+
+/** Renders the explicit-submit global search page and its revision-bound saved views. */
+function GlobalSearchPage({ context, namespace, revision, searchKey, definitions, catalog, catalogLoading, onNamespace, onOpen }: { context: string; namespace: string; revision: number; searchKey: string; definitions: ResourceDefinition[]; catalog: ResourceCatalogResponse | null; catalogLoading: boolean; onNamespace: (namespace: string) => void; onOpen: (result: SearchResult) => void }) {
+  const initialQuery = parseSearchQuery(searchKey)
+  const [query, setQuery] = useState<SearchQuery>(() => initialQuery)
+  const [submittedQuery, setSubmittedQuery] = useState<SearchQuery | null>(() => hasSearchFilters(initialQuery) ? initialQuery : null)
+  const [response, setResponse] = useState<SearchResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [savedViews, setSavedViews] = useState<SavedSearchView[]>(() => {
+    const storage = browserSavedViewStorage()
+    return storage ? loadSavedSearchViews(storage) : []
+  })
+  const [viewName, setViewName] = useState('')
+  const [viewNotice, setViewNotice] = useState('')
+  const searchAbortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    const nextQuery = parseSearchQuery(searchKey)
+    const nextSubmittedQuery = hasSearchFilters(nextQuery) ? nextQuery : null
+    searchAbortRef.current?.abort()
+    searchAbortRef.current = null
+    setQuery((current) => searchQueryEquals(current, nextQuery) ? current : nextQuery)
+    setSubmittedQuery((current) => {
+      if (!nextSubmittedQuery) return current === null ? current : null
+      return current && searchQueryEquals(current, nextSubmittedQuery) ? current : nextSubmittedQuery
+    })
+    setResponse(null)
+    setLoading(false)
+    setError('')
+    setViewNotice('')
+  }, [searchKey])
+
+  useEffect(() => {
+    searchAbortRef.current?.abort()
+    searchAbortRef.current = null
+    setQuery((current) => current.namespace === namespace ? current : { ...current, namespace })
+    setSubmittedQuery((current) => current && current.namespace === namespace ? current : null)
+    setResponse(null)
+    setError('')
+  }, [namespace])
+
+  useEffect(() => {
+    if (!context || !submittedQuery) {
+      setLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    searchAbortRef.current = controller
+    setLoading(true)
+    setError('')
+    fetchGlobalSearch(context, submittedQuery, controller.signal)
+      .then((nextResponse) => {
+        if (controller.signal.aborted) return
+        setResponse(nextResponse)
+      })
+      .catch((loadError: unknown) => {
+        if (controller.signal.aborted || (loadError as Error).name === 'AbortError') return
+        setResponse(null)
+        setError('Global search could not be completed. Kubernetes error details are hidden by the local server; retry the search.')
+      })
+      .finally(() => !controller.signal.aborted && setLoading(false))
+    return () => {
+      controller.abort()
+      if (searchAbortRef.current === controller) searchAbortRef.current = null
+    }
+  }, [context, revision, submittedQuery])
+
+  /** Updates one filter and immediately records the deep-linkable URL without issuing a request. */
+  function updateQuery(field: keyof SearchQuery, value: string) {
+    const next = normalizeSearchQuery({ ...query, [field]: value })
+    setQuery(next)
+    if (field === 'namespace') onNamespace(next.namespace)
+    window.history.replaceState({}, '', searchHref(context, next))
+  }
+
+  /** Submits the current filter model as the next bounded Kubernetes search. */
+  function submitSearch() {
+    setViewNotice('')
+    setError('')
+    setResponse(null)
+    setSubmittedQuery({ ...query })
+  }
+
+  /** Clears search filters while retaining the active namespace scope. */
+  function clearSearch() {
+    const next = emptySearchQuery(namespace)
+    setQuery(next)
+    setSubmittedQuery(null)
+    setResponse(null)
+    setError('')
+    setViewNotice('')
+    window.history.replaceState({}, '', searchHref(context, next))
+  }
+
+  /** Stores the current filters only when the active context and catalog are available. */
+  function saveView() {
+    const storage = browserSavedViewStorage()
+    if (!storage) {
+      setViewNotice('Browser storage is unavailable; this view was not saved.')
+      return
+    }
+    if (!context || !catalog || catalogLoading || catalog.state !== 'available' || !definitions.length) {
+      setViewNotice('Wait for the current API catalog before saving a view.')
+      return
+    }
+    const view = createSavedSearchView(viewName, context, revision, query, definitions)
+    const next = upsertSavedSearchView(savedViews, view)
+    const persisted = persistSavedSearchViews(storage, next)
+    if (!persisted.some((candidate) => candidate.id === view.id)) {
+      setViewNotice('Browser storage could not retain this view within its fixed limit.')
+      return
+    }
+    setSavedViews(persisted)
+    setViewName('')
+    setViewNotice(`Saved “${view.name}” for ${context} at revision ${revision}.`)
+  }
+
+  /** Applies a view only after context, revision, and catalog identity validation succeeds. */
+  function applyView(view: SavedSearchView) {
+    if (!catalog || catalogLoading || catalog.state !== 'available' || !isSavedSearchViewApplicable(view, context, revision, definitions)) {
+      setViewNotice(`“${view.name}” is stale or no longer matches this context's discovered resources. Delete it or save a new view.`)
+      return
+    }
+    const next = normalizeSearchQuery(view.query)
+    setQuery(next)
+    setSubmittedQuery(next)
+    if (next.namespace !== namespace) onNamespace(next.namespace)
+    window.history.replaceState({}, '', searchHref(context, next))
+    setViewNotice(`Applied “${view.name}”.`)
+  }
+
+  /** Deletes one local view and persists the remaining bounded collection. */
+  function deleteView(view: SavedSearchView) {
+    const next = removeSavedSearchView(savedViews, view.id)
+    const storage = browserSavedViewStorage()
+    setSavedViews(storage ? persistSavedSearchViews(storage, next) : next)
+    setViewNotice(`Deleted “${view.name}”.`)
+  }
+
+  const groupOptions = Array.from(new Set(definitions.map((definition) => definition.group || 'core'))).sort((left, right) => left.localeCompare(right))
+  return (
+    <div className="search-page">
+      <section className="search-intro">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-mark" /> Global field scan / read-only</div>
+          <h1>Search the cluster</h1>
+          <p className="intro-copy">Find named objects across discovered API groups without guessing a short resource route. Every result keeps its complete group, version, and resource identity.</p>
+        </div>
+        <div className="search-stamp">
+          <span className="stamp-label">Current search scope</span>
+          <strong>{context || 'No context selected'}</strong>
+          <code>{namespace === 'all' ? 'all namespaces' : namespace} / kubeconfig rev {revision || '—'}</code>
+          <span className="stamp-status"><span className="signal-dot signal-dot-good" /> local backend / bounded scan</span>
+        </div>
+      </section>
+
+      <div className="search-layout">
+        <main className="search-main">
+          <section className="search-form-panel panel">
+            <div className="search-form-heading"><div><span className="panel-eyebrow">Operator query</span><h2>Set the field coordinates</h2><p>Typing changes only the URL. Submit deliberately to scan at most 24 sources and 200 summaries.</p></div><span className="search-budget-chip"><Search size={13} /> 24 sources / 6 concurrent</span></div>
+            <form className="search-form" onSubmit={(event) => { event.preventDefault(); submitSearch() }}>
+              <label className="search-primary-field"><Search size={17} /><span className="sr-only">Search text</span><input value={query.query} onChange={(event) => updateQuery('query', event.target.value)} placeholder="Search kind, resource, namespace, or object name" /><kbd>submit</kbd></label>
+              <div className="search-filter-grid">
+                <label className="search-control"><span>API group</span><select value={query.group} onChange={(event) => updateQuery('group', event.target.value)}><option value="">All groups</option>{groupOptions.map((group) => <option value={group} key={group}>{group === 'core' ? 'Core API' : group}</option>)}</select></label>
+                <label className="search-control"><span>Kind</span><input value={query.kind} onChange={(event) => updateQuery('kind', event.target.value)} placeholder="Deployment" /></label>
+                <label className="search-control"><span>Resource</span><input value={query.resource} onChange={(event) => updateQuery('resource', event.target.value)} placeholder="deployments" /></label>
+                <label className="search-control"><span>Namespace scope</span><input value={query.namespace === 'all' ? '' : query.namespace} onChange={(event) => updateQuery('namespace', event.target.value || 'all')} placeholder="all namespaces" /></label>
+                <label className="search-control"><span>Name / exact field selector</span><input value={query.name} onChange={(event) => updateQuery('name', event.target.value)} placeholder="api-server" /></label>
+                <label className="search-control search-control-wide"><span>Label selector / sent to Kubernetes</span><input value={query.labelSelector} onChange={(event) => updateQuery('labelSelector', event.target.value)} placeholder="app=api,track=stable" /></label>
+              </div>
+              <div className="search-form-actions"><span>Empty searches are allowed only by explicit submit and remain bounded.</span><div><button type="button" className="text-button" onClick={clearSearch}>Clear filters</button><button type="submit" className="primary-button" disabled={!context}><Search size={15} /> Run search</button></div></div>
+            </form>
+          </section>
+
+          {viewNotice && <div className="search-view-notice" role="status"><Bookmark size={14} />{viewNotice}</div>}
+          {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
+          {response && <SearchResponseNotice response={response} />}
+          {loading && !response && <div className="search-loading"><LoaderCircle size={18} className="spin" /> Reading bounded search sources</div>}
+          {loading && response && <div className="search-refresh-strip"><LoaderCircle size={14} className="spin" /> Refreshing this submitted search; the previous bounded result remains visible.</div>}
+          {response && <SearchSourcesPanel sources={response.sources} issues={response.issues} />}
+          {response && response.items.length > 0 && <SearchResultTable items={response.items} onOpen={onOpen} />}
+          {response && !response.items.length && !loading && <SearchNoResults response={response} />}
+          {!response && !loading && <div className="search-landing panel"><span className="search-landing-mark"><BookmarkPlus size={21} /></span><strong>Ready for a deliberate scan</strong><span>Use a name, kind, resource, namespace, or label selector, then run the search. No Kubernetes list calls happen while you type.</span></div>}
+        </main>
+
+        <aside className="saved-views-panel panel">
+          <div className="saved-views-heading"><div><span className="panel-eyebrow">Local bookmarks</span><h2>Saved views</h2></div><span className="saved-view-count">{savedViews.length}/12</span></div>
+          <p className="saved-views-copy">Views stay in this browser and are bound to <strong>{context || 'the active context'}</strong> / revision <strong>{revision || '—'}</strong>. Stale views never run silently.</p>
+          <div className="saved-view-create"><input value={viewName} onChange={(event) => setViewName(event.target.value)} placeholder="Name this filter set" maxLength={64} /><button type="button" className="secondary-button" onClick={saveView} disabled={!context || catalogLoading}><BookmarkPlus size={14} /> Save</button></div>
+          {!savedViews.length ? <div className="saved-views-empty"><Bookmark size={18} /><span>No saved field views yet.</span></div> : <div className="saved-view-list">{savedViews.map((view) => {
+            const state: SavedViewState | 'checking' = catalogLoading || !catalog ? 'checking' : catalog.state !== 'available' ? 'incompatible' : savedSearchViewState(view, context, revision, definitions)
+            const applicable = state === 'current'
+            return <div className={`saved-view-row saved-view-row-${state}`} key={view.id}><div className="saved-view-row-top"><strong>{view.name}</strong><button type="button" className="icon-button" onClick={() => deleteView(view)} aria-label={`Delete saved view ${view.name}`} title="Delete saved view"><Trash2 size={14} /></button></div><span>{savedViewStateLabel(state)} / {view.context} / rev {view.revision}</span><code>{savedViewQueryLabel(view.query)}</code><button type="button" className="text-button saved-view-apply" onClick={() => applyView(view)} disabled={!applicable}>{applicable ? 'Apply view' : state === 'checking' ? 'Checking catalog' : 'Cannot apply safely'}</button></div>
+          })}</div>}
+          <div className="saved-views-footer"><LockKeyhole size={13} /> Local only / no search index / fixed browser storage</div>
+        </aside>
+      </div>
+    </div>
+  )
+}
+
+/** Renders the aggregate search state without exposing backend Kubernetes error text. */
+function SearchResponseNotice({ response }: { response: SearchResponse }) {
+  if (response.state === 'available' && !response.truncated && !response.issues?.length) return null
+  const title = response.state === 'partial' ? 'Partial result set' : response.state === 'permission-denied' ? 'Search access is restricted' : response.state === 'unavailable' ? 'Some search APIs are unavailable' : response.state === 'error' ? 'Search sources returned errors' : 'Search returned no matches'
+  const detail = response.state === 'partial' ? `${response.items.length} safe result${response.items.length === 1 ? '' : 's'} returned. ${response.truncated ? 'The fixed source or result cap was reached. ' : ''}Review source states below before treating this as complete.` : response.state === 'permission-denied' ? 'Kubernetes RBAC denied every source that was queried. No raw API error body is shown.' : response.state === 'unavailable' ? 'One or more Kubernetes APIs did not respond or are not currently served. Retry when the cluster recovers.' : response.state === 'error' ? 'One or more source reads failed. Successful sources remain visible and each issue is classified below.' : 'The bounded scan completed without a matching object.'
+  return <div className={`search-response-notice search-response-notice-${response.state}`} role="status"><span className="search-response-icon">{response.state === 'partial' ? <AlertTriangle size={16} /> : response.state === 'permission-denied' ? <LockKeyhole size={16} /> : response.state === 'available' ? <RefreshCw size={16} /> : <AlertTriangle size={16} />}</span><div><strong>{title}</strong><span>{detail}</span>{response.issues?.slice(0, 3).map((issue, index) => <code key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}>{issue.message}</code>)}</div></div>
+}
+
+/** Renders per-source RBAC, unavailable, empty, and error outcomes for one search. */
+function SearchSourcesPanel({ sources, issues }: { sources: SearchSource[]; issues?: SearchResponse['issues'] }) {
+  if (!sources.length && !issues?.length) return null
+  return <section className="search-sources panel"><div className="search-sources-heading"><div><span className="panel-eyebrow">Source ledger</span><h2>Where the result came from</h2></div><span>{sources.length} queried</span></div>{issues?.length ? <div className="search-catalog-issues">{issues.map((issue, index) => <div key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={13} /><span>{issue.message}</span></div>)}</div> : null}<div className="search-source-list">{sources.map((source) => <div className={`search-source-row search-source-row-${source.state}`} key={`${source.group}/${source.version}/${source.resource}`}><span className="search-source-dot" /><div><strong>{source.kind || source.resource}</strong><code>{source.group ? `${source.group}/${source.version}` : source.version} / {source.resource}</code></div><span className="search-source-result-count">{source.resultCount} result{source.resultCount === 1 ? '' : 's'}</span><span className="search-source-state">{searchSourceStateLabel(source.state)}</span>{source.issue && <span className="search-source-issue">{source.issue}</span>}</div>)}</div></section>
+}
+
+/** Renders bounded safe summaries with canonical full-GVR navigation. */
+function SearchResultTable({ items, onOpen }: { items: SearchResult[]; onOpen: (result: SearchResult) => void }) {
+  return <section className="search-results panel"><div className="search-results-heading"><div><span className="panel-eyebrow">Safe coordinates</span><h2>Search results</h2></div><span>{items.length} returned</span></div><div className="search-results-wrap"><table className="search-results-table"><thead><tr><th>Object</th><th>API identity</th><th>Namespace</th><th>State</th><th>Labels</th><th /></tr></thead><tbody>{items.map((item) => <tr key={searchResultKey(item)} onClick={() => onOpen(item)}><td><button type="button" className="search-result-name" onClick={(event) => { event.stopPropagation(); onOpen(item) }}>{item.name || 'Unnamed'}</button><span className="search-result-kind">{item.kind}</span></td><td><code>{item.group ? `${item.group}/${item.version}` : item.version}</code><span>{item.resource}</span></td><td>{item.namespace || 'cluster'}</td><td><span className={`status-pill status-${resourceStatusTone(item.status)}`}><span />{item.status || 'Unknown'}{item.ready ? ` / ${item.ready}` : ''}</span></td><td><div className="label-stack">{Object.entries(item.labels ?? {}).slice(0, 2).map(([key, value]) => <span key={key}>{key}={value}</span>)}{!Object.keys(item.labels ?? {}).length && <span>—</span>}</div></td><td><ArrowUpRight size={15} className="search-result-open" /></td></tr>)}</tbody></table></div><div className="search-results-footer"><span><Search size={13} /> Results contain coordinates and summaries only; open YAML/detail for the complete generic fallback.</span><span>Click a row to open its canonical route.</span></div></section>
+}
+
+/** Renders the explicit empty, denied, unavailable, or error search state. */
+function SearchNoResults({ response }: { response: SearchResponse }) {
+  const title = response.state === 'permission-denied' ? 'Search is blocked by Kubernetes RBAC' : response.state === 'unavailable' ? 'Search APIs are unavailable' : response.state === 'error' ? 'Search did not complete cleanly' : response.state === 'partial' ? 'No matches in the scanned sources' : 'No matching resources'
+  const detail = response.state === 'permission-denied' ? 'This identity could not list any searched source. Review source access and retry.' : response.state === 'unavailable' ? 'The local backend could not read enough API sources to complete the scan. Retry when the cluster is reachable.' : response.state === 'error' ? 'No safe result was returned from the completed source calls. Review the source ledger and retry.' : response.state === 'partial' ? 'The search budget or discovery health limited coverage. Refine the filters or retry for a fresh bounded scan.' : 'The bounded scan completed successfully. Try a different name, exact kind/resource, namespace, or label selector.'
+  return <div className="search-no-results"><span className="search-no-results-icon">{response.state === 'permission-denied' ? <LockKeyhole size={20} /> : response.state === 'empty' ? <Box size={20} /> : <AlertTriangle size={20} />}</span><strong>{title}</strong><span>{detail}</span></div>
+}
+
+/** Converts one saved-view compatibility state into a compact operator label. */
+function savedViewStateLabel(state: SavedViewState | 'checking'): string {
+  if (state === 'current') return 'Ready'
+  if (state === 'checking') return 'Checking'
+  if (state === 'stale-context') return 'Other context'
+  if (state === 'stale-revision') return 'Stale revision'
+  return 'Catalog changed'
+}
+
+/** Converts one source state into the explicit label shown in the source ledger. */
+function searchSourceStateLabel(state: SearchSource['state']): string {
+  if (state === 'permission-denied') return 'RBAC denied'
+  if (state === 'unavailable') return 'Unavailable'
+  if (state === 'error') return 'Read error'
+  if (state === 'empty') return 'No matches'
+  return 'Read'
+}
+
+/** Formats safe saved-view filters without embedding a potentially long selector in the UI. */
+function savedViewQueryLabel(query: SearchQuery): string {
+  const parts = [query.query && `q:${query.query}`, query.kind && `kind:${query.kind}`, query.resource && `resource:${query.resource}`, query.namespace !== 'all' && `ns:${query.namespace}`, query.name && `name:${query.name}`, query.labelSelector && `labels:${query.labelSelector}`].filter(Boolean)
+  return parts.join(' / ') || 'all discovered resources'
+}
+
+/** Returns browser localStorage only when the local environment exposes it safely. */
+function browserSavedViewStorage(): Storage | null {
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
+}
+
 /** Renders the read-only local mutation ledger with bounded search and outcome filters. */
 function MutationHistoryPage({ contexts, selectedContext, activeContext, revision }: { contexts: ContextsResponse; selectedContext: string; activeContext?: ContextSummary; revision: number }) {
   const [response, setResponse] = useState<AuditResponse | null>(null)
@@ -943,6 +1360,327 @@ function MutationHistoryPage({ contexts, selectedContext, activeContext, revisio
   )
 }
 
+/** Renders bounded local diagnostics for API health, discovery, watches, and native sessions. */
+function DiagnosticsPage({ context, revision }: { context: string; revision: number }) {
+  const [response, setResponse] = useState<DiagnosticsResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [refreshNonce, setRefreshNonce] = useState(0)
+
+  useEffect(() => {
+    let active = true
+    const load = () => {
+      setLoading(true)
+      fetchDiagnostics(context)
+        .then((nextResponse) => {
+          if (!active) return
+          setResponse(normalizeDiagnosticsResponse(nextResponse))
+          setError('')
+        })
+        .catch((loadError: Error) => active && setError(loadError.message || 'The local diagnostics endpoint could not be reached.'))
+        .finally(() => active && setLoading(false))
+    }
+    load()
+    const interval = window.setInterval(load, 15000)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+    }
+  }, [context, revision, refreshNonce])
+
+  if (loading && !response) return <LoadingState label="Reading local diagnostics" />
+  if (error && !response) return <DiagnosticsUnavailableState error={error} onRetry={() => setRefreshNonce((value) => value + 1)} />
+  if (!response) return <DiagnosticsUnavailableState error="The local diagnostics endpoint returned no snapshot." onRetry={() => setRefreshNonce((value) => value + 1)} />
+
+  const discoveryTone = diagnosticsStateTone(response.discovery.state)
+  const dependencyReady = response.kubeconfig.state !== 'error' && response.context.state === 'available' && response.discovery.state === 'available' && response.audit.state === 'available'
+  const sessions = response.sessions ?? { terminal: 0, logs: 0, portForward: 0, watch: 0 }
+  const watches = response.watches ?? { active: 0, current: [], recent: [] }
+  const requests = response.requests ?? { total: 0, errors: 0, averageDurationMilliseconds: 0, maxDurationMilliseconds: 0, statuses: {}, operations: {}, errorCategories: {} }
+  const recentErrors = Array.isArray(response.recentErrors) ? [...response.recentErrors].reverse() : []
+  const recentWatches = Array.isArray(watches.recent) ? [...watches.recent].reverse() : []
+  const currentWatches = Array.isArray(watches.current) ? watches.current : []
+  return (
+    <div className="diagnostics-page">
+      <section className="diagnostics-intro">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-mark" /> Local instrument / bounded memory</div>
+          <h1>Diagnostics</h1>
+          <p className="intro-copy">A local-only read on the KubeHaggis process, its Kubernetes dependencies, and the native streams currently open. Bodies, credentials, review handles, Secret values, and Pod output never enter this panel.</p>
+        </div>
+        <div className="diagnostics-stamp">
+          <span className="stamp-label">Process signal</span>
+          <code>alive / {formatUptime(response.uptimeSeconds)}</code>
+          <span className={`stamp-status diagnostics-status-${dependencyReady ? 'good' : 'warning'}`}><span className="signal-dot" />{dependencyReady ? 'Dependencies ready' : 'Dependencies need attention'}</span>
+        </div>
+      </section>
+
+      <section className="diagnostics-signal-strip panel">
+        <div className="diagnostics-signal diagnostics-signal-good"><span className="diagnostics-signal-dot" /><div><strong>Local process</strong><span>Liveness endpoint is responding</span></div><code>alive</code></div>
+        <div className={`diagnostics-signal diagnostics-signal-${dependencyReady ? 'good' : 'warning'}`}><span className="diagnostics-signal-dot" /><div><strong>Dependency posture</strong><span>{dependencyReady ? 'Kubeconfig, context, discovery, and audit are available' : 'One or more local dependencies need attention'}</span></div><code>{dependencyReady ? 'ready' : 'degraded'}</code></div>
+        <div className="diagnostics-signal diagnostics-signal-neutral"><span className="diagnostics-signal-dot" /><div><strong>Request correlation</strong><span>Every HTTP request returns a safe X-Request-ID</span></div><code>enabled</code></div>
+      </section>
+
+      {error && <div className="diagnostics-refresh-warning" role="status"><AlertTriangle size={14} /> Refresh failed: {error}. Showing the last safely loaded snapshot.</div>}
+
+      <section className="diagnostics-summary-grid">
+        <DiagnosticsSummaryCard label="Kubeconfig" value={`r${response.kubeconfig.revision}`} detail={`${titleCase(response.kubeconfig.state)} / ${response.kubeconfig.source || 'unknown source'}`} tone={response.kubeconfig.state === 'error' ? 'warning' : 'good'} icon={<Database size={17} />} />
+        <DiagnosticsSummaryCard label="Discovery cache" value={diagnosticsStateLabel(response.discovery.state)} detail={`${response.discovery.itemCount} resources / ${diagnosticsAgeLabel(response.discovery.ageSeconds)}`} tone={discoveryTone} icon={<Box size={17} />} />
+        <DiagnosticsSummaryCard label="Audit store" value={diagnosticsStateLabel(response.audit.state)} detail="SQLite mutation history" tone={response.audit.state === 'available' ? 'good' : 'warning'} icon={<History size={17} />} />
+        <DiagnosticsSummaryCard label="Active sessions" value={String(diagnosticsSessionTotal(sessions))} detail={`${sessions.watch} watches / ${sessions.terminal + sessions.logs + sessions.portForward} native streams`} tone={diagnosticsSessionTotal(sessions) ? 'neutral' : 'good'} icon={<Activity size={17} />} />
+      </section>
+
+      <div className="diagnostics-grid">
+        <section className="diagnostics-panel panel">
+          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Dependency ledger</span><h2>What the local server can reach</h2></div><button className="icon-button diagnostics-refresh" onClick={() => setRefreshNonce((value) => value + 1)} disabled={loading} aria-label="Refresh diagnostics" title="Refresh diagnostics">{loading ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}</button></div>
+          <div className="diagnostics-detail-list">
+            <DiagnosticsDetailRow label="Kubeconfig source" value={response.kubeconfig.source || 'unknown'} note={`revision ${response.kubeconfig.revision}`} tone={response.kubeconfig.state === 'error' ? 'warning' : 'good'} />
+            <DiagnosticsDetailRow label="Selected context" value={response.context.selected || 'none selected'} note={response.context.state} tone={response.context.state === 'available' ? 'good' : 'warning'} />
+            <DiagnosticsDetailRow label="Discovery cache" value={diagnosticsStateLabel(response.discovery.state)} note={`${response.discovery.itemCount} resources / ${response.discovery.issueCount} issues`} tone={discoveryTone} />
+            <DiagnosticsDetailRow label="Cache age" value={diagnosticsAgeLabel(response.discovery.ageSeconds)} note={response.discovery.loadedAt ? `loaded ${relativeTime(response.discovery.loadedAt)}` : 'no completed load recorded'} tone={response.discovery.state === 'available' ? 'good' : 'neutral'} />
+            <DiagnosticsDetailRow label="Audit store" value={diagnosticsStateLabel(response.audit.state)} note="mutation outcomes remain redacted" tone={response.audit.state === 'available' ? 'good' : 'warning'} />
+          </div>
+        </section>
+
+        <section className="diagnostics-panel panel">
+          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Native stream board</span><h2>Sessions in flight</h2></div><span className="panel-action panel-action-neutral"><span />{diagnosticsSessionTotal(sessions)} active</span></div>
+          <div className="diagnostics-session-grid">
+            <DiagnosticsSessionCard icon={<TerminalSquare size={16} />} label="Terminal" count={sessions.terminal} detail="Pod exec / attach" />
+            <DiagnosticsSessionCard icon={<TerminalSquare size={16} />} label="Logs" count={sessions.logs} detail="Pod log streams" />
+            <DiagnosticsSessionCard icon={<Network size={16} />} label="Port-forward" count={sessions.portForward} detail="Loopback forwards" />
+            <DiagnosticsSessionCard icon={<Activity size={16} />} label="Watch" count={sessions.watch} detail="SSE Kubernetes watches" />
+          </div>
+          <div className="diagnostics-panel-note"><LockKeyhole size={14} /> Only counts and safe context/GVR lifecycle metadata are retained.</div>
+        </section>
+      </div>
+
+      <section className="diagnostics-panel diagnostics-requests panel">
+        <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">HTTP instrument</span><h2>Request counters &amp; timing</h2></div><span className="panel-action panel-action-neutral"><span />{requests.total} requests</span></div>
+        <div className="diagnostics-request-grid">
+          <DiagnosticsRequestMetric label="Requests" value={String(requests.total)} note="bounded total" />
+          <DiagnosticsRequestMetric label="Classified errors" value={String(requests.errors)} note="safe categories only" tone={requests.errors ? 'warning' : 'good'} />
+          <DiagnosticsRequestMetric label="Average" value={`${formatMilliseconds(requests.averageDurationMilliseconds)} ms`} note="completed requests" />
+          <DiagnosticsRequestMetric label="Slowest" value={`${formatMilliseconds(requests.maxDurationMilliseconds)} ms`} note="observed maximum" />
+        </div>
+        <div className="diagnostics-counter-columns">
+          <DiagnosticsCounterList title="Status" values={requests.statuses} />
+          <DiagnosticsCounterList title="Operation class" values={requests.operations} />
+          <DiagnosticsCounterList title="Error category" values={requests.errorCategories} emptyLabel="No classified errors" />
+        </div>
+      </section>
+
+      <div className="diagnostics-grid">
+        <section className="diagnostics-panel panel">
+          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Watch ledger</span><h2>Recent lifecycle</h2></div><span className="panel-action panel-action-neutral"><span />{watches.active} active</span></div>
+          {!recentWatches.length ? <DiagnosticsEmptyState label="No server watch transitions yet" detail="Open a resource list or Event panel to see safe lifecycle state here." /> : <div className="diagnostics-event-list">{recentWatches.slice(0, 8).map((event, index) => <div className="diagnostics-event-row" key={`${event.at}-${event.state}-${index}`}><span className={`diagnostics-event-mark diagnostics-event-${event.errorCategory ? 'warning' : 'good'}`} /><div><strong>{diagnosticsWatchStateLabel(event.state, event.reconnect)}</strong><span>{event.resource || 'watch'}{event.context ? ` / ${event.context}` : ''}</span></div><code>{event.errorCategory || relativeTime(event.at)}</code></div>)}</div>}
+          {currentWatches.length > 0 && <div className="diagnostics-watch-current">{currentWatches.slice(0, 6).map((watch, index) => <div key={`${watch.resource}-${watch.context}-${index}`}><span className={`status-pill status-${watch.active ? 'good' : watch.errorCategory ? 'warning' : 'neutral'}`}><span />{watch.active ? 'Active' : diagnosticsStateLabel(watch.state)}</span><code>{watch.resource || 'watch'}</code><small>{watch.reconnects} reconnect{watch.reconnects === 1 ? '' : 's'}</small></div>)}</div>}
+        </section>
+
+        <section className="diagnostics-panel panel">
+          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Failure ledger</span><h2>Recent safe errors</h2></div><span className="panel-action panel-action-neutral"><span />{recentErrors.length} retained</span></div>
+          {!recentErrors.length ? <DiagnosticsEmptyState label="No classified errors" detail="Backend failures appear here as categories, never as raw Kubernetes responses." /> : <div className="diagnostics-event-list">{recentErrors.slice(0, 8).map((event, index) => <div className="diagnostics-event-row" key={`${event.at}-${event.category}-${index}`}><span className="diagnostics-event-mark diagnostics-event-warning" /><div><strong>{diagnosticsStateLabel(event.category)}</strong><span>{event.operation || 'request'}{event.status ? ` / HTTP ${event.status}` : ''}</span></div><code>{relativeTime(event.at)}</code></div>)}</div>}
+        </section>
+      </div>
+
+      <div className="diagnostics-footer-line"><span><RefreshCw size={13} /> Snapshot {relativeTime(response.generatedAt)}</span><span><Gauge size={13} /> Local only / no external telemetry</span><span><LockKeyhole size={13} /> Sensitive payloads excluded</span></div>
+    </div>
+  )
+}
+
+/** Identifies a JSON object before reading optional diagnostics fields from an older backend. */
+function isDiagnosticsRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+/** Normalizes bounded numeric diagnostics maps while discarding malformed values. */
+function normalizeDiagnosticsCounts(value: unknown): Record<string, number> {
+  if (!isDiagnosticsRecord(value)) return {}
+  return Object.fromEntries(Object.entries(value).filter(([, count]) => typeof count === 'number' && Number.isFinite(count))) as Record<string, number>
+}
+
+/** Normalizes a diagnostics payload so missing or older collections cannot break rendering. */
+function normalizeDiagnosticsResponse(value: unknown): DiagnosticsResponse {
+  const root = isDiagnosticsRecord(value) ? value : {}
+  const kubeconfig = isDiagnosticsRecord(root.kubeconfig) ? root.kubeconfig : {}
+  const contextInfo = isDiagnosticsRecord(root.context) ? root.context : {}
+  const discovery = isDiagnosticsRecord(root.discovery) ? root.discovery : {}
+  const watches = isDiagnosticsRecord(root.watches) ? root.watches : {}
+  const sessions = isDiagnosticsRecord(root.sessions) ? root.sessions : {}
+  const audit = isDiagnosticsRecord(root.audit) ? root.audit : {}
+  const requests = isDiagnosticsRecord(root.requests) ? root.requests : {}
+  const recentErrors: DiagnosticsErrorEvent[] = (Array.isArray(root.recentErrors) ? root.recentErrors : []).filter(isDiagnosticsRecord).map((event) => ({
+    at: typeof event.at === 'string' ? event.at : '',
+    status: typeof event.status === 'number' && Number.isFinite(event.status) ? event.status : undefined,
+    category: typeof event.category === 'string' ? event.category : 'unknown',
+    operation: typeof event.operation === 'string' ? event.operation : 'request',
+  }))
+  const recentWatches: DiagnosticsWatchEvent[] = (Array.isArray(watches.recent) ? watches.recent : []).filter(isDiagnosticsRecord).map((event) => ({
+    at: typeof event.at === 'string' ? event.at : '',
+    context: typeof event.context === 'string' ? event.context : undefined,
+    resource: typeof event.resource === 'string' ? event.resource : undefined,
+    state: typeof event.state === 'string' ? event.state : 'unknown',
+    reconnect: event.reconnect === true,
+    errorCategory: typeof event.errorCategory === 'string' ? event.errorCategory : undefined,
+  }))
+  const currentWatches: DiagnosticsWatchView[] = (Array.isArray(watches.current) ? watches.current : []).filter(isDiagnosticsRecord).map((watch) => ({
+    context: typeof watch.context === 'string' ? watch.context : undefined,
+    resource: typeof watch.resource === 'string' ? watch.resource : undefined,
+    state: typeof watch.state === 'string' ? watch.state : 'unknown',
+    lastAt: typeof watch.lastAt === 'string' ? watch.lastAt : '',
+    errorCategory: typeof watch.errorCategory === 'string' ? watch.errorCategory : undefined,
+    reconnects: typeof watch.reconnects === 'number' && Number.isFinite(watch.reconnects) ? watch.reconnects : 0,
+    active: watch.active === true,
+  }))
+  return {
+    generatedAt: typeof root.generatedAt === 'string' ? root.generatedAt : new Date(0).toISOString(),
+    uptimeSeconds: typeof root.uptimeSeconds === 'number' && Number.isFinite(root.uptimeSeconds) ? root.uptimeSeconds : 0,
+    kubeconfig: {
+      source: typeof kubeconfig.source === 'string' ? kubeconfig.source : '',
+      state: typeof kubeconfig.state === 'string' ? kubeconfig.state : 'unavailable',
+      revision: typeof kubeconfig.revision === 'number' && Number.isFinite(kubeconfig.revision) ? kubeconfig.revision : 0,
+    },
+    context: {
+      current: typeof contextInfo.current === 'string' ? contextInfo.current : '',
+      selected: typeof contextInfo.selected === 'string' ? contextInfo.selected : '',
+      state: typeof contextInfo.state === 'string' ? contextInfo.state : 'unavailable',
+    },
+    discovery: {
+      context: typeof discovery.context === 'string' ? discovery.context : '',
+      revision: typeof discovery.revision === 'number' && Number.isFinite(discovery.revision) ? discovery.revision : 0,
+      state: typeof discovery.state === 'string' ? discovery.state : 'unavailable',
+      ageSeconds: typeof discovery.ageSeconds === 'number' && Number.isFinite(discovery.ageSeconds) ? discovery.ageSeconds : undefined,
+      loadedAt: typeof discovery.loadedAt === 'string' ? discovery.loadedAt : undefined,
+      itemCount: typeof discovery.itemCount === 'number' && Number.isFinite(discovery.itemCount) ? discovery.itemCount : 0,
+      issueCount: typeof discovery.issueCount === 'number' && Number.isFinite(discovery.issueCount) ? discovery.issueCount : 0,
+    },
+    watches: {
+      active: typeof watches.active === 'number' && Number.isFinite(watches.active) ? watches.active : 0,
+      current: currentWatches,
+      recent: recentWatches,
+    },
+    recentErrors,
+    sessions: {
+      terminal: typeof sessions.terminal === 'number' && Number.isFinite(sessions.terminal) ? sessions.terminal : 0,
+      logs: typeof sessions.logs === 'number' && Number.isFinite(sessions.logs) ? sessions.logs : 0,
+      portForward: typeof sessions.portForward === 'number' && Number.isFinite(sessions.portForward) ? sessions.portForward : 0,
+      watch: typeof sessions.watch === 'number' && Number.isFinite(sessions.watch) ? sessions.watch : 0,
+    },
+    audit: { state: typeof audit.state === 'string' ? audit.state : 'unavailable' },
+    requests: {
+      total: typeof requests.total === 'number' && Number.isFinite(requests.total) ? requests.total : 0,
+      errors: typeof requests.errors === 'number' && Number.isFinite(requests.errors) ? requests.errors : 0,
+      averageDurationMilliseconds: typeof requests.averageDurationMilliseconds === 'number' && Number.isFinite(requests.averageDurationMilliseconds) ? requests.averageDurationMilliseconds : 0,
+      maxDurationMilliseconds: typeof requests.maxDurationMilliseconds === 'number' && Number.isFinite(requests.maxDurationMilliseconds) ? requests.maxDurationMilliseconds : 0,
+      statuses: normalizeDiagnosticsCounts(requests.statuses),
+      operations: normalizeDiagnosticsCounts(requests.operations),
+      errorCategories: normalizeDiagnosticsCounts(requests.errorCategories),
+    },
+  }
+}
+
+/** Renders the explicit disconnected state for a local diagnostics endpoint. */
+function DiagnosticsUnavailableState({ error, onRetry }: { error: string; onRetry: () => void }) {
+  return <div className="state-page"><div className="state-card"><span className="state-icon state-icon-warning"><Gauge size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> Local instrument disconnected</span><h1>Diagnostics are offline.</h1><p>The local diagnostics snapshot could not be read. No dependency details are guessed while the local API is disconnected.</p><div className="error-block"><code>{error}</code></div><button className="secondary-button" onClick={onRetry}><RefreshCw size={15} /> Try again</button></div></div>
+}
+
+/** Renders one large diagnostics summary card. */
+function DiagnosticsSummaryCard({ label, value, detail, tone, icon }: { label: string; value: string; detail: string; tone: 'good' | 'warning' | 'neutral'; icon: ReactNode }) {
+  return <article className={`diagnostics-summary-card diagnostics-summary-${tone}`}><div className="diagnostics-summary-top"><span>{icon}</span><span>{label}</span></div><strong>{value}</strong><code>{detail}</code></article>
+}
+
+/** Renders one safe dependency row with state tone and bounded notes. */
+function DiagnosticsDetailRow({ label, value, note, tone }: { label: string; value: string; note: string; tone: 'good' | 'warning' | 'neutral' }) {
+  return <div className="diagnostics-detail-row"><div><strong>{label}</strong><span>{note}</span></div><span className={`diagnostics-detail-value diagnostics-detail-${tone}`}>{value}</span></div>
+}
+
+/** Renders one active native-session count. */
+function DiagnosticsSessionCard({ icon, label, count, detail }: { icon: ReactNode; label: string; count: number; detail: string }) {
+  return <div className="diagnostics-session-card"><span>{icon}</span><div><strong>{label}</strong><small>{detail}</small></div><b>{count}</b></div>
+}
+
+/** Renders one request timing metric. */
+function DiagnosticsRequestMetric({ label, value, note, tone = 'neutral' }: { label: string; value: string; note: string; tone?: 'good' | 'warning' | 'neutral' }) {
+  return <div className={`diagnostics-request-metric diagnostics-request-${tone}`}><span>{label}</span><strong>{value}</strong><code>{note}</code></div>
+}
+
+/** Renders a deterministic bounded counter map as compact rows. */
+function DiagnosticsCounterList({ title, values, emptyLabel = 'No observations' }: { title: string; values: Record<string, number>; emptyLabel?: string }) {
+  const entries = Object.entries(values).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, 8)
+  return <div className="diagnostics-counter-list"><span className="panel-eyebrow">{title}</span>{entries.length ? entries.map(([key, value]) => <div key={key}><code>{key || 'unknown'}</code><strong>{value}</strong></div>) : <small>{emptyLabel}</small>}</div>
+}
+
+/** Renders an explicit empty state inside a diagnostics panel. */
+function DiagnosticsEmptyState({ label, detail }: { label: string; detail: string }) {
+  return <div className="diagnostics-empty"><Check size={17} /><strong>{label}</strong><span>{detail}</span></div>
+}
+
+/** Returns the visual tone for one safe diagnostics state. */
+function diagnosticsStateTone(state: string): 'good' | 'warning' | 'neutral' {
+  if (state === 'available' || state === 'ready' || state === 'active') return 'good'
+  if (state === 'partial' || state === 'error' || state === 'unavailable' || state === 'permission-denied' || state === 'degraded') return 'warning'
+  return 'neutral'
+}
+
+/** Converts a diagnostics state into a compact operator label. */
+function diagnosticsStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    available: 'Available',
+    active: 'Active',
+    changed: 'Changed',
+    degraded: 'Degraded',
+    error: 'Error',
+    loading: 'Loading',
+    missing: 'Missing',
+    not_checked: 'Not checked',
+    'not-checked': 'Not checked',
+    'permission-denied': 'RBAC denied',
+    unavailable: 'Unavailable',
+  }
+  return labels[state] || titleCase(state || 'Unknown')
+}
+
+/** Formats a bounded discovery-cache age without inventing freshness. */
+function diagnosticsAgeLabel(seconds?: number): string {
+  if (seconds === undefined) return 'not loaded'
+  if (seconds < 60) return `${seconds}s old`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m old`
+  return `${Math.floor(seconds / 3600)}h old`
+}
+
+/** Formats process uptime using compact field-console time units. */
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  return `${Math.floor(seconds / 3600)}h ${Math.floor(seconds / 60) % 60}m`
+}
+
+/** Formats a request duration without noisy decimal precision. */
+function formatMilliseconds(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  if (value < 10) return value.toFixed(1)
+  return Math.round(value).toString()
+}
+
+/** Returns the total count of active diagnostics sessions. */
+function diagnosticsSessionTotal(sessions: DiagnosticsResponse['sessions']): number {
+  return sessions.terminal + sessions.logs + sessions.portForward + sessions.watch
+}
+
+/** Converts a watch lifecycle event into safe operator-facing copy. */
+function diagnosticsWatchStateLabel(state: string, reconnect = false): string {
+  if (state === 'opened') return reconnect ? 'Watch reconnected' : 'Watch opened'
+  if (state === 'error') return 'Watch error classified'
+  if (state === 'closed') return 'Watch closed'
+  return diagnosticsStateLabel(state)
+}
+
+/** Adds only safe correlation and retry metadata to a native stream failure message. */
+function streamFailureMessage(message: { message?: string; requestId?: string; retry?: RetryClassification }, fallback: string): string {
+  const details = [message.requestId ? `request ID ${message.requestId}` : '', message.retry ? `retry: ${message.retry}` : ''].filter(Boolean).join('; ')
+  const text = message.message || fallback
+  return details ? `${text} (${details})` : text
+}
+
 /** Renders the explicit disconnected state for an unavailable local audit store. */
 function HistoryUnavailableState({ onRetry }: { onRetry: () => void }) {
   return <div className="state-page"><div className="state-card"><span className="state-icon state-icon-warning"><Database size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> Local ledger disconnected</span><h1>Mutation history is offline.</h1><p>The local SQLite audit store could not be read. No operation details are shown while the history source is disconnected.</p><button className="secondary-button" onClick={onRetry}><RefreshCw size={15} /> Try again</button></div></div>
@@ -1014,8 +1752,70 @@ function auditOutcomeNote(entry: AuditEntry): string {
   return entry.dryRun ? 'No cluster change' : 'Mutation accepted'
 }
 
+/** Returns the compact label for one watched-panel freshness state. */
+function freshnessLabel(state: FreshnessState): string {
+  switch (state) {
+    case 'live':
+      return 'Live'
+    case 'reconnecting':
+      return 'Reconnecting'
+    case 'stale':
+      return 'Stale data'
+    case 'refreshing':
+      return 'Refreshing'
+    default:
+      return 'Unavailable'
+  }
+}
+
+/** Formats a UI-only successful refresh timestamp without implying Kubernetes time. */
+function formatRefreshTimestamp(timestamp: number | null): string {
+  if (timestamp === null || !Number.isFinite(timestamp)) return 'No successful refresh'
+  return `Last successful refresh ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(timestamp))}`
+}
+
+/** Returns the explicit explanation shown while a watched panel is not live. */
+function freshnessMessage(snapshot: WatchSnapshot): string {
+  switch (snapshot.state) {
+    case 'reconnecting':
+      return 'The watch closed or lost its connection. A fresh relist will run before the next watch.'
+    case 'stale':
+      return snapshot.hasData ? 'Showing the last successful snapshot; refresh attempts are still in progress.' : 'The latest refresh failed; retrying the Kubernetes read.'
+    case 'refreshing':
+      return snapshot.hasData ? 'Refreshing from Kubernetes; the last successful snapshot remains visible.' : 'Reading the first Kubernetes snapshot.'
+    default:
+      return snapshot.hasData ? 'The live source is unavailable; the last successful snapshot is marked stale.' : 'No successful Kubernetes snapshot is available yet.'
+  }
+}
+
+/** Renders the state and last-success metadata for a watched panel. */
+function FreshnessStatus({ snapshot }: { snapshot: WatchSnapshot }) {
+  return <span className="freshness-status"><span className={`watch-state-chip watch-state-${snapshot.state}`}><span />{freshnessLabel(snapshot.state)}</span><span className="watch-last-refresh">{formatRefreshTimestamp(snapshot.lastSuccessfulRefresh)}</span></span>
+}
+
+/** Renders an explicit non-live notice so stale data cannot look like a live panel. */
+function FreshnessNotice({ snapshot }: { snapshot: WatchSnapshot }) {
+  if (snapshot.state === 'live') return null
+  const icon = snapshot.state === 'refreshing' ? <LoaderCircle size={14} className="spin" /> : <AlertTriangle size={14} />
+  return <div className={`freshness-notice freshness-notice-${snapshot.state}`} role="status"><span className="freshness-notice-icon">{icon}</span><div><strong>{freshnessLabel(snapshot.state)}</strong><span>{freshnessMessage(snapshot)}</span></div></div>
+}
+
+/** Returns the compact footer copy used when a watch is not live. */
+function freshnessFooterLabel(state: FreshnessState): string {
+  switch (state) {
+    case 'refreshing':
+      return 'refreshing from Kubernetes'
+    case 'reconnecting':
+      return 'reconnecting after a fresh relist'
+    case 'stale':
+      return 'last successful data is marked stale'
+    default:
+      return 'live data is unavailable'
+  }
+}
+
 /** Renders the generic live-updating resource table. */
-function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen, onCreate }: { context: string; namespace: string; definition: ResourceDefinition; writeEnabled: boolean; onOpen: (name: string, namespace?: string) => void; onCreate: () => void }) {
+function ResourceListPage({ context, namespace, definition, revision, reloadEpoch, writeEnabled, onOpen, onCreate }: { context: string; namespace: string; definition: ResourceDefinition; revision: number; reloadEpoch: number; writeEnabled: boolean; onOpen: (name: string, namespace?: string) => void; onCreate: () => void }) {
   const [response, setResponse] = useState<ResourceListResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -1028,10 +1828,11 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   const [columnsOpen, setColumnsOpen] = useState(false)
   const [pageSize, setPageSize] = useState(100)
   const [pagination, setPagination] = useState<ResourcePaginationState>({ queryKey: '', pageIndex: 0, tokens: [''] })
-  const [watching, setWatching] = useState(false)
+  const [watchSnapshot, setWatchSnapshot] = useState<WatchSnapshot>(() => initialWatchSnapshot())
   const [refreshNonce, setRefreshNonce] = useState(0)
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
   const [bulkReview, setBulkReview] = useState<BulkDeleteResponse | null>(null)
+  const [bulkReviewToken, setBulkReviewToken] = useState<string | undefined>()
   const [bulkReviewSelection, setBulkReviewSelection] = useState<string[]>([])
   const [bulkResults, setBulkResults] = useState<BulkDeleteResponse | null>(null)
   const [bulkConfirmed, setBulkConfirmed] = useState(false)
@@ -1046,49 +1847,60 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   useEffect(() => {
     setPagination({ queryKey: listQueryKey, pageIndex: 0, tokens: [''] })
     setResponse(null)
+    setError('')
     setSelectedKeys([])
     setBulkReview(null)
+    setBulkReviewToken(undefined)
     setBulkReviewSelection([])
     setBulkConfirmed(false)
     setBulkConfirmation('')
     setBulkResults(null)
     setBulkError('')
-  }, [listQueryKey])
+  }, [listQueryKey, revision, reloadEpoch])
 
   useEffect(() => {
-    let active = true
-    let stream: EventSource | undefined
-    const load = () => {
-      setLoading(true)
-      fetchResources(context, definition, namespace, labelSelector, { limit: pageSize, continueToken })
-        .then((data) => {
-          if (!active) return
-          setResponse(data)
-          setSelectedKeys((current) => current.filter((key) => data.items.some((item) => resourceItemKey(item) === key)))
-          setPagination((current) => {
-            if (current.queryKey !== listQueryKey || current.pageIndex !== pageIndex) return current
-            const tokens = current.tokens.slice(0, pageIndex + 1)
-            if (data.continue) tokens.push(data.continue)
-            return { ...current, tokens }
-          })
-          setError('')
-          if (!stream && data.resourceVersion) {
-            stream = new EventSource(watchUrl(context, definition, namespace, data.resourceVersion))
-            setWatching(true)
-            stream.onmessage = () => load()
-            stream.onerror = () => setWatching(false)
-          }
+    if (!writeEnabled) {
+      setBulkReview(null)
+      setBulkReviewToken(undefined)
+      setBulkReviewSelection([])
+      setBulkConfirmed(false)
+      setBulkConfirmation('')
+    }
+  }, [writeEnabled])
+
+  useEffect(() => {
+    setWatchSnapshot(initialWatchSnapshot())
+    setError('')
+    const controller = new ReliableWatchController<ResourceListResponse>({
+      load: (signal) => fetchResources(context, definition, namespace, labelSelector, { limit: pageSize, continueToken }, signal),
+      getResourceVersion: (data) => data.resourceVersion,
+      watchUrl: (resourceVersion) => watchUrl(context, definition, namespace, resourceVersion),
+       onData: (data) => {
+         setResponse(data)
+         setBulkReview(null)
+         setBulkReviewToken(undefined)
+         setBulkReviewSelection([])
+         setBulkConfirmed(false)
+         setBulkConfirmation('')
+         setSelectedKeys((current) => current.filter((key) => data.items.some((item) => resourceItemKey(item) === key)))
+        setPagination((current) => {
+          if (current.queryKey !== listQueryKey || current.pageIndex !== pageIndex) return current
+          const tokens = current.tokens.slice(0, pageIndex + 1)
+          if (data.continue) tokens.push(data.continue)
+          return { ...current, tokens }
         })
-        .catch((loadError: Error) => active && setError(loadError.message))
-        .finally(() => active && setLoading(false))
-    }
-    load()
-    return () => {
-      active = false
-      stream?.close()
-      setWatching(false)
-    }
-  }, [context, definition, namespace, labelSelector, pageSize, continueToken, pageIndex, listQueryKey, refreshNonce])
+        setError('')
+        setLoading(false)
+      },
+      onState: (snapshot) => {
+        setWatchSnapshot(snapshot)
+        setLoading(snapshot.state === 'refreshing')
+        if (snapshot.state === 'stale' || snapshot.state === 'unavailable') setError(snapshot.message || '')
+      },
+    })
+    controller.start()
+    return () => controller.stop()
+  }, [context, definition, namespace, labelSelector, pageSize, continueToken, pageIndex, listQueryKey, revision, reloadEpoch, refreshNonce])
 
   if (!context) return <SetupState />
   const statusOptions = Array.from(new Set(response?.items.map(resourceStatusLabel) ?? [])).sort((left, right) => left.localeCompare(right))
@@ -1102,7 +1914,8 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   const allFilteredSelected = filtered.length > 0 && filtered.every((item) => selectedKeys.includes(resourceItemKey(item)))
   const selectionLocked = Boolean(bulkReview) || Boolean(bulkBusy)
   const visibleColumnDefinitions = resourceColumnDefinitions.filter((column) => visibleColumns.includes(column.key))
-  const tableColumnCount = visibleColumnDefinitions.length + 2
+  const printerColumns = definition.customResourceCapabilities?.printerColumns ?? []
+  const tableColumnCount = visibleColumnDefinitions.length + printerColumns.length + 2
 
   /** Clears page-local selection and starts the first continuation page when needed. */
   function resetLocalView() {
@@ -1177,6 +1990,7 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
   /** Clears a bulk review and any stale result when the selection changes. */
   function clearBulkReview() {
     setBulkReview(null)
+    setBulkReviewToken(undefined)
     setBulkReviewSelection([])
     setBulkConfirmed(false)
     setBulkConfirmation('')
@@ -1230,12 +2044,19 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
     setBulkError('')
     setBulkResults(null)
     try {
-      const result = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), true, false, '')
-      setBulkReview(result)
+      const response = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), true, false, '')
+      if (!response.reviewToken) {
+        setBulkError('The server did not return a mutation review handle. Review the delete again.')
+        return
+      }
+      setBulkReview(response.value)
+      setBulkReviewToken(response.reviewToken)
       setBulkReviewSelection(selected.map(resourceDeleteReviewKey).sort())
       setBulkConfirmed(false)
       setBulkConfirmation('')
     } catch (reviewError) {
+      setBulkReview(null)
+      setBulkReviewToken(undefined)
       setBulkError((reviewError as Error).message)
     } finally {
       setBulkBusy('')
@@ -1248,13 +2069,14 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
       setBulkError('Enable write mode before applying a bulk delete.')
       return
     }
-    if (!bulkReview || bulkReview.status !== 'dry-run passed') {
+    if (!bulkReview || bulkReview.status !== 'dry-run passed' || !bulkReviewToken) {
       setBulkError('Resolve every dry-run error before applying this bulk delete.')
       return
     }
     const currentSelection = selected.map(resourceDeleteReviewKey).sort()
     if (currentSelection.length !== bulkReviewSelection.length || currentSelection.some((key, index) => key !== bulkReviewSelection[index])) {
       setBulkReview(null)
+      setBulkReviewToken(undefined)
       setBulkReviewSelection([])
       setBulkConfirmed(false)
       setBulkConfirmation('')
@@ -1269,15 +2091,20 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
     setBulkBusy('apply')
     setBulkError('')
     try {
-      const result = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), false, true, bulkConfirmation.trim())
-      setBulkResults(result)
+      const response = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), false, true, bulkConfirmation.trim(), bulkReviewToken)
+      setBulkResults(response.value)
       setBulkReview(null)
+      setBulkReviewToken(undefined)
       setBulkReviewSelection([])
       setBulkConfirmed(false)
       setBulkConfirmation('')
-      setSelectedKeys((current) => current.filter((key) => !result.items.some((item) => item.success && resourceItemKey(item) === key)))
+      setSelectedKeys((current) => current.filter((key) => !response.value.items.some((item) => item.success && resourceItemKey(item) === key)))
       setRefreshNonce((value) => value + 1)
     } catch (applyError) {
+      setBulkReview(null)
+      setBulkReviewToken(undefined)
+      setBulkConfirmed(false)
+      setBulkConfirmation('')
       setBulkError((applyError as Error).message)
     } finally {
       setBulkBusy('')
@@ -1288,7 +2115,7 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
     <div className="resource-page">
       <section className="resource-intro">
         <div><div className="eyebrow"><span className="eyebrow-mark" /> Resource collection</div><h1>{titleCase(definition.resource)}</h1><p>{definition.namespaced ? 'Namespaced resource' : 'Cluster-scoped resource'} / {namespace === 'all' || !definition.namespaced ? 'all namespaces' : namespace}</p></div>
-        <div className="resource-intro-meta"><span className={watching ? 'live-chip' : 'quiet-chip'}><span />{watching ? 'Live watch' : 'Refresh fallback'}</span><span>Page {pageIndex + 1} / {response?.items.length ?? 0} objects</span></div>
+        <div className="resource-intro-meta"><FreshnessStatus snapshot={watchSnapshot} /><span>Page {pageIndex + 1} / {response?.items.length ?? 0} objects</span></div>
       </section>
       <div className="table-toolbar">
         <label className="search-field"><Search size={16} /><input value={search} onChange={(event) => { setSearch(event.target.value); resetLocalView() }} placeholder={`Search ${definition.resource}`} /><kbd>/</kbd></label>
@@ -1303,7 +2130,8 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
         <button className="icon-button toolbar-action" onClick={() => setRefreshNonce((value) => value + 1)} aria-label="Refresh resources"><RefreshCw size={16} /></button>
         <button className="primary-button" disabled={!writeEnabled} onClick={onCreate} title={writeEnabled ? `Create a ${definition.kind}` : 'Enable write mode to create resources'}><span>+</span> New {definition.kind}</button>
       </div>
-      <div className="table-view-note"><span>Local page view</span> Search, status, and sorting inspect only the loaded Kubernetes page. Label selector is sent to Kubernetes; columns stay in this browser.</div>
+      <FreshnessNotice snapshot={watchSnapshot} />
+      <div className="table-view-note"><span>Local page view</span> Search, status, and sorting inspect only the loaded Kubernetes page. Label selector is sent to Kubernetes; columns stay in this browser.{printerColumns.length ? ` Safe CRD columns: ${printerColumns.map((column) => column.name).join(', ')}.` : ''}{definition.customResourceCapabilities?.printerColumnWarnings?.length ? ' Unsupported CRD columns use the generic table fallback.' : ''}</div>
       <div className="selection-toolbar">
         <span><strong>{selected.length}</strong> selected / {definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster scope' : namespace}</span>
         <div><button type="button" className="secondary-button danger-button" disabled={!writeEnabled || !selected.length || selectionLocked} onClick={() => void reviewBulkDelete()}><Trash2 size={14} /> Review delete{selected.length ? ` (${selected.length})` : ''}</button>{selected.length > 0 && <button type="button" className="text-button" disabled={selectionLocked} onClick={() => { setSelectedKeys([]); clearBulkReview(); setBulkResults(null) }}>Clear selection</button>}</div>
@@ -1313,20 +2141,21 @@ function ResourceListPage({ context, namespace, definition, writeEnabled, onOpen
       {bulkReview && <BulkDeleteReviewPanel definition={definition} namespace={namespace} items={selected} review={bulkReview} confirmed={bulkConfirmed} confirmation={bulkConfirmation} busy={bulkBusy} onConfirmed={setBulkConfirmed} onConfirmation={setBulkConfirmation} onCancel={clearBulkReview} onApply={() => void applyReviewedBulkDelete()} />}
       {bulkResults && <BulkDeleteResults definition={definition} result={bulkResults} />}
       <div className="resource-table-wrap">
-        <table className="resource-table"><thead><tr><th><input className="table-checkbox" type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || selectionLocked} aria-label="Select all visible resources" onChange={(event) => toggleFilteredSelection(event.target.checked)} /></th>{visibleColumnDefinitions.map((column) => <th key={column.key}>{column.label}</th>)}<th aria-label="Actions" /></tr></thead><tbody>
+        <table className="resource-table"><thead><tr><th><input className="table-checkbox" type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || selectionLocked} aria-label="Select all visible resources" onChange={(event) => toggleFilteredSelection(event.target.checked)} /></th>{visibleColumnDefinitions.map((column) => <th key={column.key}>{column.label}</th>)}{printerColumns.map((column) => <th key={`printer-${column.name}`} title={column.description}>{column.name}</th>)}<th aria-label="Actions" /></tr></thead><tbody>
           {loading && !response ? <tr><td colSpan={tableColumnCount}><div className="table-loading"><LoaderCircle size={18} className="spin" /> Reading API objects</div></td></tr> : null}
-          {!loading && !filtered.length ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><Box size={20} /><strong>No matching objects</strong><span>Try a different local filter or label selector.</span></div></td></tr> : null}
-          {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} columns={visibleColumnDefinitions.map((column) => column.key)} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
+           {!loading && !response ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><AlertTriangle size={20} /><strong>Resource data unavailable</strong><span>Waiting for a successful Kubernetes refresh.</span></div></td></tr> : null}
+           {!loading && response && !filtered.length ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><Box size={20} /><strong>No matching objects</strong><span>Try a different local filter or label selector.</span></div></td></tr> : null}
+          {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} columns={visibleColumnDefinitions.map((column) => column.key)} printerColumns={printerColumns} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
         </tbody></table>
       </div>
-      <div className="table-footer resource-pagination"><span>Showing {filtered.length} of {response?.items.length ?? 0} on page {pageIndex + 1}{response?.continue ? ' / more available' : ''}</span><div className="pagination-controls"><label>Rows <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{resourcePageSizes.map((size) => <option value={size} key={size}>{size}</option>)}</select></label><button type="button" className="secondary-button" onClick={previousPage} disabled={pageIndex === 0 || loading}><ChevronLeft size={14} /> Previous</button><button type="button" className="secondary-button" onClick={nextPage} disabled={!response?.continue || loading}>Next <ChevronRight size={14} /></button></div><span><span className="table-footer-dot" /> {watching ? 'updates arrive through the Kubernetes watch' : 'refresh to check for updates'}</span></div>
+       <div className="table-footer resource-pagination"><span>Showing {filtered.length} of {response?.items.length ?? 0} on page {pageIndex + 1}{response?.continue ? ' / more available' : ''}</span><div className="pagination-controls"><label>Rows <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{resourcePageSizes.map((size) => <option value={size} key={size}>{size}</option>)}</select></label><button type="button" className="secondary-button" onClick={previousPage} disabled={pageIndex === 0 || loading}><ChevronLeft size={14} /> Previous</button><button type="button" className="secondary-button" onClick={nextPage} disabled={!response?.continue || loading}>Next <ChevronRight size={14} /></button></div><span><span className="table-footer-dot" /> {watchSnapshot.state === 'live' ? 'updates arrive through the Kubernetes watch' : freshnessFooterLabel(watchSnapshot.state)}</span></div>
     </div>
   )
 }
 
 /** Renders one row in the generic resource table. */
-function ResourceRow({ item, columns, selected, selectionDisabled, onToggle, onOpen }: { item: ResourceSummary; columns: ResourceColumnKey[]; selected: boolean; selectionDisabled: boolean; onToggle: (item: ResourceSummary, checked: boolean) => void; onOpen: (name: string, namespace?: string) => void }) {
-  return <tr className={selected ? 'resource-row-selected' : ''} onClick={() => onOpen(item.name, item.namespace)}><td><input className="table-checkbox" type="checkbox" checked={selected} disabled={selectionDisabled} aria-label={`Select ${item.name}`} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggle(item, event.target.checked)} /></td>{columns.map((column) => <td key={column}>{renderResourceCell(column, item, onOpen)}</td>)}<td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
+function ResourceRow({ item, columns, printerColumns, selected, selectionDisabled, onToggle, onOpen }: { item: ResourceSummary; columns: ResourceColumnKey[]; printerColumns: CustomResourcePrinterColumn[]; selected: boolean; selectionDisabled: boolean; onToggle: (item: ResourceSummary, checked: boolean) => void; onOpen: (name: string, namespace?: string) => void }) {
+  return <tr className={selected ? 'resource-row-selected' : ''} onClick={() => onOpen(item.name, item.namespace)}><td><input className="table-checkbox" type="checkbox" checked={selected} disabled={selectionDisabled} aria-label={`Select ${item.name}`} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggle(item, event.target.checked)} /></td>{columns.map((column) => <td key={column}>{renderResourceCell(column, item, onOpen)}</td>)}{printerColumns?.map((column) => <td key={`printer-${column.name}`}><code className="printer-column-cell">{printerColumnDisplay(item, column.name)}</code></td>)}<td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
 }
 
 /** Builds the server query identity used to invalidate stale continuation tokens. */
@@ -1444,7 +2273,7 @@ function BulkDeleteResults({ definition, result }: { definition: ResourceDefinit
 }
 
 /** Renders the tabbed detail view for one generic resource. */
-function ResourceDetailPage({ context, namespace, definition, name, writeEnabled, onBack, onOpenEvent, onOpenResource }: { context: string; namespace: string; definition: ResourceDefinition; name: string; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
+function ResourceDetailPage({ context, namespace, definition, name, revision, reloadEpoch, writeEnabled, onBack, onOpenEvent, onOpenResource }: { context: string; namespace: string; definition: ResourceDefinition; name: string; revision: number; reloadEpoch: number; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
   const [object, setObject] = useState<ResourceObject | null>(null)
   const [yamlText, setYamlText] = useState('')
   const [originalYaml, setOriginalYaml] = useState('')
@@ -1453,6 +2282,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [reviewReady, setReviewReady] = useState(false)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [conflict, setConflict] = useState<ResourceConflictResponse | null>(null)
   const [conflictReviewed, setConflictReviewed] = useState(false)
   const [draftKept, setDraftKept] = useState(false)
@@ -1467,6 +2297,8 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     setConflict(null)
     setConflictReviewed(false)
     setDraftKept(false)
+    setReviewReady(false)
+    setReviewToken(undefined)
     setTab(isNew && schemaCandidate ? 'form' : 'overview')
     if (isNew) {
       const initial: ResourceObject = {
@@ -1497,6 +2329,11 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
       active = false
     }
   }, [context, definition.group, definition.version, definition.resource, definition.kind, definition.namespaced, namespace, name, isNew, isSecret])
+
+  useEffect(() => {
+    setReviewReady(false)
+    setReviewToken(undefined)
+  }, [context, writeEnabled, reloadEpoch])
 
   useEffect(() => {
     if (!schemaCandidate) {
@@ -1542,11 +2379,20 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
          setTab('yaml')
          return
        }
-       await applyResource(context, definition, namespace, name, yamlText, true)
+       setReviewReady(false)
+       setReviewToken(undefined)
+       const response = await applyResource(context, definition, namespace, name, yamlText, true)
+       if (!response.reviewToken) {
+         setError('The server did not return a mutation review handle. Review the changes again.')
+         return
+       }
        setReviewReady(true)
+       setReviewToken(response.reviewToken)
        setError('')
-     } catch (reviewError) {
-       if (!showResourceConflict(reviewError)) setError((reviewError as Error).message)
+      } catch (reviewError) {
+        setReviewReady(false)
+        setReviewToken(undefined)
+        if (!showResourceConflict(reviewError)) setError((reviewError as Error).message)
      } finally {
       setSaving(false)
     }
@@ -1554,9 +2400,15 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
 
   /** Applies a previously reviewed resource document to Kubernetes. */
   async function saveChanges() {
+    if (!reviewToken) {
+      setReviewReady(false)
+      setError('Run the server-side dry-run before applying these changes.')
+      return
+    }
     setSaving(true)
     try {
-       const applied = await applyResource(context, definition, namespace, name, yamlText, false)
+       const response = await applyResource(context, definition, namespace, name, yamlText, false, reviewToken)
+       const applied = response.value
       const appliedName = isNew ? metadataString(applied, 'name') : name
       const appliedNamespace = definition.namespaced && namespace === 'all' ? metadataString(applied, 'namespace') : namespace
       let refreshed = applied
@@ -1571,13 +2423,16 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
       const safeRefreshed = sanitizeEditorObject(refreshed)
       const text = stringify(isSecret ? redactSecret(safeRefreshed) : safeRefreshed)
       setObject(refreshed)
-      setYamlText(text)
-      setOriginalYaml(text)
-      setReviewReady(false)
-      setError(refreshError)
-      setTab('overview')
-     } catch (saveError) {
-       if (!showResourceConflict(saveError)) setError((saveError as Error).message)
+       setYamlText(text)
+       setOriginalYaml(text)
+       setReviewReady(false)
+       setReviewToken(undefined)
+       setError(refreshError)
+       setTab('overview')
+      } catch (saveError) {
+        setReviewReady(false)
+        setReviewToken(undefined)
+        if (!showResourceConflict(saveError)) setError((saveError as Error).message)
      } finally {
        setSaving(false)
      }
@@ -1588,9 +2443,10 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
      const nextConflict = resourceConflictFromError(candidate)
      if (!nextConflict) return false
      setConflict(nextConflict)
-     setConflictReviewed(false)
-     setDraftKept(false)
-     setReviewReady(false)
+      setConflictReviewed(false)
+      setDraftKept(false)
+      setReviewReady(false)
+      setReviewToken(undefined)
      setTab('yaml')
      setError('')
      return true
@@ -1609,12 +2465,13 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
      const text = stringify(isSecret ? redactSecret(refreshed) : refreshed)
      setObject(conflict.currentObject)
      setYamlText(text)
-     setOriginalYaml(text)
-     setReviewReady(false)
+      setOriginalYaml(text)
+      setReviewReady(false)
+      setReviewToken(undefined)
      setConflict(null)
      setConflictReviewed(false)
-     setDraftKept(false)
-     if (isSecret) setSecretsRevealed(false)
+      setDraftKept(false)
+      if (isSecret) setSecretsRevealed(false)
      setError('Current cluster YAML loaded. Review any new edits before applying.')
    }
 
@@ -1641,23 +2498,28 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
      const metadata = nextObject.metadata && typeof nextObject.metadata === 'object' && !Array.isArray(nextObject.metadata) ? nextObject.metadata as Record<string, unknown> : {}
      metadata.resourceVersion = conflict.currentResourceVersion
      nextObject.metadata = metadata
-     setObject(nextObject)
-     setYamlText(stringify(nextObject))
-     setReviewReady(false)
-     setConflict(null)
+      setObject(nextObject)
+      setYamlText(stringify(nextObject))
+      setReviewReady(false)
+      setReviewToken(undefined)
+      setConflict(null)
      setConflictReviewed(false)
      setDraftKept(false)
      setError('Current resource version carried into the draft. Review changes again before applying.')
    }
 
-  /** Refreshes the complete Pod after an operational subresource changes it. */
-  async function refreshObject() {
-    const refreshed = await fetchResource(context, definition, namespace, name)
+   /** Refreshes the complete Pod after an operational subresource changes it. */
+   async function refreshObject() {
+     setReviewReady(false)
+     setReviewToken(undefined)
+     const refreshed = await fetchResource(context, definition, namespace, name)
     const editorObject = sanitizeEditorObject(refreshed)
     const text = stringify(isSecret ? redactSecret(editorObject) : editorObject)
     setObject(refreshed)
     setYamlText(text)
     setOriginalYaml(text)
+    setReviewReady(false)
+    setReviewToken(undefined)
     setError('')
   }
 
@@ -1667,6 +2529,7 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
     setObject(safeObject)
     setYamlText(stringify(safeObject))
     setReviewReady(false)
+    setReviewToken(undefined)
     setError('')
   }
 
@@ -1682,30 +2545,196 @@ function ResourceDetailPage({ context, namespace, definition, name, writeEnabled
   const conflictCurrentYaml = conflict?.currentObject ? boundedConflictText(stringify(isSecret ? redactSecret(sanitizeEditorObject(conflict.currentObject)) : sanitizeEditorObject(conflict.currentObject))) : ''
   const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
   const schemaTabs = schemaCandidate ? [baseDetailTabs[0], 'form', ...baseDetailTabs.slice(1)] : baseDetailTabs
-  const detailTabs = (targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) && !isNew ? [schemaTabs[0], 'operations', ...schemaTabs.slice(1)] : schemaTabs
+  const detailTabs = !isNew ? [schemaTabs[0], ...(isOperationalReadPackResource(definition) ? ['read-pack'] : []), ...((targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) ? ['operations'] : []), ...schemaTabs.slice(1)] : schemaTabs
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
 
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
      <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving || Boolean(conflict)} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
+     {definition.customResourceCapabilities && <CustomResourceCapabilityPanel capabilities={definition.customResourceCapabilities} />}
      {!isNew && <DeleteReviewPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} />}
      <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
      {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
         {conflict && <ConflictResolutionPanel conflict={conflict} currentYaml={conflictCurrentYaml} isSecret={isSecret} draftKept={draftKept} reviewed={conflictReviewed} onReviewed={setConflictReviewed} onKeepDraft={keepConflictDraft} onReload={reloadConflictObject} onExport={exportConflictDraft} onPrepareRetry={prepareConflictRetry} />}
-        {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
-         {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
-         {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
-         {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+         {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
+          {tab === 'read-pack' && isOperationalReadPackResource(definition) && <OperationalReadPackView context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} revision={revision} reloadEpoch={reloadEpoch} />}
+          {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
+          {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
+          {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
-      {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false); const parsed = parseResourceObject(event.target.value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
+       {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); setReviewReady(false); setReviewToken(undefined); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); setReviewReady(false); setReviewToken(undefined); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(event.target.value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
       {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'debug' && definition.resource === 'pods' && !isNew && <PodDebugPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
       {tab === 'files' && definition.resource === 'pods' && !isNew && <PodFileCopyPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
-      {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} onOpenEvent={onOpenEvent} />}
+      {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} revision={revision} reloadEpoch={reloadEpoch} onOpenEvent={onOpenEvent} />}
       {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
+ </div>
+}
+
+/** Loads and presents one bounded built-in operational read pack without mutation controls. */
+function OperationalReadPackView({ context, namespace, definition, name, revision, reloadEpoch }: { context: string; namespace: string; definition: ResourceDefinition; name: string; revision: number; reloadEpoch: number }) {
+  const [response, setResponse] = useState<OperationalReadPackResponse | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [refreshNonce, setRefreshNonce] = useState(0)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoading(true)
+    setError('')
+    fetchOperationalReadPack(context, definition, namespace, name, controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) return
+        setResponse(data)
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setError('The structured read pack could not be loaded. Generic YAML, Events, and related resources remain available.')
+      })
+      .finally(() => !controller.signal.aborted && setLoading(false))
+    return () => controller.abort()
+  }, [context, definition.group, definition.version, definition.resource, definition.namespaced, namespace, name, revision, reloadEpoch, refreshNonce])
+
+  if (loading && !response) return <div className="read-pack-panel"><div className="read-pack-loading"><LoaderCircle size={17} className="spin" /> Reading bounded operational fields</div></div>
+  if (error && !response) return <div className="read-pack-panel"><div className="read-pack-header"><div className="logs-title"><Gauge size={16} /><strong>Operational read pack</strong></div><button type="button" className="secondary-button" onClick={() => setRefreshNonce((value) => value + 1)}>Retry</button></div><div className="read-pack-error"><AlertTriangle size={16} /><span>{error}</span></div></div>
+  if (!response) return <div className="read-pack-panel"><QuietState icon={<Gauge size={22} />} title="Read pack is unavailable" detail="Generic YAML, Events, and related resources remain available for this resource." /></div>
+
+  return <div className="read-pack-panel">
+    <div className="read-pack-header"><div><div className="logs-title"><Gauge size={16} /><strong>Operational read pack</strong><span>read-only / bounded</span></div><p className="read-pack-intro">Native summaries are extracted from the exact discovered GVR. Missing APIs, RBAC limits, and provider-specific fields stay visible without blocking the generic detail tabs.</p></div><div className="read-pack-header-actions"><ReadPackStateChip state={response.state} /><button type="button" className="icon-button" onClick={() => setRefreshNonce((value) => value + 1)} aria-label="Refresh operational read pack" title="Refresh operational read pack"><RefreshCw size={15} /></button></div></div>
+    <div className="read-pack-summary"><span>{response.message}</span><code>{response.diagnostics.queryCount}/{response.diagnostics.queryBudget} reads · cap {response.diagnostics.resultLimit}</code></div>
+    {error && <div className="read-pack-error"><AlertTriangle size={16} /><span>{error}</span></div>}
+    <div className="read-pack-cards">{response.panels.map((panel) => <OperationalReadPackCard key={panel.key} panel={panel} />)}</div>
+    {loading && <div className="read-pack-refreshing"><LoaderCircle size={13} className="spin" /> Refreshing operational fields</div>}
   </div>
+}
+
+/** Renders one operational panel with an explicit state badge and structured safe fields. */
+function OperationalReadPackCard({ panel }: { panel: OperationalReadPackPanelModel }) {
+  const data = panel.data
+  let content: ReactNode = <div className="read-pack-no-data">No structured fields are available for this panel.</div>
+  if (panel.key === 'ingress' && data) content = <IngressReadPackView data={data as IngressReadPackData} />
+  if (panel.key === 'endpoint-slice' && data) content = <EndpointSliceReadPackView data={data as EndpointSliceReadPackData} />
+  if (panel.key === 'network-policy' && data) content = <NetworkPolicyReadPackView data={data as NetworkPolicyReadPackData} />
+  if (panel.key === 'horizontal-pod-autoscaler' && data) content = <HorizontalPodAutoscalerReadPackView data={data as HorizontalPodAutoscalerReadPackData} />
+  if (panel.key === 'pod-disruption-budget' && data) content = <PodDisruptionBudgetReadPackView data={data as PodDisruptionBudgetReadPackData} />
+  if (panel.key === 'resource-quota' && data) content = <ResourceQuotaReadPackView data={data as ResourceQuotaReadPackData} />
+  if (panel.key === 'limit-range' && data) content = <LimitRangeReadPackView data={data as LimitRangeReadPackData} />
+  if (panel.key === 'persistent-volume' && data) content = <PersistentVolumeReadPackView data={data as PersistentVolumeReadPackData} />
+  if (panel.key === 'storage-class' && data) content = <StorageClassReadPackView data={data as StorageClassReadPackData} />
+  if (panel.key === 'service-account' && data) content = <ServiceAccountReadPackView data={data as ServiceAccountReadPackData} />
+  if (panel.key === 'pod' && data) content = <PodReadPackView data={data as PodReadPackData} />
+  return <section className={`read-pack-card read-pack-card-${panel.state}`}><div className="read-pack-card-heading"><div><span className="panel-eyebrow">Built-in view</span><h2>{panel.title}</h2></div><ReadPackStateChip state={panel.state} /></div><p className="read-pack-card-message">{panel.message}</p>{panel.truncated && <div className="read-pack-truncated"><AlertTriangle size={14} /><span>Results are capped. The generic related-resource view remains available for broader navigation.</span></div>}{content}</section>
+}
+
+/** Renders the compact state label used by every operational panel. */
+function ReadPackStateChip({ state }: { state: string }) {
+  return <span className={`read-pack-state-chip read-pack-state-${state}`}><span />{operationalReadPackStateLabel(state)}</span>
+}
+
+/** Renders a dense field grid shared by structured operational views. */
+function ReadPackFieldGrid({ rows }: { rows: Array<{ label: string; value: ReactNode }> }) {
+  return <div className="read-pack-field-grid">{rows.map((row) => <div className="read-pack-field" key={row.label}><span>{row.label}</span><strong>{row.value === undefined || row.value === null || row.value === '' ? '—' : row.value}</strong></div>)}</div>
+}
+
+/** Renders a titled subsection inside one operational card. */
+function ReadPackSection({ title, children }: { title: string; children: ReactNode }) {
+  return <div className="read-pack-section"><div className="read-pack-section-heading"><span>{title}</span></div>{children}</div>
+}
+
+/** Renders an explicit empty line for bounded structured collections. */
+function ReadPackEmptyLine({ children }: { children: ReactNode }) {
+  return <div className="read-pack-empty-line">{children}</div>
+}
+
+/** Renders a safe reference list without navigation or object bodies. */
+function ReadPackReferenceList({ items, emptyLabel }: { items: OperationalReadPackReference[]; emptyLabel: string }) {
+  if (!items.length) return <ReadPackEmptyLine>{emptyLabel}</ReadPackEmptyLine>
+  return <div className="read-pack-reference-list">{items.map((item, index) => <div className="read-pack-reference" key={`${item.kind || 'resource'}-${item.namespace || ''}-${item.name}-${index}`}><div><strong>{item.kind || 'Resource'}/{item.name || 'unnamed'}</strong><span>{item.namespace ? `ns ${item.namespace}` : 'cluster scope'}</span></div><span className={`read-pack-reference-state read-pack-state-${item.state}`}>{operationalReadPackStateLabel(item.state)}</span></div>)}</div>
+}
+
+/** Renders bounded condition summaries without backend error messages. */
+function ReadPackConditions({ conditions }: { conditions: OperationalCondition[] }) {
+  if (!conditions.length) return <ReadPackEmptyLine>No condition rows were returned.</ReadPackEmptyLine>
+  return <div className="read-pack-condition-list">{conditions.map((condition, index) => <div className="read-pack-condition" key={`${condition.type}-${index}`}><span className={`read-pack-condition-status read-pack-condition-${condition.status.toLowerCase()}`} /> <strong>{condition.type || 'Condition'}</strong><code>{condition.status || 'unknown'}{condition.reason ? ` / ${condition.reason}` : ''}</code></div>)}</div>
+}
+
+/** Renders a map of bounded quantity values. */
+function ReadPackMap({ values }: { values: Record<string, string> }) {
+  const entries = Object.entries(values)
+  if (!entries.length) return <span className="read-pack-muted">none</span>
+  return <span className="read-pack-map">{entries.slice(0, 8).map(([key, value]) => <code key={key}>{key}={value}</code>)}</span>
+}
+
+/** Renders Ingress service backend, rule, and EndpointSlice visibility. */
+function IngressReadPackView({ data }: { data: IngressReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Ingress class', value: data.ingressClass }, { label: 'Rules', value: data.rules.length }, { label: 'Backends', value: data.backends.length }, { label: 'EndpointSlices', value: data.endpointSlices.length }]} /><ReadPackSection title="Backends"><div className="read-pack-table">{data.backends.length ? data.backends.map((backend, index) => <div className="read-pack-table-row" key={`${backend.name}-${backend.port}-${index}`}><strong>{backend.kind || 'Service'}/{backend.name}</strong><code>{backend.port || 'any port'}</code><span>{backend.state}</span></div>) : <ReadPackEmptyLine>No service backends were declared.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Rules and TLS"><div className="read-pack-rule-list">{data.rules.map((rule, index) => <div className="read-pack-rule" key={`${rule.host || 'default'}-${index}`}><strong>{rule.host || '* default host'}</strong><span>{rule.paths.map((path) => `${path.path || '/'} → ${path.serviceName || path.resource || 'unresolved'}${path.servicePort ? `:${path.servicePort}` : ''}`).join(' · ') || 'no HTTP paths'}</span></div>)}{data.tlsHosts.length > 0 && <div className="read-pack-rule"><strong>TLS hosts</strong><span>{data.tlsHosts.join(' · ')}</span></div>}{!data.rules.length && !data.tlsHosts.length && <ReadPackEmptyLine>No rules or TLS hosts were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="EndpointSlice visibility"><div className="read-pack-table">{data.endpointSlices.length ? data.endpointSlices.map((slice) => <div className="read-pack-table-row" key={slice.name}><strong>{slice.name}</strong><code>{slice.serviceName || 'unlabeled'}</code><span>{slice.endpoints.length} endpoint{slice.endpoints.length === 1 ? '' : 's'}</span></div>) : <ReadPackEmptyLine>No matching EndpointSlices were returned.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders one EndpointSlice's addresses, ports, readiness, and topology. */
+function EndpointSliceReadPackView({ data }: { data: EndpointSliceReadPackData }) {
+  const slice = data.slice
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Service', value: slice.serviceName }, { label: 'Address type', value: slice.addressType }, { label: 'Ports', value: slice.ports.join(', ') }, { label: 'Endpoints', value: slice.endpoints.length }]} /><ReadPackSection title="Endpoint readiness"><div className="read-pack-table">{slice.endpoints.length ? slice.endpoints.map((endpoint, index) => <div className="read-pack-table-row" key={`${endpoint.addresses.join('-')}-${index}`}><strong>{endpoint.addresses.join(', ') || 'no address'}</strong><code>{endpoint.nodeName || endpoint.zone || 'no topology'}</code><span>{endpoint.ready === undefined ? 'unknown' : endpoint.ready ? 'ready' : 'not ready'}</span></div>) : <ReadPackEmptyLine>No addresses were returned.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders NetworkPolicy selectors, rule shape, and affected Pod references. */
+function NetworkPolicyReadPackView({ data }: { data: NetworkPolicyReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Pod selector', value: data.podSelector.text || 'all Pods in namespace' }, { label: 'Policy types', value: data.policyTypes.join(', ') }, { label: 'Ingress rules', value: data.ingressRules.length }, { label: 'Egress rules', value: data.egressRules.length }, { label: 'Affected Pods', value: data.affectedPods.length }]} /><ReadPackSection title="Rule shape"><div className="read-pack-table">{[...data.ingressRules.map((rule, index) => ({ ...rule, label: `Ingress ${index + 1}` })), ...data.egressRules.map((rule, index) => ({ ...rule, label: `Egress ${index + 1}` }))].map((rule) => <div className="read-pack-table-row" key={rule.label}><strong>{rule.label}</strong><code>{rule.peerCount} peers</code><span>{rule.portCount} ports</span></div>)}{!data.ingressRules.length && !data.egressRules.length && <ReadPackEmptyLine>No ingress or egress rules were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Affected Pods"><ReadPackReferenceList items={data.affectedPods} emptyLabel="No matching Pods were returned by the bounded selector query." /></ReadPackSection></div>
+}
+
+/** Renders HPA target, replica status, metrics, and conditions. */
+function HorizontalPodAutoscalerReadPackView({ data }: { data: HorizontalPodAutoscalerReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Target', value: `${data.target.kind || 'Resource'}/${data.target.name || 'unresolved'}` }, { label: 'Min replicas', value: data.minReplicas }, { label: 'Max replicas', value: data.maxReplicas }, { label: 'Current', value: data.currentReplicas }, { label: 'Desired', value: data.desiredReplicas }]} /><ReadPackSection title="Metrics"><div className="read-pack-table">{data.metrics.length ? data.metrics.map((metric, index) => <div className="read-pack-table-row" key={`${metric.type}-${metric.resource || metric.name || index}`}><strong>{metric.type || 'metric'}</strong><code>{metric.resource || metric.name || 'custom'}</code><span>{metric.current || metric.target || metric.targetAverage || (metric.targetUtilization === undefined ? 'no reading' : `${metric.targetUtilization}% target`)}</span></div>) : <ReadPackEmptyLine>No HPA metric rows were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Conditions"><ReadPackConditions conditions={data.conditions} /></ReadPackSection></div>
+}
+
+/** Renders PDB availability counters and disruption allowance. */
+function PodDisruptionBudgetReadPackView({ data }: { data: PodDisruptionBudgetReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Min available', value: data.minAvailable }, { label: 'Max unavailable', value: data.maxUnavailable }, { label: 'Expected Pods', value: data.expectedPods }, { label: 'Current healthy', value: data.currentHealthy }, { label: 'Desired healthy', value: data.desiredHealthy }, { label: 'Disruptions allowed', value: data.disruptionsAllowed }]} /><ReadPackSection title="Status conditions"><ReadPackConditions conditions={data.conditions} /></ReadPackSection></div>
+}
+
+/** Renders ResourceQuota used and hard quantity summaries. */
+function ResourceQuotaReadPackView({ data }: { data: ResourceQuotaReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Scopes', value: data.scopes.join(', ') || 'all scopes' }, { label: 'Resources', value: data.usage.length }]} /><ReadPackSection title="Usage"><div className="read-pack-table">{data.usage.length ? data.usage.map((item) => <div className="read-pack-table-row" key={item.resource}><strong>{item.resource}</strong><code>{item.used || '—'} used / {item.hard || '—'} hard</code><span>{item.percent === undefined ? '—' : `${item.percent}%`}</span></div>) : <ReadPackEmptyLine>No used or hard quantities were returned.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders LimitRange default and bound quantities. */
+function LimitRangeReadPackView({ data }: { data: LimitRangeReadPackData }) {
+  return <div className="read-pack-body"><ReadPackSection title="Limit items"><div className="read-pack-table">{data.items.length ? data.items.map((item, index) => <div className="read-pack-table-row read-pack-table-row-stack" key={`${item.type}-${index}`}><strong>{item.type || 'limit'}</strong><ReadPackMap values={{ ...item.default, ...item.defaultRequest }} /><ReadPackMap values={{ ...item.min, ...item.max }} /></div>) : <ReadPackEmptyLine>No LimitRange items were returned.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders PersistentVolume lifecycle fields and relationship references. */
+function PersistentVolumeReadPackView({ data }: { data: PersistentVolumeReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Phase', value: data.phase }, { label: 'Reason', value: data.reason }, { label: 'StorageClass', value: data.storageClass }, { label: 'Reclaim policy', value: data.reclaimPolicy }, { label: 'Volume mode', value: data.volumeMode }, { label: 'Source', value: data.source }, { label: 'Capacity', value: <ReadPackMap values={data.capacity} /> }, { label: 'Provider message', value: data.providerMessage ? 'present but withheld' : 'not reported' }]} /><ReadPackSection title="Relationships"><ReadPackReferenceList items={data.relationships} emptyLabel="No claim or StorageClass relationship was declared." /></ReadPackSection></div>
+}
+
+/** Renders StorageClass lifecycle settings and bounded PersistentVolume relationships. */
+function StorageClassReadPackView({ data }: { data: StorageClassReadPackData }) {
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Provisioner', value: data.provisioner }, { label: 'Reclaim policy', value: data.reclaimPolicy }, { label: 'Binding mode', value: data.volumeBindingMode }, { label: 'Expansion', value: data.allowVolumeExpansion === undefined ? 'not reported' : data.allowVolumeExpansion ? 'allowed' : 'disabled' }, { label: 'Mount options', value: data.mountOptions.join(', ') || 'none' }, { label: 'Allowed topologies', value: data.allowedTopologies }]} /><ReadPackSection title="PersistentVolumes"><ReadPackReferenceList items={data.persistentVolumes} emptyLabel="No PersistentVolumes use this StorageClass in the bounded result." /></ReadPackSection></div>
+}
+
+/** Renders ServiceAccount references and read-only RBAC bindings. */
+function ServiceAccountReadPackView({ data }: { data: ServiceAccountReadPackData }) {
+  const bindings = [...data.roleBindings.map((binding) => ({ ...binding, kind: 'RoleBinding' })), ...data.clusterRoleBindings.map((binding) => ({ ...binding, kind: 'ClusterRoleBinding' }))]
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Automount token', value: data.automountServiceAccountToken === undefined ? 'not reported' : data.automountServiceAccountToken ? 'enabled' : 'disabled' }, { label: 'Secret references', value: data.secrets.join(', ') || 'none' }, { label: 'Image pull refs', value: data.imagePullSecrets.join(', ') || 'none' }, { label: 'RBAC bindings', value: bindings.length }]} /><ReadPackSection title="RBAC bindings"><div className="read-pack-table">{bindings.length ? bindings.map((binding, index) => <div className="read-pack-table-row read-pack-table-row-stack" key={`${binding.kind}-${binding.name}-${index}`}><strong>{binding.kind}/{binding.name}</strong><code>{binding.roleKind || 'Role'}/{binding.roleName || 'unresolved'}</code><span>{binding.namespace || 'cluster scope'}</span></div>) : <ReadPackEmptyLine>No read-only RoleBinding or ClusterRoleBinding references this account.</ReadPackEmptyLine>}</div></ReadPackSection></div>
+}
+
+/** Renders Pod scheduling, readiness, containers, volumes, and security posture. */
+function PodReadPackView({ data }: { data: PodReadPackData }) {
+  const containers = [...data.containers, ...data.initContainers.map((container) => ({ ...container, name: `init/${container.name}` })), ...data.ephemeralContainers.map((container) => ({ ...container, name: `debug/${container.name}` }))]
+  return <div className="read-pack-body"><ReadPackFieldGrid rows={[{ label: 'Phase', value: data.phase }, { label: 'Reason', value: data.reason }, { label: 'Node', value: data.nodeName }, { label: 'Scheduler', value: data.schedulerName }, { label: 'Pod IP', value: data.podIP }, { label: 'Readiness gates', value: data.readinessGates.join(', ') || 'none' }]} /><ReadPackSection title="Conditions"><ReadPackConditions conditions={data.conditions} /></ReadPackSection><ReadPackSection title="Containers"><div className="read-pack-table">{containers.length ? containers.map((container) => <PodContainerReadPackRow container={container} key={container.name} />) : <ReadPackEmptyLine>No container summaries were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Volumes"><div className="read-pack-table">{data.volumes.length ? data.volumes.map((volume) => <div className="read-pack-table-row" key={volume.name}><strong>{volume.name}</strong><code>{volume.type}</code><span>{volume.reference || 'configured'}{volume.readOnly ? ' / read-only' : ''}</span></div>) : <ReadPackEmptyLine>No volume summaries were returned.</ReadPackEmptyLine>}</div></ReadPackSection><ReadPackSection title="Security context"><ReadPackFieldGrid rows={[{ label: 'Run as user', value: data.securityContext.runAsUser }, { label: 'Run as non-root', value: data.securityContext.runAsNonRoot === undefined ? 'not reported' : data.securityContext.runAsNonRoot ? 'yes' : 'no' }, { label: 'Seccomp', value: data.securityContext.seccompProfileType }, { label: 'Host network', value: data.securityContext.hostNetwork === undefined ? 'not reported' : data.securityContext.hostNetwork ? 'yes' : 'no' }]} /></ReadPackSection></div>
+}
+
+/** Renders one Pod container's readiness, probes, restarts, and termination reason. */
+function PodContainerReadPackRow({ container }: { container: PodContainerSummary }) {
+  const probes = container.probes.map((probe) => `${probe.name}${probe.handler ? ` / ${probe.handler}` : ''}`).join(', ')
+  const termination = container.lastTerminationReason || container.stateReason || container.state || 'no termination reason'
+  return <div className="read-pack-table-row read-pack-table-row-stack"><strong>{container.name}</strong><code>{container.image || 'image unavailable'}</code><span>{container.ready === undefined ? 'ready unknown' : container.ready ? 'ready' : 'not ready'} · {container.restartCount ?? 0} restarts · {termination}</span><small>{probes || 'no probes configured'}</small></div>
+}
+
+/** Renders bounded CRD identity, version, and subresource capability metadata on detail pages. */
+function CustomResourceCapabilityPanel({ capabilities }: { capabilities: CustomResourceCapabilities }) {
+  const scalePaths = [capabilities.scaleSpecReplicasPath, capabilities.scaleStatusReplicasPath, capabilities.scaleLabelSelectorPath].filter(Boolean).join(' / ')
+  return <section className="crd-capability-panel"><div className="crd-capability-heading"><div><span className="panel-eyebrow">Custom resource definition</span><strong>{capabilities.group} / {capabilities.kind}</strong></div><code>{capabilities.resource} / {capabilities.scope}</code></div><div className="crd-capability-grid"><div><span>Version identity</span><strong>{capabilities.version}</strong><small>{customResourceCapabilityLabel(capabilities)}</small></div><div><span>Subresources</span><strong>{capabilities.statusSubresource || capabilities.scaleSubresource ? [capabilities.statusSubresource ? 'status' : '', capabilities.scaleSubresource ? 'scale' : ''].filter(Boolean).join(' / ') : 'none declared'}</strong><small>{scalePaths ? `scale paths ${scalePaths}` : 'No custom-resource actions are added here.'}</small></div><div><span>Printer columns</span><strong>{capabilities.printerColumns?.length ?? 0} safe columns</strong><small>{capabilities.printerColumnWarnings?.length ? 'Unsupported columns use generic table fields.' : 'Values are bounded and evaluated by the backend.'}</small></div></div></section>
 }
 
 /** Renders the explicit current-state review and local-draft choices for a resource-version conflict. */
@@ -1739,10 +2768,14 @@ function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespa
   const metadata = object.metadata && typeof object.metadata === 'object' && !Array.isArray(object.metadata) ? object.metadata as Record<string, unknown> : {}
   const metadataName = typeof metadata.name === 'string' ? metadata.name : ''
   const metadataNamespace = typeof metadata.namespace === 'string' ? metadata.namespace : namespace === 'all' ? '' : namespace
+  const fallbackText = response.fallbacks?.length ? schemaFallbackSummary(response.fallbacks, response.fallbacksTruncated) : ''
+  const statusNotice = schemaStatusNotice(response)
   const updatePath = (path: string[], value: unknown) => onChange(updateSchemaObject(object, path, value))
   return <div className="schema-form-panel">
     <div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>{isNew ? 'Create from schema' : 'Edit from schema'}</strong><span>structural OpenAPI v3</span></div><div className="schema-form-header-meta">{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}<span className="schema-state-chip schema-state-good">Form ready</span></div></div>
-    <div className="schema-form-intro"><strong>Fields are generated from the cluster CRD.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span></div>
+    <div className="schema-form-intro"><strong>Fields are generated from the cluster CRD.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span>{response.message && <span>{response.message}</span>}</div>
+    {statusNotice && <div className="schema-readonly-notice"><LockKeyhole size={15} /><span>{statusNotice}</span></div>}
+    {fallbackText && <div className="schema-partial-fallback"><AlertTriangle size={15} /><div><strong>Some fields use the YAML fallback</strong><span>{fallbackText}</span></div><button type="button" className="text-button" onClick={onOpenYaml}>Open YAML</button></div>}
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to edit this form. Review still performs the existing Kubernetes server-side dry-run.</div>}
     <form className="schema-form" onSubmit={(event) => event.preventDefault()}>
       <fieldset className="schema-object schema-metadata" disabled={!writeEnabled}>
@@ -2012,10 +3045,19 @@ function parseResourceObject(value: string): ResourceObject | null {
 /** Renders a version-aware dry-run and exact-name confirmation flow for one delete. */
 function DeleteReviewPanel({ context, namespace, definition, name, resourceVersion, writeEnabled, onDeleted }: { context: string; namespace: string; definition: ResourceDefinition; name: string; resourceVersion: string; writeEnabled: boolean; onDeleted: () => void }) {
   const [review, setReview] = useState<ResourceDeleteResponse | null>(null)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
   const [confirmationText, setConfirmationText] = useState('')
   const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    setReview(null)
+    setReviewToken(undefined)
+    setConfirmed(false)
+    setConfirmationText('')
+    if (!writeEnabled) setError('')
+  }, [context, namespace, definition.group, definition.version, definition.resource, name, resourceVersion, writeEnabled])
 
   /** Runs the server-side Kubernetes dry-run before exposing final delete controls. */
   async function reviewDelete() {
@@ -2030,11 +3072,20 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
     setBusy('review')
     setError('')
     try {
-      const result = await deleteResource(context, definition, namespace, name, resourceVersion, true, false, '')
-      setReview(result)
+      const response = await deleteResource(context, definition, namespace, name, resourceVersion, true, false, '')
+      if (!response.reviewToken) {
+        setReview(null)
+        setReviewToken(undefined)
+        setError('The server did not return a mutation review handle. Review the delete again.')
+        return
+      }
+      setReview(response.value)
+      setReviewToken(response.reviewToken)
       setConfirmed(false)
       setConfirmationText('')
     } catch (reviewError) {
+      setReview(null)
+      setReviewToken(undefined)
       setError((reviewError as Error).message)
     } finally {
       setBusy('')
@@ -2047,7 +3098,7 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
       setError('Enable write mode before applying a delete.')
       return
     }
-    if (!review || review.status !== 'dry-run passed') {
+    if (!review || review.status !== 'dry-run passed' || !reviewToken) {
       setError('Run the server-side dry-run before applying this delete.')
       return
     }
@@ -2058,9 +3109,15 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
     setBusy('apply')
     setError('')
     try {
-      await deleteResource(context, definition, namespace, name, resourceVersion, false, true, confirmationText.trim())
+      await deleteResource(context, definition, namespace, name, resourceVersion, false, true, confirmationText.trim(), reviewToken)
+      setReview(null)
+      setReviewToken(undefined)
       onDeleted()
     } catch (applyError) {
+      setReview(null)
+      setReviewToken(undefined)
+      setConfirmed(false)
+      setConfirmationText('')
       setError((applyError as Error).message)
     } finally {
       setBusy('')
@@ -2074,8 +3131,8 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
     <div className="delete-review-intro"><strong>{definition.kind} / {namespace || 'cluster scope'} / {name}</strong><span>Deletion is permanent. KubeHaggis requires this exact resource version to pass a Kubernetes server-side dry-run before the final request.</span></div>
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to review and delete. Kubernetes RBAC still authorizes the final request.</div>}
     {!review && <div className="delete-review-start"><span>No cluster state changes during review. The final delete is a separate, confirmed request.</span><button type="button" className="danger-button primary-button" disabled={!writeEnabled || Boolean(busy)} onClick={() => void reviewDelete()}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing delete' : 'Review delete'}</button></div>}
-    {review && <div className={`delete-review ${ready ? '' : 'delete-review-blocked'}`}><div className="delete-review-heading"><span className={ready ? 'review-ready' : 'node-review-blocked-chip'}>{ready ? <><Check size={13} /> Dry-run passed</> : <><AlertTriangle size={13} /> Review blocked</>}</span><strong>{ready ? 'Delete is ready for final confirmation' : 'Delete cannot proceed'}</strong></div><p>{ready ? 'Kubernetes accepted this exact resource-versioned delete during server-side dry-run. No cluster state has changed.' : 'No deletion was submitted. Refresh the resource and resolve the review failure before retrying.'}</p>{ready && <><label className="destructive-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed this exact resource and understand Kubernetes will permanently delete it. Related resources may be affected by owner references or finalizers.</span></label><label className="destructive-confirm-input"><span>Type the exact resource name to authorize deletion: <strong>{name}</strong></span><input value={confirmationText} onChange={(event) => setConfirmationText(event.target.value)} disabled={busy === 'apply'} autoComplete="off" spellCheck={false} /></label></>}
-      <div className="delete-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setConfirmed(false); setConfirmationText(''); setError('') }} disabled={Boolean(busy)}>Change review</button><button type="button" className="danger-button primary-button" onClick={() => void applyReviewedDelete()} disabled={!canApply}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />} {busy === 'apply' ? 'Deleting' : 'Confirm and delete'}</button></div></div>}
+     {review && <div className={`delete-review ${ready ? '' : 'delete-review-blocked'}`}><div className="delete-review-heading"><span className={ready ? 'review-ready' : 'node-review-blocked-chip'}>{ready ? <><Check size={13} /> Dry-run passed</> : <><AlertTriangle size={13} /> Review blocked</>}</span><strong>{ready ? 'Delete is ready for final confirmation' : 'Delete cannot proceed'}</strong></div><p>{ready ? 'Kubernetes accepted this exact resource-versioned delete during server-side dry-run. No cluster state has changed.' : 'No deletion was submitted. Refresh the resource and resolve the review failure before retrying.'}</p>{ready && <><label className="destructive-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed this exact resource and understand Kubernetes will permanently delete it. Related resources may be affected by owner references or finalizers.</span></label><label className="destructive-confirm-input"><span>Type the exact resource name to authorize deletion: <strong>{name}</strong></span><input value={confirmationText} onChange={(event) => setConfirmationText(event.target.value)} disabled={busy === 'apply'} autoComplete="off" spellCheck={false} /></label></>}
+       <div className="delete-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setReviewToken(undefined); setConfirmed(false); setConfirmationText(''); setError('') }} disabled={Boolean(busy)}>Change review</button><button type="button" className="danger-button primary-button" onClick={() => void applyReviewedDelete()} disabled={!canApply}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />} {busy === 'apply' ? 'Deleting' : 'Confirm and delete'}</button></div></div>}
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
   </div>
 }
@@ -2083,10 +3140,20 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
 /** Renders discovery-backed relationships and explicit read limitations for a resource. */
 function RelatedResourcesPanel({ context, definition, namespace, name, isNew, onOpenResource }: { context: string; definition: ResourceDefinition; namespace: string; name: string; isNew: boolean; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
   const [response, setResponse] = useState<RelatedResourcesResponse | null>(null)
+  const [reverseResponse, setReverseResponse] = useState<RelatedResourcesResponse | null>(null)
   const [loading, setLoading] = useState(!isNew)
+  const [reverseLoading, setReverseLoading] = useState(false)
   const [error, setError] = useState('')
+  const [reverseError, setReverseError] = useState('')
+  const reverseRequestID = useRef(0)
 
   useEffect(() => {
+    setResponse(null)
+    setReverseResponse(null)
+    setReverseLoading(false)
+    setError('')
+    setReverseError('')
+    reverseRequestID.current += 1
     if (isNew) {
       setLoading(false)
       return
@@ -2103,24 +3170,96 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
       .finally(() => active && setLoading(false))
     return () => {
       active = false
+      reverseRequestID.current += 1
     }
   }, [context, definition, namespace, name, isNew])
+
+  /** Loads broad reverse-owner relationships without delaying the direct relationship response. */
+  async function loadReverseRelationships() {
+    const requestID = reverseRequestID.current + 1
+    reverseRequestID.current = requestID
+    setReverseLoading(true)
+    setReverseError('')
+    try {
+      const data = await fetchRelatedReverse(context, definition, namespace, name)
+      if (requestID !== reverseRequestID.current) return
+      setReverseResponse(data)
+    } catch (loadError) {
+      if (requestID === reverseRequestID.current) setReverseError((loadError as Error).message)
+    } finally {
+      if (requestID === reverseRequestID.current) setReverseLoading(false)
+    }
+  }
 
   if (isNew) return <QuietState icon={<Network size={22} />} title="Save before reading relationships" detail="A new resource has no Kubernetes identity or native relationships until it is created." />
   if (loading && !response) return <div className="relationship-panel"><div className="panel relationship-summary-panel"><div className="relationship-loading"><LoaderCircle size={17} className="spin" /> Reading native relationships</div></div></div>
   if (error && !response) return <div className="relationship-panel"><div className="panel relationship-summary-panel"><PanelHeading eyebrow="Relationships" title="Related resources" action="Read failed" tone="warning" /><div className="inline-error"><AlertTriangle size={15} />{error}</div></div></div>
 
-  const items = response?.items ?? []
-  const notices = response?.notices ?? []
+  const displayedResponse = response && reverseResponse ? mergeRelatedResponses(response, reverseResponse) : response
+  const items = displayedResponse?.items ?? []
+  const notices = displayedResponse?.notices ?? []
+  const reverseDeferred = Boolean(response?.notices?.some((notice) => notice.deferred)) && !reverseResponse
   return <div className="relationship-panel">
     <div className="panel relationship-summary-panel">
-      <PanelHeading eyebrow="Relationships" title="Related resources" action={relatedAggregateLabel(response?.state || 'empty', items.length)} tone={relatedAggregateTone(response?.state || 'empty')} />
+      <PanelHeading eyebrow="Relationships" title="Related resources" action={relatedAggregateLabel(displayedResponse?.state || 'empty', items.length)} tone={relatedAggregateTone(displayedResponse?.state || 'empty')} />
       <p className="relationship-copy">Links are derived from Kubernetes owner metadata, native selectors, binding fields, and explicit PodSpec references. Only sanitized resource coordinates are returned; Secret values are never read into this view.</p>
       {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
+      {reverseDeferred && <button type="button" className="secondary-button" onClick={() => void loadReverseRelationships()} disabled={reverseLoading}>{reverseLoading ? <><LoaderCircle size={14} className="spin" /> Scanning reverse owners</> : <><Network size={14} /> Load owned descendants</>}</button>}
+      {reverseError && <div className="inline-error"><AlertTriangle size={15} />{reverseError}</div>}
+      {displayedResponse?.diagnostics && <div className="panel-note"><Activity size={13} /> {displayedResponse.diagnostics.queryCount}/{displayedResponse.diagnostics.queryBudget} relationship reads · {displayedResponse.diagnostics.durationMilliseconds} ms · {displayedResponse.diagnostics.concurrentLimit} concurrent max</div>}
     </div>
     {notices.length ? <div className="relationship-notices">{notices.map((notice, index) => <RelatedNotice key={`${notice.type}-${notice.source}-${index}`} notice={notice} />)}</div> : null}
-    {items.length ? <div className="relationship-list">{items.map((item, index) => <RelatedResourceRow key={`${item.type}-${item.source}-${item.namespace || ''}-${item.name || ''}-${item.uid || index}`} item={item} onOpenResource={onOpenResource} />)}</div> : notices.length ? <div className="relationship-limited"><AlertTriangle size={16} /><span>No resolved links are visible. The source states above explain what Kubernetes allowed this identity to read.</span></div> : <QuietState icon={<Network size={22} />} title="No related resources" detail={response?.message || 'No safe native relationship was found for this object.'} />}
+    {items.length ? <div className="relationship-list">{items.map((item, index) => <RelatedResourceRow key={`${item.type}-${item.source}-${item.namespace || ''}-${item.name || ''}-${item.uid || index}`} item={item} onOpenResource={onOpenResource} />)}</div> : notices.length ? <div className="relationship-limited"><AlertTriangle size={16} /><span>No resolved links are visible. The source states above explain what Kubernetes allowed this identity to read.</span></div> : <QuietState icon={<Network size={22} />} title="No related resources" detail={displayedResponse?.message || 'No safe native relationship was found for this object.'} />}
   </div>
+}
+
+/** Merges direct and deferred relationship responses without retaining the deferred placeholder. */
+function mergeRelatedResponses(initial: RelatedResourcesResponse, secondary: RelatedResourcesResponse): RelatedResourcesResponse {
+  const items = [...initial.items]
+  const itemKeys = new Set(items.map((item) => [item.type, item.source, item.apiVersion || '', item.kind || '', item.namespace || '', item.name || '', item.uid || ''].join('\u0000')))
+  secondary.items.forEach((item) => {
+    const key = [item.type, item.source, item.apiVersion || '', item.kind || '', item.namespace || '', item.name || '', item.uid || ''].join('\u0000')
+    if (itemKeys.has(key)) return
+    itemKeys.add(key)
+    items.push(item)
+  })
+
+  const notices = [...(initial.notices || []).filter((notice) => !notice.deferred), ...(secondary.notices || [])]
+  const noticeKeys = new Set<string>()
+  const uniqueNotices = notices.filter((notice) => {
+    const key = [notice.type, notice.source, notice.state, notice.message].join('\u0000')
+    if (noticeKeys.has(key)) return false
+    noticeKeys.add(key)
+    return true
+  })
+  const truncated = Boolean(initial.truncated || secondary.truncated)
+  let state = initial.state
+  if (truncated) {
+    state = 'partial'
+  } else if (secondary.state === 'permission-denied' && !items.length) {
+    state = 'permission-denied'
+  } else if (secondary.state !== 'error' && (secondary.state === 'available' || secondary.state === 'empty') && uniqueNotices.length === 0) {
+    state = items.length ? 'available' : 'empty'
+  } else if (items.length || uniqueNotices.length) {
+    state = 'partial'
+  }
+
+  const message = state === 'available'
+    ? 'Relationships resolved from Kubernetes metadata and native spec fields.'
+    : state === 'empty'
+      ? 'No native relationships were found for this resource.'
+      : state === 'partial'
+        ? 'Some relationship sources were incomplete; each limitation is listed below.'
+        : initial.message || secondary.message
+
+  const diagnostics = initial.diagnostics && secondary.diagnostics ? {
+    queryCount: initial.diagnostics.queryCount + secondary.diagnostics.queryCount,
+    queryBudget: Math.max(initial.diagnostics.queryBudget, secondary.diagnostics.queryBudget),
+    durationMilliseconds: initial.diagnostics.durationMilliseconds + secondary.diagnostics.durationMilliseconds,
+    deadlineMilliseconds: Math.max(initial.diagnostics.deadlineMilliseconds, secondary.diagnostics.deadlineMilliseconds),
+    concurrentLimit: Math.max(initial.diagnostics.concurrentLimit, secondary.diagnostics.concurrentLimit),
+  } : secondary.diagnostics || initial.diagnostics
+  return { ...initial, state, message, items, notices: uniqueNotices, truncated, diagnostics }
 }
 
 /** Describes one action option shown by a targeted workload form. */
@@ -2131,7 +3270,7 @@ type WorkloadActionOption = {
 }
 
 /** Renders a two-step dry-run and confirmation form for built-in workloads. */
-function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, onRefresh }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
   const options = workloadActionOptions(definition.resource)
   const [action, setAction] = useState<WorkloadAction>(options[0]?.action || 'restart')
   const [replicas, setReplicas] = useState(workloadReplicaCount(object))
@@ -2140,6 +3279,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
   const [revision, setRevision] = useState('')
   const [schedule, setSchedule] = useState(workloadSchedule(object))
   const [review, setReview] = useState<WorkloadActionResponse | null>(null)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
   const [error, setError] = useState('')
@@ -2160,12 +3300,20 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     setReplicas(workloadReplicaCount(object))
     setSchedule(workloadSchedule(object))
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
   }, [object])
+
+  useEffect(() => {
+    setReview(null)
+    setReviewToken(undefined)
+    setConfirmed(false)
+  }, [context, writeEnabled, reloadEpoch])
 
   /** Clears a review so the operator can change the requested action. */
   function editAction() {
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setError('')
   }
@@ -2174,6 +3322,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
   function changeAction(value: WorkloadAction) {
     setAction(value)
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setError('')
     setSuccess('')
@@ -2232,10 +3381,19 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     setError('')
     setSuccess('')
     try {
-      const result = await applyWorkloadAction(context, definition, namespace, name, request)
-      setReview(result)
+       const response = await applyWorkloadAction(context, definition, namespace, name, request)
+       if (!response.reviewToken) {
+         setReview(null)
+         setReviewToken(undefined)
+         setError('The server did not return a mutation review handle. Review the action again.')
+         return
+       }
+       setReview(response.value)
+       setReviewToken(response.reviewToken)
       setConfirmed(false)
     } catch (reviewError) {
+      setReview(null)
+      setReviewToken(undefined)
       setError((reviewError as Error).message)
     } finally {
       setBusy('')
@@ -2248,7 +3406,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
       setError('Enable write mode before applying a workload action.')
       return
     }
-    if (!review) {
+    if (!review || !reviewToken) {
       setError('Run the server-side dry-run before applying this action.')
       return
     }
@@ -2262,10 +3420,12 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     setError('')
     setSuccess('')
     try {
-      const result = await applyWorkloadAction(context, definition, namespace, name, request)
+       const response = await applyWorkloadAction(context, definition, namespace, name, request, reviewToken)
+       const result = response.value
       const created = result.createdName ? ` / created ${result.createdName}` : ''
       setSuccess(`${workloadActionLabel(action)} applied${created}.`)
-      setReview(null)
+       setReview(null)
+       setReviewToken(undefined)
       setConfirmed(false)
       try {
         await onRefresh()
@@ -2273,6 +3433,9 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
         setError(`Action applied, but the workload refresh failed: ${(refreshError as Error).message}`)
       }
     } catch (applyError) {
+      setReview(null)
+      setReviewToken(undefined)
+      setConfirmed(false)
       setError((applyError as Error).message)
     } finally {
       setBusy('')
@@ -2300,13 +3463,14 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
 }
 
 /** Renders a two-step PVC resize and VolumeSnapshot workflow with capability states. */
-function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, onRefresh }: { context: string; namespace: string; name: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
   const [info, setInfo] = useState<PVCOperationInfo | null>(null)
   const [action, setAction] = useState<PVCAction>('resize')
   const [storage, setStorage] = useState(pvcRequestedStorage(object))
   const [snapshotName, setSnapshotName] = useState('')
   const [snapshotClassName, setSnapshotClassName] = useState('')
   const [review, setReview] = useState<PVCActionResponse | null>(null)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
   const [loading, setLoading] = useState(true)
@@ -2319,6 +3483,7 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
     setError('')
     setInfo(null)
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setStorage(pvcRequestedStorage(object))
     setSnapshotName('')
@@ -2335,10 +3500,17 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
     }
   }, [context, namespace, name, object])
 
+  useEffect(() => {
+    setReview(null)
+    setReviewToken(undefined)
+    setConfirmed(false)
+  }, [context, writeEnabled, reloadEpoch])
+
   /** Clears an older review when the operator changes the native PVC operation. */
   function changeAction(value: PVCAction) {
     setAction(value)
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setError('')
     setSuccess('')
@@ -2393,10 +3565,19 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
     setError('')
     setSuccess('')
     try {
-      const result = await applyPVCAction(context, namespace, name, request)
-      setReview(result)
+       const response = await applyPVCAction(context, namespace, name, request)
+       if (!response.reviewToken) {
+         setReview(null)
+         setReviewToken(undefined)
+         setError('The server did not return a mutation review handle. Review the operation again.')
+         return
+       }
+       setReview(response.value)
+       setReviewToken(response.reviewToken)
       setConfirmed(false)
     } catch (reviewError) {
+      setReview(null)
+      setReviewToken(undefined)
       setError((reviewError as Error).message)
     } finally {
       setBusy('')
@@ -2409,7 +3590,7 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
       setError('Enable write mode before applying a PVC operation.')
       return
     }
-    if (!review) {
+    if (!review || !reviewToken) {
       setError('Run the server-side dry-run before applying this PVC operation.')
       return
     }
@@ -2423,9 +3604,11 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
     setError('')
     setSuccess('')
     try {
-      const result = await applyPVCAction(context, namespace, name, request)
+       const response = await applyPVCAction(context, namespace, name, request, reviewToken)
+       const result = response.value
       setSuccess(action === 'resize' ? 'PVC resize applied. Kubernetes will complete expansion asynchronously.' : `VolumeSnapshot ${result.snapshotName || snapshotName.trim()} creation requested.`)
-      setReview(null)
+       setReview(null)
+       setReviewToken(undefined)
       setConfirmed(false)
       try {
         await onRefresh()
@@ -2433,6 +3616,9 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
         setError(`PVC operation applied, but the PVC refresh failed: ${(refreshError as Error).message}`)
       }
     } catch (applyError) {
+      setReview(null)
+      setReviewToken(undefined)
+      setConfirmed(false)
       setError((applyError as Error).message)
     } finally {
       setBusy('')
@@ -2459,7 +3645,7 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
       {action === 'snapshot' && <div className="pvc-operation-grid"><label className="pvc-operation-field"><span>Snapshot name</span><input value={snapshotName} onChange={(event) => setSnapshotName(event.target.value)} disabled={disabled} placeholder="data-copy" required /></label><label className="pvc-operation-field"><span>VolumeSnapshotClass</span><select value={snapshotClassName} onChange={(event) => setSnapshotClassName(event.target.value)} disabled={disabled}><option value="">Choose a class</option>{snapshotClasses.map((item) => <option key={item.name} value={item.name}>{item.name}{item.driver ? ` / ${item.driver}` : ''}</option>)}</select></label></div>}
       <div className="pvc-operation-actions"><span>{selectedAvailable ? 'Review first; no cluster state changes during dry-run.' : 'The selected native capability must be available before review.'}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review) || loading || !selectedAvailable}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review operation'}</button></div>
     </form>
-    {review && <div className="pvc-review"><div className="pvc-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{action === 'resize' ? 'Resize is ready' : 'Snapshot is ready'}</strong></div><p>Kubernetes accepted this exact resource-versioned request during server-side dry-run. No cluster state has changed; the final request is separate and must be explicitly authorized.</p><label className="pvc-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the exact dry-run and explicitly authorize this {action === 'resize' ? 'PVC resize' : 'VolumeSnapshot creation'}.</span></label><div className="pvc-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setConfirmed(false); setError('') }} disabled={Boolean(busy)}>Change operation</button><button type="button" className="primary-button" onClick={() => void applyReviewedPVCAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
+     {review && <div className="pvc-review"><div className="pvc-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{action === 'resize' ? 'Resize is ready' : 'Snapshot is ready'}</strong></div><p>Kubernetes accepted this exact resource-versioned request during server-side dry-run. No cluster state has changed; the final request is separate and must be explicitly authorized.</p><label className="pvc-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the exact dry-run and explicitly authorize this {action === 'resize' ? 'PVC resize' : 'VolumeSnapshot creation'}.</span></label><div className="pvc-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setReviewToken(undefined); setConfirmed(false); setError('') }} disabled={Boolean(busy)}>Change operation</button><button type="button" className="primary-button" onClick={() => void applyReviewedPVCAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
     {success && <div className="operation-success"><Check size={15} />{success}</div>}
     <div className="pvc-operation-footer"><span><ShieldCheck size={14} /> Full-object PVC update / native snapshot create</span><span>RBAC, conflicts, unsupported APIs, and absent snapshot CRDs stay visible.</span></div>
@@ -2474,7 +3660,7 @@ type NodeActionOption = {
 }
 
 /** Renders a two-step Node operation form with drain impact review and strong confirmation. */
-function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }: { context: string; name: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+function NodeOperationsPanel({ context, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
   const options = nodeActionOptions()
   const taints = nodeTaints(object)
   const [action, setAction] = useState<NodeAction>('cordon')
@@ -2486,6 +3672,7 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
   const [ignoreDaemonSets, setIgnoreDaemonSets] = useState(false)
   const [gracePeriod, setGracePeriod] = useState('')
   const [review, setReview] = useState<NodeActionResponse | null>(null)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
   const [confirmationText, setConfirmationText] = useState('')
   const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
@@ -2498,13 +3685,22 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
   useEffect(() => {
     setTaintIndex((current) => Math.min(current, Math.max(taints.length - 1, 0)))
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setConfirmationText('')
   }, [object])
 
+  useEffect(() => {
+    setReview(null)
+    setReviewToken(undefined)
+    setConfirmed(false)
+    setConfirmationText('')
+  }, [context, writeEnabled, reloadEpoch])
+
   /** Clears a review so the operator can change the Node operation. */
   function editNodeAction() {
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setConfirmationText('')
     setError('')
@@ -2514,6 +3710,7 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
   function changeNodeAction(value: NodeAction) {
     setAction(value)
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setConfirmationText('')
     setError('')
@@ -2578,11 +3775,20 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
     setError('')
     setSuccess('')
     try {
-      const result = await applyNodeAction(context, name, request)
-      setReview(result)
+       const response = await applyNodeAction(context, name, request)
+       if (!response.reviewToken) {
+         setReview(null)
+         setReviewToken(undefined)
+         setError('The server did not return a mutation review handle. Review the operation again.')
+         return
+       }
+       setReview(response.value)
+       setReviewToken(response.reviewToken)
       setConfirmed(false)
       setConfirmationText('')
     } catch (reviewError) {
+      setReview(null)
+      setReviewToken(undefined)
       setError((reviewError as Error).message)
     } finally {
       setBusy('')
@@ -2595,7 +3801,7 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
       setError('Enable write mode before applying a Node operation.')
       return
     }
-    if (!review || !review.ready || review.status !== 'dry-run passed') {
+    if (!review || !reviewToken || !review.ready || review.status !== 'dry-run passed') {
       setError('Resolve the drain limitations and pass a server-side dry-run before applying this operation.')
       return
     }
@@ -2613,10 +3819,12 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
     setError('')
     setSuccess('')
     try {
-      const result = await applyNodeAction(context, name, request)
+       const response = await applyNodeAction(context, name, request, reviewToken)
+       const result = response.value
       const drainSummary = action === 'drain' ? ` ${result.evictedCount || 0} Pod(s) evicted; ${result.skippedCount || 0} left in place.` : ''
       setSuccess(`${nodeActionLabel(action)} applied.${drainSummary}`)
-      setReview(null)
+       setReview(null)
+       setReviewToken(undefined)
       setConfirmed(false)
       setConfirmationText('')
       try {
@@ -2625,6 +3833,10 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
         setError(`Node operation applied, but the Node refresh failed: ${(refreshError as Error).message}`)
       }
     } catch (applyError) {
+      setReview(null)
+      setReviewToken(undefined)
+      setConfirmed(false)
+      setConfirmationText('')
       setError((applyError as Error).message)
     } finally {
       setBusy('')
@@ -3087,10 +4299,7 @@ function PodLogsPanel({ context, namespace, pod }: { context: string; namespace:
       setError('')
       try {
         const response = await fetch(logsUrl(context, namespace, pod, container, follow, previous, tailLines), { signal: controller.signal })
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => ({}))) as { error?: string }
-          throw new Error(payload.error || `Log request failed with ${response.status}`)
-        }
+        if (!response.ok) throw await responseApiError(response, `Log request failed with ${response.status}`)
         if (!response.body) {
           setLogs(await response.text())
           return
@@ -3107,7 +4316,7 @@ function PodLogsPanel({ context, namespace, pod }: { context: string; namespace:
         output += decoder.decode()
         setLogs(output)
       } catch (loadError) {
-        if ((loadError as Error).name !== 'AbortError') setError((loadError as Error).message)
+        if ((loadError as Error).name !== 'AbortError') setError((loadError as Error).name === 'ApiError' ? (loadError as Error).message : 'The local API could not be reached (retry: retry)')
       } finally {
         if (!controller.signal.aborted) setLoading(false)
       }
@@ -3222,7 +4431,7 @@ function PodTerminalPanel({ context, namespace, pod, object }: { context: string
         return
       }
       if (message.type === 'output') terminalRef.current?.write(message.data || '')
-      if (message.type === 'error') setError(message.message || 'The terminal session failed.')
+      if (message.type === 'error') setError(streamFailureMessage(message, 'The terminal session failed.'))
       if (message.type === 'closed') setStatus('closed')
     }
     socket.onerror = () => setError((current) => current || 'The terminal connection failed.')
@@ -3336,7 +4545,7 @@ function PodPortForwardPanel({ context, namespace, pod, object }: { context: str
         return
       }
       if (message.type === 'error') {
-        setError(message.message || 'The port-forward session failed.')
+        setError(streamFailureMessage(message, 'The port-forward session failed.'))
         setStatus('closed')
         socket.close()
         return
@@ -3460,10 +4669,10 @@ function sendTerminalResize(socket: WebSocket | null, cols: number, rows: number
 }
 
 /** Renders the live Event stream associated with a resource UID. */
-function ResourceEventsPanel({ context, namespace, uid, onOpenEvent }: { context: string; namespace: string; uid: string; onOpenEvent: (event: EventSummary) => void }) {
+function ResourceEventsPanel({ context, namespace, uid, revision, reloadEpoch, onOpenEvent }: { context: string; namespace: string; uid: string; revision: number; reloadEpoch: number; onOpenEvent: (event: EventSummary) => void }) {
   const [events, setEvents] = useState<EventSummary[]>([])
   const [error, setError] = useState('')
-  const [watching, setWatching] = useState(false)
+  const [watchSnapshot, setWatchSnapshot] = useState<WatchSnapshot>(() => initialWatchSnapshot())
   const [loading, setLoading] = useState(Boolean(uid))
 
   useEffect(() => {
@@ -3471,31 +4680,27 @@ function ResourceEventsPanel({ context, namespace, uid, onOpenEvent }: { context
       setLoading(false)
       return
     }
-    let active = true
-    let stream: EventSource | undefined
-    const load = () => {
-      fetchResourceEvents(context, namespace === 'all' ? '' : namespace, uid)
-        .then((response) => {
-          if (!active) return
-          setEvents(response.items)
-          setError('')
-          if (!stream && response.resourceVersion) {
-            stream = new EventSource(resourceEventsWatchUrl(context, namespace === 'all' ? '' : namespace, uid, response.resourceVersion))
-            setWatching(true)
-            stream.onmessage = () => load()
-            stream.onerror = () => setWatching(false)
-          }
-        })
-        .catch((loadError: Error) => active && setError(loadError.message))
-        .finally(() => active && setLoading(false))
-    }
-    load()
-    return () => {
-      active = false
-      stream?.close()
-      setWatching(false)
-    }
-  }, [context, namespace, uid])
+    setWatchSnapshot(initialWatchSnapshot())
+    setError('')
+    const effectiveNamespace = namespace === 'all' ? '' : namespace
+    const controller = new ReliableWatchController<ResourceEventsResponse>({
+      load: (signal) => fetchResourceEvents(context, effectiveNamespace, uid, signal),
+      getResourceVersion: (data) => data.resourceVersion,
+      watchUrl: (resourceVersion) => resourceEventsWatchUrl(context, effectiveNamespace, uid, resourceVersion),
+      onData: (response) => {
+        setEvents(response.items)
+        setError('')
+        setLoading(false)
+      },
+      onState: (snapshot) => {
+        setWatchSnapshot(snapshot)
+        setLoading(snapshot.state === 'refreshing')
+        if (snapshot.state === 'stale' || snapshot.state === 'unavailable') setError(snapshot.message || '')
+      },
+    })
+    controller.start()
+    return () => controller.stop()
+  }, [context, namespace, uid, revision, reloadEpoch])
 
   /** Opens a generic Event detail page only when Kubernetes supplied its name. */
   function openEvent(event: EventSummary) {
@@ -3508,7 +4713,7 @@ function ResourceEventsPanel({ context, namespace, uid, onOpenEvent }: { context
 
   if (!uid) return <QuietState icon={<Activity size={22} />} title="Events need a resource UID" detail="This object does not expose a UID that can be used for native Event filtering." />
 
-  return <div className="events-panel"><div className="events-toolbar"><div className="logs-title"><Activity size={16} /><strong>Resource Events</strong><span>{events.length} recorded</span></div><span className={watching ? 'live-chip' : 'quiet-chip'}><span />{watching ? 'Live watch' : 'Refresh fallback'}</span></div>{error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}{loading && !events.length ? <div className="events-loading"><LoaderCircle size={17} className="spin" /> Reading resource Events</div> : null}{!loading && !events.length && !error ? <QuietState icon={<ShieldCheck size={22} />} title="No Events for this resource" detail="Kubernetes has not reported an Event associated with this object." /> : null}<div className="event-list">{events.map((event, index) => <button type="button" className="event-row event-row-button" key={`${event.name}-${event.reason}-${event.lastSeen}-${index}`} onClick={() => openEvent(event)}><span className={`event-type event-type-${event.type.toLowerCase()}`}><span />{event.type || 'Normal'}</span><span className="event-copy"><strong>{event.reason || 'Event'}</strong><span>{event.message || 'No message provided.'}</span></span><span className="event-meta"><code>{event.count > 1 ? `x${event.count}` : 'once'}</code><span>{relativeTime(event.lastSeen)}</span></span></button>)}</div></div>
+  return <div className="events-panel"><div className="events-toolbar"><div className="logs-title"><Activity size={16} /><strong>Resource Events</strong><span>{events.length} recorded</span></div><FreshnessStatus snapshot={watchSnapshot} /></div><FreshnessNotice snapshot={watchSnapshot} />{error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}{loading && !events.length ? <div className="events-loading"><LoaderCircle size={17} className="spin" /> Reading resource Events</div> : null}{!loading && !events.length && !error ? <QuietState icon={<ShieldCheck size={22} />} title="No Events for this resource" detail="Kubernetes has not reported an Event associated with this object." /> : null}<div className="event-list">{events.map((event, index) => <button type="button" className="event-row event-row-button" key={`${event.name}-${event.reason}-${event.lastSeen}-${index}`} onClick={() => openEvent(event)}><span className={`event-type event-type-${event.type.toLowerCase()}`}><span />{event.type || 'Normal'}</span><span className="event-copy"><strong>{event.reason || 'Event'}</strong><span>{event.message || 'No message provided.'}</span></span><span className="event-meta"><code>{event.count > 1 ? `x${event.count}` : 'once'}</code><span>{relativeTime(event.lastSeen)}</span></span></button>)}</div></div>
 }
 
 /** Renders a key/value identity row on a detail page. */
@@ -3544,10 +4749,7 @@ function NamespacePicker({ context, value, revision, onChange }: { context: stri
 
 /** Reads the current browser URL into the KubeHaggis route model. */
 function readRoute(): RouteState {
-  const parts = window.location.pathname.split('/').filter(Boolean)
-  if (parts[0] === 'history') return { path: '/history', view: 'history' }
-  if (parts[0] !== 'resources' || !parts[1]) return { path: '/' }
-  return { path: window.location.pathname, resource: decodeURIComponent(parts[1]), name: parts[2] ? decodeURIComponent(parts[2]) : undefined, namespace: new URLSearchParams(window.location.search).get('namespace') || undefined }
+  return parseResourceRoute(window.location.pathname, window.location.search)
 }
 
 /** Reads a string from a resource metadata object. */
@@ -3556,11 +4758,6 @@ function metadataString(object: ResourceObject, field: string): string {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return ''
   const value = (metadata as Record<string, unknown>)[field]
   return typeof value === 'string' ? value : ''
-}
-
-/** Resolves a resource slug against discovered definitions and common fallbacks. */
-function resolveDefinition(resource: string, definitions: ResourceDefinition[]): ResourceDefinition {
-  return definitions.find((item) => item.resource === resource) ?? commonDefinitions.find((item) => item.resource === resource) ?? { group: '', version: 'v1', resource, kind: titleCase(resource), namespaced: true, verbs: [] }
 }
 
 /** Identifies custom-resource candidates without probing built-in API groups for CRD schemas. */

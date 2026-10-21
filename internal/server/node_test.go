@@ -81,12 +81,23 @@ func TestHandleNodeActionReturnsRBACErrors(t *testing.T) {
 	defer store.Close()
 	server := &Server{
 		audit: store,
-		nodeAction: func(context.Context, string, string, kube.NodeActionRequest) (kube.NodeActionResult, error) {
+		nodeAction: func(_ context.Context, _ string, _ string, request kube.NodeActionRequest) (kube.NodeActionResult, error) {
+			if request.DryRun {
+				return kube.NodeActionResult{Action: "cordon", Resource: "nodes", Name: "worker-a", DryRun: true, Ready: true, Status: "dry-run passed"}, nil
+			}
 			return kube.NodeActionResult{}, errString("cordon was denied by Kubernetes RBAC for sensitive-looking-value")
 		},
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/node/action?context=field&name=worker-a", strings.NewReader(`{"action":"cordon"}`))
+	reviewRequest := httptest.NewRequest(http.MethodPost, "/api/node/action?context=field&name=worker-a", strings.NewReader(`{"action":"cordon","dryRun":true,"expectedResourceVersion":"7"}`))
+	reviewRequest.Header.Set("X-KubeHaggis-Write", "enabled")
+	reviewResponse := httptest.NewRecorder()
+	server.handleNodeAction(reviewResponse, reviewRequest)
+	if reviewResponse.Code != http.StatusOK || reviewResponse.Header().Get(mutationReviewHeader) == "" {
+		t.Fatalf("Node review failed: status=%d body=%s", reviewResponse.Code, reviewResponse.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/node/action?context=field&name=worker-a", strings.NewReader(`{"action":"cordon","expectedResourceVersion":"7"}`))
 	request.Header.Set("X-KubeHaggis-Write", "enabled")
+	request.Header.Set(mutationReviewHeader, reviewResponse.Header().Get(mutationReviewHeader))
 	response := httptest.NewRecorder()
 
 	server.handleNodeAction(response, request)
@@ -95,11 +106,13 @@ func TestHandleNodeActionReturnsRBACErrors(t *testing.T) {
 		t.Fatalf("expected RBAC response, got %d %s", response.Code, response.Body.String())
 	}
 	entries, err := store.List(context.Background(), 10)
-	if err != nil || len(entries) != 1 {
+	if err != nil || len(entries) != 2 {
 		t.Fatalf("unexpected Node failure audit entries: %v %+v", err, entries)
 	}
-	if entries[0].Success || strings.Contains(entries[0].Detail, "sensitive-looking-value") || strings.Contains(entries[0].Detail, "secret") {
-		t.Fatalf("Node failure audit was unsafe: %+v", entries[0])
+	for _, entry := range entries {
+		if strings.Contains(entry.Detail, "sensitive-looking-value") || strings.Contains(entry.Detail, "secret") {
+			t.Fatalf("Node failure audit was unsafe: %+v", entries)
+		}
 	}
 }
 

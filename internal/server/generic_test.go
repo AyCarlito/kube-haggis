@@ -154,6 +154,9 @@ func TestGenericResourceHandlerRedactsRBACAndConflictErrors(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if writeGenericHandlerDiscoveryResponse(writer, request) {
+					return
+				}
 				if test.name == "conflict" && request.Method == http.MethodGet {
 					writer.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(writer).Encode(&unstructured.Unstructured{Object: map[string]interface{}{
@@ -194,4 +197,27 @@ func TestGenericResourceHandlerRedactsRBACAndConflictErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// writeGenericHandlerDiscoveryResponse serves discovery requests before generic mutation assertions run.
+func writeGenericHandlerDiscoveryResponse(writer http.ResponseWriter, request *http.Request) bool {
+	writeJSON := func(value interface{}) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(value)
+	}
+	switch request.URL.Path {
+	case "/api":
+		writeJSON(&metav1.APIVersions{Versions: []string{"v1"}})
+	case "/api/v1":
+		writeJSON(&metav1.APIResourceList{GroupVersion: "v1", APIResources: []metav1.APIResource{}})
+	case "/apis":
+		writeJSON(&metav1.APIGroupList{Groups: []metav1.APIGroup{{Name: "apps", Versions: []metav1.GroupVersionForDiscovery{{GroupVersion: "apps/v1", Version: "v1"}}, PreferredVersion: metav1.GroupVersionForDiscovery{GroupVersion: "apps/v1", Version: "v1"}}}})
+	case "/apis/apps/v1":
+		writeJSON(&metav1.APIResourceList{GroupVersion: "apps/v1", APIResources: []metav1.APIResource{{Name: "deployments", Kind: "Deployment", Namespaced: true, Verbs: []string{"get", "list", "update"}}}})
+	case "/apis/apiextensions.k8s.io/v1/customresourcedefinitions":
+		writeJSON(map[string]interface{}{"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinitionList", "items": []interface{}{}})
+	default:
+		return false
+	}
+	return true
 }

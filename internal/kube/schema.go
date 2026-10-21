@@ -25,17 +25,28 @@ const (
 	resourceSchemaStateError            = "error"
 	resourceSchemaMaxDepth              = 32
 	resourceSchemaMaxFields             = 512
+	resourceSchemaMaxFallbacks          = 32
 )
 
 // ResourceSchema is the safe schema response used by the browser form and YAML fallback.
 type ResourceSchema struct {
-	State    string       `json:"state"`
-	Message  string       `json:"message,omitempty"`
-	Group    string       `json:"group"`
-	Version  string       `json:"version"`
-	Resource string       `json:"resource"`
-	Kind     string       `json:"kind,omitempty"`
-	Schema   *SchemaField `json:"schema,omitempty"`
+	State              string           `json:"state"`
+	Message            string           `json:"message,omitempty"`
+	Group              string           `json:"group"`
+	Version            string           `json:"version"`
+	Resource           string           `json:"resource"`
+	Kind               string           `json:"kind,omitempty"`
+	Schema             *SchemaField     `json:"schema,omitempty"`
+	Fallbacks          []SchemaFallback `json:"fallbacks,omitempty"`
+	FallbacksTruncated bool             `json:"fallbacksTruncated,omitempty"`
+	StatusSubresource  bool             `json:"statusSubresource,omitempty"`
+	ScaleStatusPath    string           `json:"scaleStatusPath,omitempty"`
+}
+
+// SchemaFallback explains one bounded schema field that remains available through YAML.
+type SchemaFallback struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
 }
 
 // SchemaField is a bounded, browser-safe subset of a structural OpenAPI v3 field.
@@ -109,52 +120,80 @@ func loadResourceSchema(ctx context.Context, client dynamic.Interface, group, ve
 		}
 	}
 
-	field, state, message := parseCRDResourceSchema(crd, group, version, resource)
-	result.State = state
-	result.Message = message
-	if field != nil {
-		result.Schema = field
-		result.Kind = crdKind(crd)
+	result.Kind = crdKind(crd)
+	parsed := parseCRDResourceSchemaDetails(crd, group, version, resource, true)
+	result.State = parsed.state
+	result.Message = parsed.message
+	result.Fallbacks = parsed.fallbacks
+	result.FallbacksTruncated = parsed.fallbacksTruncated
+	result.StatusSubresource = parsed.statusSubresource
+	result.ScaleStatusPath = parsed.scaleStatusPath
+	if parsed.field != nil {
+		result.Schema = parsed.field
 	}
 	return result, nil
 }
 
 // markCustomResourceDefinitions annotates discovered definitions without making CRDs a typed resource implementation.
 func markCustomResourceDefinitions(ctx context.Context, client dynamic.Interface, definitions []ResourceDefinition) {
+	_ = markCustomResourceDefinitionsWithError(ctx, client, definitions)
+}
+
+// markCustomResourceDefinitionsWithError annotates all discovered CRD versions and reports metadata access failures.
+func markCustomResourceDefinitionsWithError(ctx context.Context, client dynamic.Interface, definitions []ResourceDefinition, preferredVersionMaps ...map[string]string) error {
 	if client == nil || len(definitions) == 0 {
-		return
+		return nil
 	}
-	list, err := client.Resource(customResourceDefinitionGVR()).List(ctx, metav1.ListOptions{Limit: 1000})
-	if err != nil {
-		return
+	preferredVersions := map[string]string(nil)
+	if len(preferredVersionMaps) > 0 {
+		preferredVersions = preferredVersionMaps[0]
 	}
-	for index := range list.Items {
-		crd := &list.Items[index]
-		group, foundGroup, groupErr := unstructured.NestedString(crd.Object, "spec", "group")
-		plural, foundPlural, pluralErr := unstructured.NestedString(crd.Object, "spec", "names", "plural")
-		if groupErr != nil || pluralErr != nil || !foundGroup || !foundPlural {
-			continue
+	definitionIndexes := make(map[string][]int, len(definitions))
+	for index, definition := range definitions {
+		key := definition.Group + "\x00" + definition.Resource
+		definitionIndexes[key] = append(definitionIndexes[key], index)
+	}
+	resourceClient := client.Resource(customResourceDefinitionGVR())
+	continueToken := ""
+	seenContinueTokens := make(map[string]struct{})
+	for {
+		list, err := resourceClient.List(ctx, metav1.ListOptions{Continue: continueToken})
+		if err != nil {
+			return err
 		}
-		versions, foundVersions, versionsErr := unstructured.NestedSlice(crd.Object, "spec", "versions")
-		if versionsErr != nil || !foundVersions {
-			continue
-		}
-		for _, rawVersion := range versions {
-			versionObject, ok := rawVersion.(map[string]interface{})
+		for index := range list.Items {
+			crd := &list.Items[index]
+			capabilitiesByVersion, ok := customResourceCapabilitiesForCRD(crd, preferredVersions)
 			if !ok {
 				continue
 			}
-			versionName, foundName, nameErr := unstructured.NestedString(versionObject, "name")
-			if nameErr != nil || !foundName {
-				continue
+			group, plural := "", ""
+			for _, capability := range capabilitiesByVersion {
+				group, plural = capability.Group, capability.Resource
+				break
 			}
-			for definitionIndex := range definitions {
+			for _, definitionIndex := range definitionIndexes[group+"\x00"+plural] {
 				definition := &definitions[definitionIndex]
-				if definition.Group == group && definition.Version == versionName && definition.Resource == plural {
-					definition.CustomResource = true
+				capability, found := capabilitiesByVersion[definition.Version]
+				if !found {
+					continue
 				}
+				definition.CustomResource = true
+				if capability.Scope == "" {
+					capability = cloneCustomResourceCapabilities(capability)
+					capability.Scope = definition.Scope
+				}
+				definition.CustomResourceCapabilities = cloneCustomResourceCapabilities(capability)
 			}
 		}
+		continueToken = list.GetContinue()
+		if continueToken == "" {
+			return nil
+		}
+		if _, found := seenContinueTokens[continueToken]; found {
+			return fmt.Errorf("CustomResourceDefinition discovery returned a repeated continuation token")
+		}
+		seenContinueTokens[continueToken] = struct{}{}
 	}
 }
 
@@ -165,17 +204,38 @@ func customResourceDefinitionGVR() schema.GroupVersionResource {
 
 // parseCRDResourceSchema selects and normalizes the requested served CRD version.
 func parseCRDResourceSchema(crd *unstructured.Unstructured, group, version, resource string) (*SchemaField, string, string) {
+	parsed := parseCRDResourceSchemaDetails(crd, group, version, resource, false)
+	return parsed.field, parsed.state, parsed.message
+}
+
+// parsedCRDResourceSchema carries normalized fields plus bounded fallback metadata.
+type parsedCRDResourceSchema struct {
+	field              *SchemaField
+	state              string
+	message            string
+	fallbacks          []SchemaFallback
+	fallbacksTruncated bool
+	statusSubresource  bool
+	scaleStatusPath    string
+}
+
+// parseCRDResourceSchemaDetails selects one served version and records safe form fallbacks.
+func parseCRDResourceSchemaDetails(crd *unstructured.Unstructured, group, version, resource string, allowFieldFallbacks bool) parsedCRDResourceSchema {
 	if crd == nil {
-		return nil, resourceSchemaStateMissing, "The CustomResourceDefinition was not returned by Kubernetes; use the YAML editor for this resource."
+		return parsedCRDResourceSchema{state: resourceSchemaStateMissing, message: "The CustomResourceDefinition was not returned by Kubernetes; use the YAML editor for this resource."}
 	}
-	crdGroup, foundGroup, groupErr := unstructured.NestedString(crd.Object, "spec", "group")
-	crdPlural, foundPlural, pluralErr := unstructured.NestedString(crd.Object, "spec", "names", "plural")
+	spec, foundSpec, specErr := unstructured.NestedMap(crd.Object, "spec")
+	if specErr != nil || !foundSpec {
+		return parsedCRDResourceSchema{state: resourceSchemaStateMissing, message: "The CustomResourceDefinition has no usable version metadata; use the YAML editor for this resource."}
+	}
+	crdGroup, foundGroup, groupErr := unstructured.NestedString(spec, "group")
+	crdPlural, foundPlural, pluralErr := unstructured.NestedString(spec, "names", "plural")
 	if groupErr != nil || pluralErr != nil || !foundGroup || !foundPlural || crdGroup != group || crdPlural != resource {
-		return nil, resourceSchemaStateMissing, "The discovered resource does not have a matching CustomResourceDefinition schema."
+		return parsedCRDResourceSchema{state: resourceSchemaStateMissing, message: "The discovered resource does not have a matching CustomResourceDefinition schema."}
 	}
-	versions, foundVersions, versionsErr := unstructured.NestedSlice(crd.Object, "spec", "versions")
+	versions, foundVersions, versionsErr := unstructured.NestedSlice(spec, "versions")
 	if versionsErr != nil || !foundVersions {
-		return nil, resourceSchemaStateNonStructural, "This CustomResourceDefinition does not expose versioned OpenAPI v3 schemas."
+		return parsedCRDResourceSchema{state: resourceSchemaStateNonStructural, message: "This CustomResourceDefinition does not expose versioned OpenAPI v3 schemas."}
 	}
 	for _, rawVersion := range versions {
 		versionObject, ok := rawVersion.(map[string]interface{})
@@ -186,20 +246,42 @@ func parseCRDResourceSchema(crd *unstructured.Unstructured, group, version, reso
 		if nameErr != nil || !foundName || versionName != version {
 			continue
 		}
+		served, foundServed, servedErr := unstructured.NestedBool(versionObject, "served")
+		if servedErr != nil || !foundServed || !served {
+			return parsedCRDResourceSchema{state: resourceSchemaStateMissing, message: fmt.Sprintf("The CRD does not serve version %q; use the YAML editor.", version)}
+		}
+		statusSubresource, _, scalePaths := crdSubresourceMetadata(spec)
 		versionSchema, foundSchema, schemaErr := unstructured.NestedMap(versionObject, "schema", "openAPIV3Schema")
 		if schemaErr != nil {
-			return nil, resourceSchemaStateUnsupported, "The CRD OpenAPI v3 schema is malformed; use the YAML editor."
+			return parsedCRDResourceSchema{state: resourceSchemaStateUnsupported, message: "The CRD OpenAPI v3 schema is malformed; use the YAML editor.", statusSubresource: statusSubresource, scaleStatusPath: scalePaths.statusReplicas}
 		}
 		if !foundSchema || len(versionSchema) == 0 {
-			return nil, resourceSchemaStateNonStructural, "This CRD version has no structural OpenAPI v3 schema; use the YAML editor."
+			return parsedCRDResourceSchema{state: resourceSchemaStateNonStructural, message: "This CRD version has no structural OpenAPI v3 schema; use the YAML editor.", statusSubresource: statusSubresource, scaleStatusPath: scalePaths.statusReplicas}
 		}
-		field, err := parseSchemaField(versionSchema, "", false, 0, new(int))
+		fallbacks := make([]SchemaFallback, 0)
+		fallbacksTruncated := false
+		var field *SchemaField
+		var err error
+		if allowFieldFallbacks {
+			field, err = parseSchemaFieldWithFallbacks(versionSchema, "", false, 0, new(int), &fallbacks, &fallbacksTruncated)
+		} else {
+			field, err = parseSchemaField(versionSchema, "", false, 0, new(int))
+		}
 		if err != nil {
-			return nil, resourceSchemaStateUnsupported, fmt.Sprintf("This CRD schema cannot be represented safely as a form: %v", err)
+			return parsedCRDResourceSchema{state: resourceSchemaStateUnsupported, message: fmt.Sprintf("This CRD schema cannot be represented safely as a form: %v", err), statusSubresource: statusSubresource, scaleStatusPath: scalePaths.statusReplicas}
 		}
-		return field, resourceSchemaStateAvailable, ""
+		if statusSubresource {
+			markStatusSchemaFieldReadOnly(field)
+		} else if scalePaths.statusReplicas != "" {
+			markSchemaFieldReadOnlyPath(field, scalePaths.statusReplicas)
+		}
+		message := ""
+		if len(fallbacks) > 0 {
+			message = schemaFallbackMessage(fallbacks, fallbacksTruncated)
+		}
+		return parsedCRDResourceSchema{field: field, state: resourceSchemaStateAvailable, message: message, fallbacks: fallbacks, fallbacksTruncated: fallbacksTruncated, statusSubresource: statusSubresource, scaleStatusPath: scalePaths.statusReplicas}
 	}
-	return nil, resourceSchemaStateMissing, fmt.Sprintf("The CRD does not serve version %q; use the YAML editor.", version)
+	return parsedCRDResourceSchema{state: resourceSchemaStateMissing, message: fmt.Sprintf("The CRD does not serve version %q; use the YAML editor.", version)}
 }
 
 // crdKind returns the kind declared by a CustomResourceDefinition without reading custom resources.
@@ -312,6 +394,245 @@ func parseSchemaField(raw map[string]interface{}, name string, required bool, de
 		}
 	}
 	return field, nil
+}
+
+// parseSchemaFieldWithFallbacks removes unsupported nested fields before strict normalization.
+func parseSchemaFieldWithFallbacks(raw map[string]interface{}, name string, required bool, depth int, count *int, fallbacks *[]SchemaFallback, truncated *bool) (*SchemaField, error) {
+	cleaned, err := stripUnsupportedSchemaFields(raw, "$", fallbacks, truncated)
+	if err != nil {
+		return nil, err
+	}
+	if cleaned == nil {
+		return nil, nil
+	}
+	return parseSchemaField(cleaned, name, required, depth, count)
+}
+
+// stripUnsupportedSchemaFields preserves supported object properties while recording nested YAML fallbacks.
+func stripUnsupportedSchemaFields(raw map[string]interface{}, path string, fallbacks *[]SchemaFallback, truncated *bool) (map[string]interface{}, error) {
+	fields := 0
+	return stripUnsupportedSchemaFieldsBounded(raw, path, fallbacks, truncated, 0, &fields)
+}
+
+// stripUnsupportedSchemaFieldsBounded recursively normalizes only within the same depth and field limits as form parsing.
+func stripUnsupportedSchemaFieldsBounded(raw map[string]interface{}, path string, fallbacks *[]SchemaFallback, truncated *bool, depth int, fields *int) (map[string]interface{}, error) {
+	if raw == nil {
+		return nil, fmt.Errorf("schema field at %s is empty", path)
+	}
+	if depth > resourceSchemaMaxDepth {
+		if path == "$" {
+			return nil, fmt.Errorf("schema nesting exceeds %d levels", resourceSchemaMaxDepth)
+		}
+		appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("schema nesting exceeds %d levels", resourceSchemaMaxDepth))
+		return nil, nil
+	}
+	if fields == nil {
+		return nil, fmt.Errorf("schema field counter is unavailable")
+	}
+	*fields = *fields + 1
+	if *fields > resourceSchemaMaxFields {
+		if path == "$" {
+			return nil, fmt.Errorf("schema contains more than %d fields", resourceSchemaMaxFields)
+		}
+		appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("schema contains more than %d fields", resourceSchemaMaxFields))
+		return nil, nil
+	}
+	if unsupported, keyword := hasUnsupportedSchemaKeyword(raw); unsupported {
+		if path == "$" {
+			return nil, fmt.Errorf("schema uses unsupported construct %q", keyword)
+		}
+		appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("unsupported schema construct %q", keyword))
+		return nil, nil
+	}
+	if required, found := raw["required"]; found {
+		if requiredNames, ok := required.([]interface{}); ok && len(requiredNames) > resourceSchemaMaxFields {
+			if path == "$" {
+				return nil, fmt.Errorf("schema required list contains more than %d fields", resourceSchemaMaxFields)
+			}
+			appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("schema required list contains more than %d fields", resourceSchemaMaxFields))
+			return nil, nil
+		}
+	}
+	cleaned := make(map[string]interface{}, len(raw))
+	for key, value := range raw {
+		cleaned[key] = value
+	}
+
+	if rawProperties, found := raw["properties"]; found {
+		properties, ok := rawProperties.(map[string]interface{})
+		if ok {
+			availableFields := resourceSchemaMaxFields - *fields
+			if len(properties) > availableFields {
+				if path == "$" {
+					return nil, fmt.Errorf("schema contains more than %d fields", resourceSchemaMaxFields)
+				}
+				appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("schema contains more than %d fields", resourceSchemaMaxFields))
+				return nil, nil
+			}
+			cleanedProperties := make(map[string]interface{}, len(properties))
+			propertyNames := make([]string, 0, len(properties))
+			for propertyName := range properties {
+				propertyNames = append(propertyNames, propertyName)
+			}
+			sort.Strings(propertyNames)
+			for _, propertyName := range propertyNames {
+				rawProperty := properties[propertyName]
+				property, ok := rawProperty.(map[string]interface{})
+				if !ok {
+					cleanedProperties[propertyName] = rawProperty
+					continue
+				}
+				child, err := stripUnsupportedSchemaFieldsBounded(property, schemaPath(path, propertyName), fallbacks, truncated, depth+1, fields)
+				if err != nil {
+					return nil, err
+				}
+				if child != nil {
+					cleanedProperties[propertyName] = child
+				}
+			}
+			cleaned["properties"] = cleanedProperties
+			cleaned["required"] = filteredRequiredSchemaNames(raw["required"], cleanedProperties)
+		}
+	}
+
+	if rawItems, found := raw["items"]; found {
+		items, ok := rawItems.(map[string]interface{})
+		if ok {
+			cleanedItems, err := stripUnsupportedSchemaFieldsBounded(items, path+".items", fallbacks, truncated, depth+1, fields)
+			if err != nil {
+				return nil, err
+			}
+			if cleanedItems == nil {
+				appendSchemaFallback(fallbacks, truncated, path, "array item schema requires YAML")
+				return nil, nil
+			}
+			cleaned["items"] = cleanedItems
+		}
+	}
+
+	if rawAdditional, found := raw["additionalProperties"]; found {
+		additional, ok := rawAdditional.(map[string]interface{})
+		if ok {
+			cleanedAdditional, err := stripUnsupportedSchemaFieldsBounded(additional, path+".additionalProperties", fallbacks, truncated, depth+1, fields)
+			if err != nil {
+				return nil, err
+			}
+			if cleanedAdditional == nil {
+				delete(cleaned, "additionalProperties")
+			} else {
+				cleaned["additionalProperties"] = cleanedAdditional
+			}
+		}
+	}
+	return cleaned, nil
+}
+
+// filteredRequiredSchemaNames removes fields omitted from a partial form while preserving malformed declarations for strict validation.
+func filteredRequiredSchemaNames(value interface{}, properties map[string]interface{}) interface{} {
+	items, ok := value.([]interface{})
+	if !ok {
+		return value
+	}
+	filtered := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		name, ok := item.(string)
+		if !ok {
+			return value
+		}
+		if _, found := properties[name]; found {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered
+}
+
+// appendSchemaFallback adds one safe field fallback until the response bound is reached.
+func appendSchemaFallback(fallbacks *[]SchemaFallback, truncated *bool, path, reason string) {
+	if fallbacks == nil || truncated == nil {
+		return
+	}
+	if len(*fallbacks) >= resourceSchemaMaxFallbacks {
+		*truncated = true
+		return
+	}
+	*fallbacks = append(*fallbacks, SchemaFallback{Path: path, Reason: reason})
+}
+
+// schemaPath joins a validated schema property name to a bounded display path.
+func schemaPath(parent, name string) string {
+	if parent == "$" {
+		return "$." + name
+	}
+	return parent + "." + name
+}
+
+// schemaFallbackMessage summarizes field-level fallback paths without returning unbounded schema details.
+func schemaFallbackMessage(fallbacks []SchemaFallback, truncated bool) string {
+	paths := make([]string, 0, minInt(len(fallbacks), 6))
+	for _, fallback := range fallbacks {
+		if len(paths) >= 6 {
+			break
+		}
+		paths = append(paths, fallback.Path)
+	}
+	message := fmt.Sprintf("Some schema fields use the YAML fallback: %s.", strings.Join(paths, ", "))
+	if truncated || len(fallbacks) > len(paths) {
+		message += " Additional unsupported fields are available in YAML."
+	}
+	return message
+}
+
+// markStatusSchemaFieldReadOnly marks the CRD status property and all descendants as read-only.
+func markStatusSchemaFieldReadOnly(field *SchemaField) {
+	if field == nil {
+		return
+	}
+	for index := range field.Properties {
+		if field.Properties[index].Name == "status" {
+			markSchemaFieldReadOnly(&field.Properties[index])
+		}
+	}
+}
+
+// markSchemaFieldReadOnly recursively locks a schema subtree without changing its shape.
+func markSchemaFieldReadOnly(field *SchemaField) {
+	if field == nil {
+		return
+	}
+	field.ReadOnly = true
+	for index := range field.Properties {
+		markSchemaFieldReadOnly(&field.Properties[index])
+	}
+	if field.Items != nil {
+		markSchemaFieldReadOnly(field.Items)
+	}
+	if field.AdditionalProperties != nil {
+		markSchemaFieldReadOnly(field.AdditionalProperties)
+	}
+}
+
+// markSchemaFieldReadOnlyPath locks one validated scale status path when no full status subresource exists.
+func markSchemaFieldReadOnlyPath(field *SchemaField, path string) {
+	segments, _, ok := parseSafeCRDFieldPath(path)
+	if !ok {
+		return
+	}
+	markSchemaFieldReadOnlySegments(field, segments)
+}
+
+// markSchemaFieldReadOnlySegments walks object properties without evaluating arbitrary schema expressions.
+func markSchemaFieldReadOnlySegments(field *SchemaField, segments []string) {
+	if field == nil || len(segments) == 0 {
+		if field != nil {
+			markSchemaFieldReadOnly(field)
+		}
+		return
+	}
+	for index := range field.Properties {
+		if field.Properties[index].Name == segments[0] {
+			markSchemaFieldReadOnlySegments(&field.Properties[index], segments[1:])
+		}
+	}
 }
 
 // populateObjectSchema parses named properties and typed map values for an object field.

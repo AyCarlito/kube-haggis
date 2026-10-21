@@ -105,3 +105,32 @@ func TestContextsAPIKeepsLastGoodStateOnInvalidReload(t *testing.T) {
 		t.Fatalf("recovered reload did not clear stale error: status=%d body=%s", recoveredResponse.Code, recoveredResponse.Body.String())
 	}
 }
+
+// TestContextsAPIErrorMetadataIsSafe verifies bootstrap errors retain status semantics without raw source text.
+func TestContextsAPIErrorMetadataIsSafe(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	const sensitiveConfigText = "context-bootstrap-private-token"
+	if err := os.WriteFile(configPath, []byte("apiVersion: v1\nclusters: ["+sensitiveConfigText+"\n"), 0600); err != nil {
+		t.Fatalf("write invalid server test kubeconfig: %v", err)
+	}
+	handler := (&Server{kube: kube.NewService(configPath)}).Handler()
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "contexts", method: http.MethodGet, path: "/api/contexts"},
+		{name: "reload", method: http.MethodPost, path: "/api/contexts/reload"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.Header.Set("X-Request-ID", "context-error-42")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			body := response.Body.String()
+			if response.Code != http.StatusOK || strings.Contains(body, sensitiveConfigText) || !strings.Contains(body, `"errorCategory":"dependency-unavailable"`) || !strings.Contains(body, `"retry":"retry"`) || !strings.Contains(body, `"requestId":"context-error-42"`) {
+				t.Fatalf("context error metadata was unsafe or incomplete: status=%d body=%s", response.Code, body)
+			}
+		})
+	}
+}

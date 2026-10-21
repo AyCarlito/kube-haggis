@@ -58,3 +58,25 @@ func TestHandleRelatedReturnsBackendError(t *testing.T) {
 		t.Fatalf("expected relationship backend error, got %d %s", response.Code, response.Body.String())
 	}
 }
+
+// TestHandleRelatedReverseUsesDeferredLoader verifies the secondary reverse-owner endpoint preserves safe results.
+func TestHandleRelatedReverseUsesDeferredLoader(t *testing.T) {
+	called := false
+	server := &Server{
+		relatedReverse: func(_ context.Context, contextName, group, version, resource, namespace, name string, namespaced bool) (kube.RelatedResourceList, error) {
+			called = true
+			if contextName != "field" || group != "apps" || version != "v1" || resource != "deployments" || namespace != "default" || name != "api" || !namespaced {
+				t.Fatalf("unexpected reverse relationship coordinates: %q %q %q %q %q %q %t", contextName, group, version, resource, namespace, name, namespaced)
+			}
+			return kube.RelatedResourceList{State: "available", Items: []kube.RelatedResource{}}, nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/related/reverse?context=field&group=apps&version=v1&resource=deployments&namespace=default&name=api&namespaced=true", nil)
+	response := httptest.NewRecorder()
+
+	server.handleRelatedReverse(response, request)
+
+	if response.Code != http.StatusOK || !called {
+		t.Fatalf("deferred relationship endpoint failed: %d %s", response.Code, response.Body.String())
+	}
+}

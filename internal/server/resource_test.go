@@ -57,6 +57,9 @@ func TestHandleResourceDeleteDryRunUsesResourceVersion(t *testing.T) {
 	if response.Code != http.StatusOK || !received.DryRun || received.ExpectedResourceVersion != "7" || !strings.Contains(response.Body.String(), "dry-run passed") {
 		t.Fatalf("generic delete review was not preserved: status=%d options=%+v body=%s", response.Code, received, response.Body.String())
 	}
+	if response.Header().Get(mutationReviewHeader) == "" {
+		t.Fatal("generic delete dry-run did not return a review handle")
+	}
 }
 
 // TestHandleResourceDeleteFinalConfirmationUsesResourceVersion verifies the final request remains explicitly confirmed and versioned.
@@ -68,8 +71,16 @@ func TestHandleResourceDeleteFinalConfirmationUsesResourceVersion(t *testing.T) 
 			return nil
 		},
 	}
+	reviewRequest := httptest.NewRequest(http.MethodDelete, "/api/resource?context=field&group=apps&version=v1&resource=deployments&namespace=default&name=api&namespaced=true&expectedResourceVersion=7&dryRun=true", nil)
+	reviewRequest.Header.Set("X-KubeHaggis-Write", "enabled")
+	reviewResponse := httptest.NewRecorder()
+	server.handleResource(reviewResponse, reviewRequest)
+	if reviewResponse.Code != http.StatusOK || reviewResponse.Header().Get(mutationReviewHeader) == "" {
+		t.Fatalf("generic delete review failed: status=%d body=%s", reviewResponse.Code, reviewResponse.Body.String())
+	}
 	request := httptest.NewRequest(http.MethodDelete, "/api/resource?context=field&group=apps&version=v1&resource=deployments&namespace=default&name=api&namespaced=true&expectedResourceVersion=7&confirmed=true&confirmName=api", nil)
 	request.Header.Set("X-KubeHaggis-Write", "enabled")
+	request.Header.Set(mutationReviewHeader, reviewResponse.Header().Get(mutationReviewHeader))
 	response := httptest.NewRecorder()
 
 	server.handleResource(response, request)
@@ -92,8 +103,22 @@ func TestHandleResourceDeleteRedactsFailure(t *testing.T) {
 			return errString("Secret value private-value was denied by Kubernetes RBAC")
 		},
 	}
+	reviewRequest := httptest.NewRequest(http.MethodDelete, "/api/resource?context=field&group=&version=v1&resource=secrets&namespace=default&name=credentials&namespaced=true&expectedResourceVersion=9&dryRun=true", nil)
+	reviewRequest.Header.Set("X-KubeHaggis-Write", "enabled")
+	reviewResponse := httptest.NewRecorder()
+	server.resourceDelete = func(context.Context, string, string, string, string, string, string, bool, kube.ResourceDeleteOptions) error {
+		return nil
+	}
+	server.handleResource(reviewResponse, reviewRequest)
+	if reviewResponse.Code != http.StatusOK || reviewResponse.Header().Get(mutationReviewHeader) == "" {
+		t.Fatalf("secret delete review failed: status=%d body=%s", reviewResponse.Code, reviewResponse.Body.String())
+	}
+	server.resourceDelete = func(context.Context, string, string, string, string, string, string, bool, kube.ResourceDeleteOptions) error {
+		return errString("Secret value private-value was denied by Kubernetes RBAC")
+	}
 	request := httptest.NewRequest(http.MethodDelete, "/api/resource?context=field&group=&version=v1&resource=secrets&namespace=default&name=credentials&namespaced=true&expectedResourceVersion=9&confirmed=true&confirmName=credentials", nil)
 	request.Header.Set("X-KubeHaggis-Write", "enabled")
+	request.Header.Set(mutationReviewHeader, reviewResponse.Header().Get(mutationReviewHeader))
 	response := httptest.NewRecorder()
 
 	server.handleResource(response, request)
@@ -102,11 +127,14 @@ func TestHandleResourceDeleteRedactsFailure(t *testing.T) {
 		t.Fatalf("unsafe delete error response: status=%d body=%s", response.Code, response.Body.String())
 	}
 	entries, err := store.List(context.Background(), 10)
-	if err != nil || len(entries) != 1 {
+	if err != nil || len(entries) != 2 {
 		t.Fatalf("unexpected delete audit entries: %v %+v", err, entries)
 	}
-	if entries[0].Success || strings.Contains(entries[0].Detail, "private-value") || strings.Contains(entries[0].Detail, "Secret") {
-		t.Fatalf("unsafe delete audit entry: %+v", entries[0])
+	if entries[0].Success || entries[1].DryRun == false || !entries[1].Success || strings.Contains(entries[0].Detail, "private-value") || strings.Contains(entries[0].Detail, "Secret") {
+		t.Fatalf("unsafe delete audit entries: %+v", entries)
+	}
+	if strings.Contains(entries[1].Detail, "private-value") || strings.Contains(entries[1].Detail, "Secret") {
+		t.Fatalf("unsafe delete review audit entry: %+v", entries[1])
 	}
 }
 

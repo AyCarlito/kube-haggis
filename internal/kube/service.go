@@ -56,17 +56,20 @@ type ContextSummary struct {
 	LastError string `json:"lastError,omitempty"`
 }
 
-// ResourceDefinition describes a discovered Kubernetes resource kind.
+// ResourceDefinition describes one discovered top-level Kubernetes resource and its capabilities.
 type ResourceDefinition struct {
-	Group          string   `json:"group"`
-	Version        string   `json:"version"`
-	Resource       string   `json:"resource"`
-	Kind           string   `json:"kind"`
-	Namespaced     bool     `json:"namespaced"`
-	CustomResource bool     `json:"customResource"`
-	Verbs          []string `json:"verbs"`
-	ShortNames     []string `json:"shortNames,omitempty"`
-	Categories     []string `json:"categories,omitempty"`
+	Group                      string                      `json:"group"`
+	Version                    string                      `json:"version"`
+	Resource                   string                      `json:"resource"`
+	Kind                       string                      `json:"kind"`
+	Namespaced                 bool                        `json:"namespaced"`
+	Scope                      string                      `json:"scope"`
+	CustomResource             bool                        `json:"customResource"`
+	CustomResourceCapabilities *CustomResourceCapabilities `json:"customResourceCapabilities,omitempty"`
+	Verbs                      []string                    `json:"verbs"`
+	ShortNames                 []string                    `json:"shortNames,omitempty"`
+	Categories                 []string                    `json:"categories,omitempty"`
+	Subresources               []ResourceSubresource       `json:"subresources,omitempty"`
 }
 
 // ResourceSummary contains the common fields shown in resource tables.
@@ -80,6 +83,7 @@ type ResourceSummary struct {
 	Ready           string            `json:"ready,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	ResourceVersion string            `json:"resourceVersion"`
+	PrinterColumns  map[string]string `json:"printerColumns,omitempty"`
 }
 
 // ResourceList is the generic response returned for a resource collection.
@@ -197,6 +201,7 @@ type ClusterOverview struct {
 // KubeconfigReloadStatus reports safe kubeconfig source state without exposing file contents.
 type KubeconfigReloadStatus struct {
 	State    string `json:"state"`
+	Source   string `json:"source"`
 	Revision uint64 `json:"revision"`
 	Reloaded bool   `json:"reloaded"`
 	Error    string `json:"error,omitempty"`
@@ -207,6 +212,28 @@ type ContextSnapshot struct {
 	Contexts       []ContextSummary
 	CurrentContext string
 	Kubeconfig     KubeconfigReloadStatus
+}
+
+// DiscoveryCacheSnapshot describes safe age and health metadata for one cached catalog.
+type DiscoveryCacheSnapshot struct {
+	Context    string     `json:"context"`
+	Revision   uint64     `json:"revision"`
+	State      string     `json:"state"`
+	AgeSeconds *int64     `json:"ageSeconds,omitempty"`
+	LoadedAt   *time.Time `json:"loadedAt,omitempty"`
+	ItemCount  int        `json:"itemCount"`
+	IssueCount int        `json:"issueCount"`
+}
+
+// DiagnosticsSnapshot contains kubeconfig, context, and discovery state without credentials.
+type DiagnosticsSnapshot struct {
+	KubeconfigSource   string                 `json:"kubeconfigSource"`
+	KubeconfigState    string                 `json:"kubeconfigState"`
+	KubeconfigRevision uint64                 `json:"kubeconfigRevision"`
+	CurrentContext     string                 `json:"currentContext"`
+	SelectedContext    string                 `json:"selectedContext"`
+	ContextState       string                 `json:"contextState"`
+	Discovery          DiscoveryCacheSnapshot `json:"discovery"`
 }
 
 // configSourceFingerprint stores metadata for every kubeconfig source in loading order.
@@ -235,14 +262,17 @@ type configLoadResult struct {
 
 // Service owns kubeconfig loading and creates dynamic clients for contexts.
 type Service struct {
-	kubeconfigPath  string
-	mu              sync.Mutex
-	rules           *clientcmd.ClientConfigLoadingRules
-	config          *clientcmdapi.Config
-	fingerprint     configSourceFingerprint
-	loaded          bool
-	revision        uint64
-	lastReloadError string
+	kubeconfigPath       string
+	mu                   sync.Mutex
+	rules                *clientcmd.ClientConfigLoadingRules
+	config               *clientcmdapi.Config
+	fingerprint          configSourceFingerprint
+	loaded               bool
+	revision             uint64
+	lastReloadError      string
+	discoveryCache       map[discoveryCacheKey]discoveryCacheEntry
+	discoveryFlights     map[discoveryCacheKey]*discoveryFlight
+	discoveryGenerations map[discoveryCacheKey]uint64
 }
 
 const (
@@ -256,7 +286,12 @@ const (
 
 // NewService creates a Kubernetes service using standard kubeconfig rules.
 func NewService(kubeconfigPath string) *Service {
-	return &Service{kubeconfigPath: kubeconfigPath}
+	return &Service{
+		kubeconfigPath:       kubeconfigPath,
+		discoveryCache:       make(map[discoveryCacheKey]discoveryCacheEntry),
+		discoveryFlights:     make(map[discoveryCacheKey]*discoveryFlight),
+		discoveryGenerations: make(map[discoveryCacheKey]uint64),
+	}
 }
 
 // Contexts returns all contexts and the kubeconfig current-context value.
@@ -275,14 +310,113 @@ func (s *Service) ReloadContexts() (ContextSnapshot, error) {
 	return s.contextSnapshotLocked(config, result, err), err
 }
 
+// Diagnostics returns safe current kubeconfig, selected-context, and discovery-cache metadata.
+func (s *Service) Diagnostics(contextName string) DiagnosticsSnapshot {
+	if s == nil {
+		return DiagnosticsSnapshot{KubeconfigState: kubeconfigStateError, ContextState: "unavailable", Discovery: DiscoveryCacheSnapshot{State: "unavailable"}}
+	}
+
+	s.mu.Lock()
+	config, _, loadErr := s.ensureConfigLocked(false)
+	snapshot := DiagnosticsSnapshot{
+		KubeconfigSource:   s.kubeconfigSourceLocked(),
+		KubeconfigState:    kubeconfigStateReady,
+		KubeconfigRevision: s.revision,
+		ContextState:       "unavailable",
+	}
+	if loadErr != nil || (config == nil && s.lastReloadError != "") {
+		snapshot.KubeconfigState = kubeconfigStateError
+	}
+	if config != nil {
+		snapshot.CurrentContext = config.CurrentContext
+		snapshot.SelectedContext = strings.TrimSpace(contextName)
+		snapshot.ContextState = "not-selected"
+		if snapshot.SelectedContext == "" {
+			snapshot.SelectedContext = config.CurrentContext
+		}
+		switch {
+		case snapshot.SelectedContext == "":
+			snapshot.ContextState = "missing"
+		case config.Contexts[snapshot.SelectedContext] == nil:
+			snapshot.ContextState = "unavailable"
+		default:
+			snapshot.ContextState = "available"
+		}
+	}
+	s.mu.Unlock()
+
+	snapshot.Discovery = s.DiscoveryCacheStatus(snapshot.SelectedContext)
+	return snapshot
+}
+
+// DiscoveryCacheStatus returns safe state and age metadata without triggering a discovery request.
+func (s *Service) DiscoveryCacheStatus(contextName string) DiscoveryCacheSnapshot {
+	status := DiscoveryCacheSnapshot{Context: strings.TrimSpace(contextName), State: "not-checked"}
+	if s == nil {
+		status.State = "unavailable"
+		return status
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	config, _, err := s.ensureConfigLocked(false)
+	if err != nil || config == nil {
+		status.State = "unavailable"
+		return status
+	}
+	if status.Context == "" {
+		status.Context = config.CurrentContext
+	}
+	if status.Context == "" {
+		status.State = "missing"
+		return status
+	}
+	if config.Contexts[status.Context] == nil {
+		status.State = "unavailable"
+		return status
+	}
+	status.Revision = s.revision
+	key := discoveryCacheKey{contextName: status.Context, revision: s.revision}
+	if entry, found := s.discoveryCache[key]; found {
+		catalog := resourceCatalogFromEntry(entry)
+		status.State = catalog.State
+		status.ItemCount = len(catalog.Items)
+		status.IssueCount = len(catalog.Issues)
+		if !entry.loadedAt.IsZero() {
+			loadedAt := entry.loadedAt
+			status.LoadedAt = &loadedAt
+			age := time.Since(loadedAt)
+			if age < 0 {
+				age = 0
+			}
+			seconds := int64(age / time.Second)
+			status.AgeSeconds = &seconds
+		}
+		return status
+	}
+	if flight, found := s.discoveryFlights[key]; found {
+		status.State = "loading"
+		if !flight.startedAt.IsZero() {
+			startedAt := flight.startedAt
+			status.LoadedAt = &startedAt
+			age := time.Since(startedAt)
+			if age < 0 {
+				age = 0
+			}
+			seconds := int64(age / time.Second)
+			status.AgeSeconds = &seconds
+		}
+	}
+	return status
+}
+
 // Discovery returns the preferred resource definitions advertised by a cluster.
 func (s *Service) Discovery(ctx context.Context, contextName string) ([]ResourceDefinition, error) {
-	dynamicClient, discoveryClient, _, err := s.clients(contextName)
+	dynamicClient, discoveryClient, _, resolvedContext, revision, err := s.clientsWithRevision(contextName)
 	if err != nil {
 		return nil, err
 	}
-	definitions, discoveryErr := discoverDefinitions(discoveryClient)
-	markCustomResourceDefinitions(ctx, dynamicClient, definitions)
+	definitions, discoveryErr := s.cachedDiscovery(ctx, resolvedContext, revision, dynamicClient, discoveryClient)
 	if discoveryErr != nil && len(definitions) == 0 {
 		return nil, discoveryErr
 	}
@@ -392,6 +526,13 @@ func (s *Service) Overview(ctx context.Context, contextName string) (ClusterOver
 
 // ListResources lists any discovered resource using a group-version-resource reference and an optional continuation token.
 func (s *Service) ListResources(ctx context.Context, contextName, group, version, resource, namespace string, namespaced bool, limit int, labelSelector, continueToken string) (ResourceList, error) {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return ResourceList{}, err
+	}
+	if err := validateResourceNamespace(definition, namespace, false); err != nil {
+		return ResourceList{}, err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return ResourceList{}, err
@@ -406,16 +547,6 @@ func (s *Service) ListResources(ctx context.Context, contextName, group, version
 		return ResourceList{}, err
 	}
 
-	definition := ResourceDefinition{Group: group, Version: version, Resource: resource, Namespaced: namespaced}
-	if definitions, discoveryErr := s.Discovery(ctx, contextName); discoveryErr == nil {
-		for _, candidate := range definitions {
-			if candidate.Group == group && candidate.Version == version && candidate.Resource == resource {
-				definition = candidate
-				break
-			}
-		}
-	}
-
 	result := ResourceList{
 		Definition:      definition,
 		Items:           make([]ResourceSummary, 0, len(items.Items)),
@@ -423,13 +554,20 @@ func (s *Service) ListResources(ctx context.Context, contextName, group, version
 		ResourceVersion: items.GetResourceVersion(),
 	}
 	for index := range items.Items {
-		result.Items = append(result.Items, summarizeResource(&items.Items[index]))
+		result.Items = append(result.Items, summarizeResource(&items.Items[index], definition))
 	}
 	return result, nil
 }
 
 // WatchResources opens a Kubernetes watch for a discovered resource.
 func (s *Service) WatchResources(ctx context.Context, contextName, group, version, resource, namespace string, namespaced bool, resourceVersion string) (watch.Interface, error) {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateResourceNamespace(definition, namespace, false); err != nil {
+		return nil, err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return nil, err
@@ -441,6 +579,13 @@ func (s *Service) WatchResources(ctx context.Context, contextName, group, versio
 
 // GetResource returns the complete unstructured object for a resource name.
 func (s *Service) GetResource(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool) (*unstructured.Unstructured, error) {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateResourceNamespace(definition, namespace, true); err != nil {
+		return nil, err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return nil, err
@@ -455,6 +600,13 @@ func (s *Service) GetResource(ctx context.Context, contextName, group, version, 
 
 // ApplyResource creates or client-side updates a YAML or JSON resource document.
 func (s *Service) ApplyResource(ctx context.Context, contextName, group, version, resource, namespace string, namespaced, dryRun bool, body []byte) (*unstructured.Unstructured, error) {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateResourceNamespace(definition, namespace, false); err != nil {
+		return nil, err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return nil, err
@@ -500,6 +652,13 @@ func (s *Service) DeleteResource(ctx context.Context, contextName, group, versio
 
 // DeleteResourceWithOptions deletes one resource with optional dry-run, force, and resource-version preconditions.
 func (s *Service) DeleteResourceWithOptions(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool, options ResourceDeleteOptions) error {
+	definition, err := s.resolveResourceDefinition(ctx, contextName, group, version, resource, namespaced)
+	if err != nil {
+		return err
+	}
+	if err := validateResourceNamespace(definition, namespace, true); err != nil {
+		return err
+	}
 	dynamicClient, _, _, err := s.clients(contextName)
 	if err != nil {
 		return err
@@ -641,42 +800,51 @@ func (s *Service) loadConfig() (*clientcmdapi.Config, error) {
 
 // clients creates dynamic and discovery clients for one kubeconfig context.
 func (s *Service) clients(contextName string) (dynamic.Interface, discovery.DiscoveryInterface, *rest.Config, error) {
+	dynamicClient, discoveryClient, restConfig, _, _, err := s.clientsWithRevision(contextName)
+	return dynamicClient, discoveryClient, restConfig, err
+}
+
+// clientsWithRevision creates clients and returns the resolved context and config revision.
+func (s *Service) clientsWithRevision(contextName string) (dynamic.Interface, discovery.DiscoveryInterface, *rest.Config, string, uint64, error) {
 	s.mu.Lock()
 	config, _, err := s.ensureConfigLocked(false)
 	if err != nil {
 		s.mu.Unlock()
-		return nil, nil, nil, err
+		return nil, nil, nil, "", 0, err
 	}
 	if strings.TrimSpace(contextName) == "" {
 		contextName = config.CurrentContext
 	}
 	if contextName == "" {
 		s.mu.Unlock()
-		return nil, nil, nil, fmt.Errorf("kubeconfig has no current context")
+		return nil, nil, nil, "", 0, fmt.Errorf("kubeconfig has no current context")
 	}
 	if _, found := config.Contexts[contextName]; !found {
 		s.mu.Unlock()
-		return nil, nil, nil, fmt.Errorf("context %q was not found", contextName)
+		return nil, nil, nil, "", 0, fmt.Errorf("context %q was not found", contextName)
 	}
 	configCopy := *config
 	rules := s.rules
+	revision := s.revision
 	s.mu.Unlock()
 
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: contextName}
 	clientConfig := clientcmd.NewNonInteractiveClientConfig(configCopy, contextName, overrides, rules)
 	restConfig, err := clientConfig.ClientConfig()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build client config for %q: %w", contextName, err)
+		return nil, nil, nil, "", 0, fmt.Errorf("build client config for %q: %w", contextName, err)
 	}
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create dynamic client: %w", err)
+		return nil, nil, nil, "", 0, fmt.Errorf("create dynamic client: %w", err)
 	}
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	discoveryConfig := rest.CopyConfig(restConfig)
+	discoveryConfig.Timeout = discoveryCacheRequestTimeout
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(discoveryConfig)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create discovery client: %w", err)
+		return nil, nil, nil, "", 0, fmt.Errorf("create discovery client: %w", err)
 	}
-	return dynamicClient, discoveryClient, restConfig, nil
+	return dynamicClient, discoveryClient, restConfig, contextName, revision, nil
 }
 
 // ensureConfigLocked loads a new snapshot when source metadata changes or a reload is forced.
@@ -703,6 +871,7 @@ func (s *Service) ensureConfigLocked(force bool) (*clientcmdapi.Config, configLo
 	s.fingerprint = fingerprint
 	s.loaded = true
 	s.revision++
+	s.discoveryCache = make(map[discoveryCacheKey]discoveryCacheEntry)
 	s.lastReloadError = ""
 	return config, configLoadResult{Reloaded: wasLoaded || force}, nil
 }
@@ -720,6 +889,7 @@ func (s *Service) newLoadingRules() *clientcmd.ClientConfigLoadingRules {
 func (s *Service) contextSnapshotLocked(config *clientcmdapi.Config, result configLoadResult, loadErr error) ContextSnapshot {
 	status := KubeconfigReloadStatus{
 		State:    kubeconfigStateReady,
+		Source:   s.kubeconfigSourceLocked(),
 		Revision: s.revision,
 		Reloaded: result.Reloaded,
 	}
@@ -746,6 +916,17 @@ func (s *Service) contextSnapshotLocked(config *clientcmdapi.Config, result conf
 	}
 	snapshot.CurrentContext = config.CurrentContext
 	return snapshot
+}
+
+// kubeconfigSourceLocked identifies the configured source class without exposing source paths.
+func (s *Service) kubeconfigSourceLocked() string {
+	if strings.TrimSpace(s.kubeconfigPath) != "" {
+		return "explicit"
+	}
+	if strings.TrimSpace(os.Getenv("KUBECONFIG")) != "" {
+		return "environment"
+	}
+	return "default"
 }
 
 // fingerprintLoadingRules records source metadata without reading source contents.
@@ -1265,8 +1446,8 @@ func topPodMetrics(items []PodMetric) []PodMetric {
 	return items
 }
 
-// summarizeResource extracts common fields from an unstructured resource.
-func summarizeResource(item *unstructured.Unstructured) ResourceSummary {
+// summarizeResource extracts common and safe CRD printer-column fields from an unstructured resource.
+func summarizeResource(item *unstructured.Unstructured, definition ResourceDefinition) ResourceSummary {
 	return ResourceSummary{
 		Name:            item.GetName(),
 		Namespace:       item.GetNamespace(),
@@ -1277,6 +1458,7 @@ func summarizeResource(item *unstructured.Unstructured) ResourceSummary {
 		Ready:           resourceReady(item),
 		Labels:          item.GetLabels(),
 		ResourceVersion: item.GetResourceVersion(),
+		PrinterColumns:  evaluateCustomResourcePrinterColumns(item, definition.CustomResourceCapabilities),
 	}
 }
 

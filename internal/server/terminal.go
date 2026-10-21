@@ -15,11 +15,13 @@ import (
 
 // terminalMessage is the JSON protocol shared by the browser and terminal bridge.
 type terminalMessage struct {
-	Type    string `json:"type"`
-	Data    string `json:"data,omitempty"`
-	Message string `json:"message,omitempty"`
-	Rows    uint16 `json:"rows,omitempty"`
-	Cols    uint16 `json:"cols,omitempty"`
+	Type      string `json:"type"`
+	Data      string `json:"data,omitempty"`
+	Message   string `json:"message,omitempty"`
+	RequestID string `json:"requestId,omitempty"`
+	Retry     string `json:"retry,omitempty"`
+	Rows      uint16 `json:"rows,omitempty"`
+	Cols      uint16 `json:"cols,omitempty"`
 }
 
 // terminalBridge adapts browser WebSocket messages to remotecommand streams.
@@ -49,11 +51,17 @@ func (s *Server) handleTerminal(socket *websocket.Conn) {
 
 	request := socket.Request()
 	query := request.URL.Query()
+	requestID := requestIDFor(request)
 	mode := kube.PodSessionMode(query.Get("mode"))
 	command := []string(nil)
 	if mode == kube.PodSessionExec {
 		command = terminalCommand(query.Get("command"))
 	}
+	telemetry := requestTelemetryFor(request)
+	sessionID := s.diagnosticStore().startSession("terminal", telemetry.Context, telemetry.Resource)
+	defer func() {
+		s.diagnosticStore().finishSession(sessionID, "", telemetry.Operation)
+	}()
 	streamErr := s.kube.StreamPodSession(
 		request.Context(),
 		query.Get("context"),
@@ -67,10 +75,13 @@ func (s *Server) handleTerminal(socket *websocket.Conn) {
 		bridge,
 	)
 	if streamErr != nil {
-		_ = bridge.send(terminalMessage{Type: "error", Message: streamErr.Error()})
+		category := safeErrorCategory(streamErr)
+		s.diagnosticStore().finishSession(sessionID, category, telemetry.Operation)
+		sessionID = ""
+		_ = bridge.send(terminalMessage{Type: "error", Message: safeStreamErrorMessage(streamErr), RequestID: requestID, Retry: retryClassification(http.StatusBadGateway, category)})
 		return
 	}
-	_ = bridge.send(terminalMessage{Type: "closed"})
+	_ = bridge.send(terminalMessage{Type: "closed", RequestID: requestID})
 }
 
 // newTerminalBridge starts receiving browser terminal messages.
