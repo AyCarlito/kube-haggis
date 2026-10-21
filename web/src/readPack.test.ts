@@ -9,11 +9,13 @@ function assertReadPack(condition: boolean, message: string): void {
 /** Exercises exact built-in family classification and explicit panel-state labels. */
 export function runOperationalReadPackModelTests(): void {
   const pod: ResourceDefinition = { group: '', version: 'v1', resource: 'pods', kind: 'Pod', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] }
+  const node: ResourceDefinition = { group: '', version: 'v1', resource: 'nodes', kind: 'Node', namespaced: false, scope: 'Cluster', verbs: ['get', 'list'] }
   const customPod: ResourceDefinition = { group: 'example.com', version: 'v1', resource: 'pods', kind: 'Pod', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] }
   assertReadPack(isOperationalReadPackResource(pod), 'Pod was not classified as an operational read-pack resource')
+  assertReadPack(isOperationalReadPackResource(node), 'Node was not classified as an operational read-pack resource')
   assertReadPack(!isOperationalReadPackResource(customPod), 'custom resource was incorrectly classified as a built-in read-pack resource')
   assertReadPack(operationalReadPackStateLabel('permission-denied') === 'RBAC denied', 'permission state label was not explicit')
-  assertReadPack(operationalReadPackStateLabel('partial') === 'Partial' && operationalReadPackStateLabel('unknown') === 'Unknown', 'read-pack state labels did not preserve safe fallbacks')
+  assertReadPack(operationalReadPackStateLabel('partial') === 'Partial' && operationalReadPackStateLabel('stale') === 'Stale' && operationalReadPackStateLabel('unknown') === 'Unknown', 'read-pack state labels did not preserve safe fallbacks')
 }
 
 runOperationalReadPackModelTests()

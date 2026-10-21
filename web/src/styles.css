@@ -683,7 +683,7 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
 .read-pack-summary code { flex: 0 0 auto; color: #b8c5ad; font: 9px var(--mono); }
 .read-pack-cards { display: grid; gap: 12px; }
 .read-pack-card { overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: rgba(25,30,24,.78); }
-.read-pack-card-partial, .read-pack-card-permission-denied, .read-pack-card-error { border-color: rgba(230,182,111,.25); }
+.read-pack-card-partial, .read-pack-card-permission-denied, .read-pack-card-error, .read-pack-card-stale { border-color: rgba(230,182,111,.25); }
 .read-pack-card-unavailable, .read-pack-card-empty { border-color: rgba(135,174,182,.2); }
 .read-pack-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 16px 15px 0; }
 .read-pack-card-heading h2 { margin-top: 7px; color: var(--paper); font-size: 17px; letter-spacing: -.04em; }
@@ -692,7 +692,7 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
 .read-pack-state-chip > span { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .read-pack-state-available { border-color: rgba(168,189,131,.25); color: var(--moss); background: rgba(168,189,131,.07); }
 .read-pack-state-empty, .read-pack-state-unavailable { color: var(--muted); background: rgba(226,224,204,.035); }
-.read-pack-state-partial, .read-pack-state-permission-denied, .read-pack-state-error { border-color: rgba(230,182,111,.25); color: var(--gold); background: rgba(230,182,111,.07); }
+.read-pack-state-partial, .read-pack-state-permission-denied, .read-pack-state-error, .read-pack-state-stale { border-color: rgba(230,182,111,.25); color: var(--gold); background: rgba(230,182,111,.07); }
 .read-pack-truncated { display: flex; align-items: flex-start; gap: 8px; margin: 11px 15px 0; padding: 9px 10px; border: 1px solid rgba(230,182,111,.21); border-radius: 6px; color: #d9b777; background: rgba(230,182,111,.05); font: 9px/1.5 var(--mono); }
 .read-pack-truncated svg { flex: 0 0 auto; margin-top: 1px; }
 .read-pack-body { display: grid; gap: 13px; padding: 15px; }
@@ -733,6 +733,28 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
 .read-pack-map { display: flex; flex-wrap: wrap; gap: 4px; }
 .read-pack-map code { padding: 3px 5px; border: 1px solid var(--line); border-radius: 3px; color: #adbea6; font: 8px var(--mono); }
 .read-pack-muted { color: var(--muted-dark); font: 9px var(--mono); }
+.compute-identity-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.compute-identity-grid > div { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: rgba(11,14,11,.35); }
+.compute-identity-grid span, .compute-identity-grid strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.compute-identity-grid span { color: var(--muted-dark); font: 8px var(--mono); text-transform: uppercase; }
+.compute-identity-grid strong { margin-top: 7px; color: #d7dbcf; font: 10px var(--mono); font-weight: 500; }
+.compute-telemetry-available { color: var(--moss) !important; }
+.compute-telemetry-stale, .compute-telemetry-partial, .compute-telemetry-permission-denied, .compute-telemetry-error { color: var(--gold) !important; }
+.compute-telemetry-unavailable, .compute-telemetry-empty { color: var(--muted) !important; }
+.compute-semantics { display: grid; gap: 5px; padding: 10px 11px; border: 1px dashed var(--line-strong); border-radius: 6px; color: var(--muted); background: rgba(11,14,11,.25); font: 9px/1.5 var(--mono); }
+.compute-semantics small { color: var(--muted-dark); font: inherit; }
+.compute-table { overflow-x: auto; }
+.compute-table-row { display: grid; grid-template-columns: minmax(82px, .65fr) repeat(5, minmax(108px, 1fr)); gap: 10px; align-items: center; min-height: 53px; min-width: 730px; padding: 9px 10px; border-bottom: 1px solid rgba(226,224,204,.07); }
+.compute-table-row:last-child { border-bottom: 0; }
+.compute-table-row > strong { overflow: hidden; color: #d3d8ca; font: 10px var(--mono); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.compute-table-header { min-height: 35px; background: rgba(29,36,29,.48); }
+.compute-table-header > strong { color: var(--muted-dark); font-size: 8px; text-transform: uppercase; }
+.compute-value-cell { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.compute-value-cell strong { overflow: hidden; color: #d7dbcf; font: 10px var(--mono); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.compute-value-cell small { color: var(--muted-dark); font: 8px var(--mono); text-transform: uppercase; }
+.compute-value-available strong { color: #d7dbcf; }
+.compute-value-partial strong, .compute-value-stale strong, .compute-value-permission-denied strong, .compute-value-error strong { color: var(--gold); }
+.compute-value-unavailable strong, .compute-value-empty strong, .compute-value-absent strong, .compute-value-not-applicable strong { color: var(--muted); }
 .read-pack-no-data, .read-pack-loading, .read-pack-error, .read-pack-refreshing { display: flex; align-items: center; gap: 8px; margin: 15px; padding: 13px; border: 1px dashed var(--line-strong); border-radius: 6px; color: var(--muted); font: 9px/1.5 var(--mono); }
 .read-pack-loading { min-height: 145px; justify-content: center; border-style: solid; color: var(--blue); }
 .read-pack-error { border-color: rgba(230,182,111,.27); color: #dfbd82; background: rgba(230,182,111,.05); }
@@ -743,6 +765,7 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
   .read-pack-header { align-items: flex-start; flex-direction: column; }
   .read-pack-header-actions { width: 100%; justify-content: space-between; }
   .read-pack-field-grid { grid-template-columns: 1fr 1fr; }
+  .compute-identity-grid { grid-template-columns: 1fr 1fr; }
   .read-pack-table-row, .read-pack-table-row-stack { grid-template-columns: 1fr; gap: 5px; }
   .read-pack-table-row > span { text-align: left; }
   .read-pack-table-row-stack small { grid-column: auto; }

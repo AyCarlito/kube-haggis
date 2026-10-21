@@ -549,7 +549,7 @@ export interface ClusterOverview {
 export type ResourceObject = Record<string, unknown>
 
 /** Identifies the explicit state of one operational read-pack panel. */
-export type OperationalReadPackState = 'available' | 'empty' | 'partial' | 'permission-denied' | 'unavailable' | 'error'
+export type OperationalReadPackState = 'available' | 'empty' | 'partial' | 'permission-denied' | 'unavailable' | 'error' | 'stale'
 
 /** Contains safe timing and cap diagnostics for one operational read-pack request. */
 export interface OperationalReadPackDiagnostics {
@@ -849,8 +849,49 @@ export interface PodContainerSecuritySummary {
   capabilities: string[]
 }
 
+/** Identifies the bounded state of one Compute quantity value. */
+export type ComputeQuantityState = 'available' | 'absent' | 'partial' | 'not-applicable'
+
+/** Identifies a quantity state or an explicit native metrics telemetry state. */
+export type ComputeValueState = ComputeQuantityState | MetricsState
+
+/** Contains one bounded CPU or memory quantity and its semantic state. */
+export interface ComputeQuantityValue {
+  value?: string
+  state: ComputeValueState
+}
+
+/** Contains CPU and memory values for one object-side Compute quantity family. */
+export interface ComputeQuantitySet {
+  cpu: ComputeQuantityValue
+  memory: ComputeQuantityValue
+  state: ComputeQuantityState
+  message?: string
+}
+
+/** Contains actual CPU and memory usage plus the preserved metrics sample timestamp. */
+export interface ComputeUsageSummary {
+  cpu: ComputeQuantityValue
+  memory: ComputeQuantityValue
+  state: MetricsState | 'partial'
+  message?: string
+  timestamp?: string
+}
+
+/** Contains Node or Pod identity, object-side quantities, and native actual usage. */
+export interface ComputeReadPackData {
+  kind: string
+  name: string
+  namespace?: string
+  requests: ComputeQuantitySet
+  limits: ComputeQuantitySet
+  capacity: ComputeQuantitySet
+  allocatable: ComputeQuantitySet
+  usage: ComputeUsageSummary
+}
+
 /** Unions every structured data shape returned by the operational read pack. */
-export type OperationalReadPackData = IngressReadPackData | EndpointSliceReadPackData | NetworkPolicyReadPackData | HorizontalPodAutoscalerReadPackData | PodDisruptionBudgetReadPackData | ResourceQuotaReadPackData | LimitRangeReadPackData | PersistentVolumeReadPackData | StorageClassReadPackData | ServiceAccountReadPackData | PodReadPackData
+export type OperationalReadPackData = IngressReadPackData | EndpointSliceReadPackData | NetworkPolicyReadPackData | HorizontalPodAutoscalerReadPackData | PodDisruptionBudgetReadPackData | ResourceQuotaReadPackData | LimitRangeReadPackData | PersistentVolumeReadPackData | StorageClassReadPackData | ServiceAccountReadPackData | PodReadPackData | ComputeReadPackData
 
 /** Describes one independently readable operational panel. */
 export interface OperationalReadPackPanel {

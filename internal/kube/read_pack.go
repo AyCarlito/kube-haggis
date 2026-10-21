@@ -36,6 +36,7 @@ const (
 	readPackStatePermissionDenied = "permission-denied"
 	readPackStateUnavailable      = "unavailable"
 	readPackStateError            = "error"
+	readPackStateStale            = "stale"
 
 	readPackPanelIngress          = "ingress"
 	readPackPanelEndpointSlice    = "endpoint-slice"
@@ -48,6 +49,7 @@ const (
 	readPackPanelStorageClass     = "storage-class"
 	readPackPanelServiceAccount   = "service-account"
 	readPackPanelPod              = "pod"
+	readPackPanelCompute          = "compute"
 )
 
 // OperationalReadPack is the bounded, read-only summary of one built-in resource.
@@ -366,6 +368,41 @@ type PodContainerSecuritySummary struct {
 	Capabilities             []string `json:"capabilities"`
 }
 
+// ComputeReadPackData contains bounded object-side quantities and native usage for one Node or Pod.
+type ComputeReadPackData struct {
+	Kind        string              `json:"kind"`
+	Name        string              `json:"name"`
+	Namespace   string              `json:"namespace,omitempty"`
+	Requests    ComputeQuantitySet  `json:"requests"`
+	Limits      ComputeQuantitySet  `json:"limits"`
+	Capacity    ComputeQuantitySet  `json:"capacity"`
+	Allocatable ComputeQuantitySet  `json:"allocatable"`
+	Usage       ComputeUsageSummary `json:"usage"`
+}
+
+// ComputeQuantitySet contains normalized CPU and memory quantities with per-value completeness states.
+type ComputeQuantitySet struct {
+	CPU     ComputeQuantityValue `json:"cpu"`
+	Memory  ComputeQuantityValue `json:"memory"`
+	State   string               `json:"state"`
+	Message string               `json:"message,omitempty"`
+}
+
+// ComputeQuantityValue contains one bounded Kubernetes quantity and its semantic state.
+type ComputeQuantityValue struct {
+	Value string `json:"value,omitempty"`
+	State string `json:"state"`
+}
+
+// ComputeUsageSummary contains normalized metrics.k8s.io usage and its sample freshness state.
+type ComputeUsageSummary struct {
+	CPU       ComputeQuantityValue `json:"cpu"`
+	Memory    ComputeQuantityValue `json:"memory"`
+	State     string               `json:"state"`
+	Message   string               `json:"message,omitempty"`
+	Timestamp *time.Time           `json:"timestamp,omitempty"`
+}
+
 // readPackListResult carries one capped generic list and its safe truncation flag.
 type readPackListResult struct {
 	Items     *unstructured.UnstructuredList
@@ -451,7 +488,11 @@ func (s *Service) OperationalReadPack(ctx context.Context, contextName, group, v
 // buildOperationalReadPack extracts one sanitized panel and any fixed-family relationships.
 func buildOperationalReadPack(ctx context.Context, client dynamic.Interface, definitions []ResourceDefinition, definition ResourceDefinition, object *unstructured.Unstructured, budget *relatedCallBudget, started time.Time) OperationalReadPack {
 	panel := operationalPanelForResource(ctx, client, definitions, definition, object, budget)
-	pack := OperationalReadPack{Panels: []OperationalReadPackPanel{panel}, Diagnostics: operationalReadPackDiagnostics(budget, started)}
+	panels := []OperationalReadPackPanel{panel}
+	if definition.Kind == "Pod" && supportedOperationalVersion(definition) {
+		panels = append(panels, extractComputeReadPack(ctx, client, definition, object, budget))
+	}
+	pack := OperationalReadPack{Panels: panels, Diagnostics: operationalReadPackDiagnostics(budget, started)}
 	pack.State, pack.Message = summarizeOperationalPackState(pack.Panels)
 	return pack
 }
@@ -489,6 +530,8 @@ func operationalPanelForResource(ctx context.Context, client dynamic.Interface, 
 		return extractServiceAccountReadPack(ctx, client, definitions, definition, object, budget)
 	case readPackPanelPod:
 		return extractPodReadPack(definition, object)
+	case readPackPanelCompute:
+		return extractComputeReadPack(ctx, client, definition, object, budget)
 	default:
 		return newOperationalReadPackPanel(key, title, readPackStateUnavailable, "This built-in operational view is not available for the requested resource.", nil, false)
 	}
@@ -519,6 +562,8 @@ func operationalPanelKey(definition ResourceDefinition) string {
 		return readPackPanelServiceAccount
 	case "Pod":
 		return readPackPanelPod
+	case "Node":
+		return readPackPanelCompute
 	default:
 		return ""
 	}
@@ -549,6 +594,8 @@ func operationalPanelTitle(definition ResourceDefinition) string {
 		return "Service account access"
 	case readPackPanelPod:
 		return "Pod posture"
+	case readPackPanelCompute:
+		return "Compute"
 	default:
 		return "Operational view"
 	}
@@ -565,7 +612,7 @@ func supportedOperationalVersion(definition ResourceDefinition) bool {
 		return definition.Group == "autoscaling" && (definition.Version == "v1" || definition.Version == "v2" || definition.Version == "v2beta2")
 	case "PodDisruptionBudget":
 		return definition.Group == "policy" && (definition.Version == "v1" || definition.Version == "v1beta1")
-	case "ResourceQuota", "LimitRange", "PersistentVolume", "ServiceAccount", "Pod":
+	case "ResourceQuota", "LimitRange", "PersistentVolume", "ServiceAccount", "Pod", "Node":
 		return definition.Group == "" && definition.Version == "v1"
 	case "StorageClass":
 		return definition.Group == "storage.k8s.io" && definition.Version == "v1"
@@ -638,6 +685,8 @@ func summarizeOperationalPackState(panels []OperationalReadPackPanel) (string, s
 		return state, "Kubernetes RBAC denied this operational read."
 	case readPackStateUnavailable:
 		return state, "This operational API or exact version is unavailable; generic views remain available."
+	case readPackStateStale:
+		return state, "The latest native telemetry sample is stale; object-side fields remain available."
 	case readPackStateError:
 		return state, "The operational API returned an unreadable result; generic views remain available."
 	default:

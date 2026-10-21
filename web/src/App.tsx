@@ -93,6 +93,7 @@ import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQu
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
+import { ComputeReadPackView } from './computeReadPack'
 import { parseSchemaInput, projectSchemaIdentityFields, validateSchemaScalarValue } from './schemaForm'
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
 import { parseWorkloadReplicaInput, workloadReplicaInput, WORKLOAD_REPLICA_VALIDATION_MESSAGE } from './workload'
@@ -136,6 +137,7 @@ import type {
   StorageClassReadPackData,
   ServiceAccountReadPackData,
   PodReadPackData,
+  ComputeReadPackData,
   OperationalReadPackReference,
   OperationalCondition,
   PodContainerSummary,
@@ -2734,6 +2736,7 @@ function OperationalReadPackCard({ panel }: { panel: OperationalReadPackPanelMod
   if (panel.key === 'storage-class' && data) content = <StorageClassReadPackView data={data as StorageClassReadPackData} />
   if (panel.key === 'service-account' && data) content = <ServiceAccountReadPackView data={data as ServiceAccountReadPackData} />
   if (panel.key === 'pod' && data) content = <PodReadPackView data={data as PodReadPackData} />
+  if (panel.key === 'compute' && data) content = <ComputeReadPackView data={data as ComputeReadPackData} />
   return <section className={`read-pack-card read-pack-card-${panel.state}`}><div className="read-pack-card-heading"><div><span className="panel-eyebrow">Built-in view</span><h2>{panel.title}</h2></div><ReadPackStateChip state={panel.state} /></div><p className="read-pack-card-message">{panel.message}</p>{panel.truncated && <div className="read-pack-truncated"><AlertTriangle size={14} /><span>Results are capped. The generic related-resource view remains available for broader navigation.</span></div>}{content}</section>
 }
 

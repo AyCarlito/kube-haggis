@@ -8,6 +8,7 @@ export function operationalReadPackStateLabel(state: string): string {
   if (state === 'partial') return 'Partial'
   if (state === 'unavailable') return 'Unavailable'
   if (state === 'error') return 'Read error'
+  if (state === 'stale') return 'Stale'
   return 'Unknown'
 }
 
@@ -18,6 +19,6 @@ export function isOperationalReadPackResource(definition: ResourceDefinition): b
   if (definition.group === 'autoscaling' && definition.resource === 'horizontalpodautoscalers') return true
   if (definition.group === 'policy' && definition.resource === 'poddisruptionbudgets') return true
   if (definition.group === 'storage.k8s.io' && definition.resource === 'storageclasses') return true
-  if (definition.group === '' && ['pods', 'resourcequotas', 'limitranges', 'persistentvolumes', 'serviceaccounts'].includes(definition.resource)) return true
+  if (definition.group === '' && ['nodes', 'pods', 'resourcequotas', 'limitranges', 'persistentvolumes', 'serviceaccounts'].includes(definition.resource)) return true
   return false
 }
