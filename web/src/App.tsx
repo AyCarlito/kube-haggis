@@ -4208,6 +4208,7 @@ function relatedTypeLabel(type: string): string {
     'bound-volume': 'Bound volume',
     'bound-claim': 'Bound claim',
     reference: 'Native reference',
+    'ingress-backend': 'Ingress backend',
     aggregation: 'Relationship scan',
     discovery: 'API discovery',
   }

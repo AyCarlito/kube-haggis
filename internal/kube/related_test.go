@@ -109,6 +109,40 @@ func TestCollectRelatedResourcesDoesNotReverseLoadEvents(t *testing.T) {
 	}
 }
 
+// TestCollectRelatedResourcesResolvesIngressServiceBackend verifies Ingress Service backends are direct related targets.
+func TestCollectRelatedResourcesResolvesIngressServiceBackend(t *testing.T) {
+	ingress := relatedObject("networking.k8s.io/v1", "Ingress", "edge", "default", "ingress-uid", map[string]interface{}{
+		"spec": map[string]interface{}{
+			"defaultBackend": map[string]interface{}{"service": map[string]interface{}{"name": "edge-service"}},
+			"rules": []interface{}{map[string]interface{}{
+				"http": map[string]interface{}{"paths": []interface{}{map[string]interface{}{
+					"backend": map[string]interface{}{"service": map[string]interface{}{"name": "edge-service"}},
+				}}},
+			}},
+		},
+	})
+	service := relatedObject("v1", "Service", "edge-service", "default", "service-uid", nil)
+	client := newRelatedDynamicClient(ingress, service)
+
+	result := collectRelatedResources(context.Background(), client, relatedDefinitions(), nil, "networking.k8s.io", "v1", "ingresses", "default", true, ingress)
+	item := findRelatedItem(result.Items, relatedTypeIngressBackend, "edge-service")
+	if result.State != relatedStateAvailable || item == nil || item.State != relatedItemResolved {
+		t.Fatalf("Ingress Service backend was not resolved: %+v", result)
+	}
+	if item.Definition == nil || item.Definition.Group != "" || item.Definition.Version != "v1" || item.Definition.Resource != "services" || item.Namespace != "default" {
+		t.Fatalf("Ingress backend lost the exact Service target identity: %+v", item)
+	}
+	backendCount := 0
+	for _, related := range result.Items {
+		if related.Type == relatedTypeIngressBackend && related.Name == "edge-service" {
+			backendCount++
+		}
+	}
+	if backendCount != 1 || getActionCount(client, "services", "edge-service") != 1 {
+		t.Fatalf("Ingress backend was not deduplicated to one target GET: count=%d actions=%#v", backendCount, client.Actions())
+	}
+}
+
 // TestCollectRelatedResourcesResolvesServiceSelector verifies native Service selector matching.
 func TestCollectRelatedResourcesResolvesServiceSelector(t *testing.T) {
 	service := relatedObject("v1", "Service", "api", "default", "service-uid", map[string]interface{}{
@@ -427,6 +461,7 @@ func relatedDefinitions() []ResourceDefinition {
 		{Group: "", Version: "v1", Resource: "persistentvolumeclaims", Kind: "PersistentVolumeClaim", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "persistentvolumes", Kind: "PersistentVolume", Namespaced: false, Verbs: []string{"get", "list"}},
 		{Group: "", Version: "v1", Resource: "serviceaccounts", Kind: "ServiceAccount", Namespaced: true, Verbs: []string{"get", "list"}},
+		{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses", Kind: "Ingress", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet", Namespaced: true, Verbs: []string{"get", "list"}},
 		{Group: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet", Namespaced: true, Verbs: []string{"get", "list"}},

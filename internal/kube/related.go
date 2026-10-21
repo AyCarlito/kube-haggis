@@ -41,11 +41,13 @@ const (
 	relatedTypeBoundVolume       = "bound-volume"
 	relatedTypeBoundClaim        = "bound-claim"
 	relatedTypeReference         = "reference"
+	relatedTypeIngressBackend    = "ingress-backend"
 	relatedTypeInvolvedObject    = "involved-object"
 	relatedSourceOwnerReferences = "metadata.ownerReferences"
 	relatedSourceSelector        = "spec.selector"
 	relatedSourceVolumeName      = "spec.volumeName"
 	relatedSourceClaimRef        = "spec.claimRef"
+	relatedSourceIngressBackend  = "spec.backend.service.name"
 	relatedSourceInvolvedObject  = "involvedObject"
 )
 
@@ -241,6 +243,7 @@ func collectRelatedResourcesWithBudget(ctx context.Context, client dynamic.Inter
 		} else {
 			collector.addSelectorRelationships()
 			collector.addStorageRelationships()
+			collector.addIngressRelationships()
 			collector.addNativeReferences()
 		}
 	}
@@ -948,6 +951,53 @@ func (collector *relatedCollector) addNativeReferences() {
 		}
 
 		collector.addPodSpecNamedReferences(root)
+	}
+}
+
+// addIngressRelationships resolves unique Service backends declared by an Ingress.
+func (collector *relatedCollector) addIngressRelationships() {
+	if collector.currentGroup != "networking.k8s.io" || collector.currentVersion != "v1" || collector.currentKind() != "Ingress" {
+		return
+	}
+	serviceDefinition, _ := relationshipDefinition(collector.definitions, "", "v1", "services")
+	serviceNames := make(map[string]struct{})
+	addBackend := func(backend IngressBackendSummary) {
+		if backend.Name == "" || backend.Kind != "" && backend.Kind != "Service" {
+			return
+		}
+		if _, found := serviceNames[backend.Name]; found {
+			return
+		}
+		serviceNames[backend.Name] = struct{}{}
+		collector.addNamedTarget(relatedTypeIngressBackend, relatedSourceIngressBackend, serviceDefinition, collector.object.GetNamespace(), backend.Name, "Service")
+	}
+
+	defaultBackend, found, malformed := ingressBackendSummary(collector.object.Object, "spec", "defaultBackend")
+	if malformed {
+		collector.addNotice(relatedTypeIngressBackend, relatedSourceIngressBackend, relatedItemError, "Ingress spec.defaultBackend was malformed and could not be resolved safely.")
+	}
+	if found {
+		addBackend(defaultBackend)
+	}
+
+	rules := readPackSlice(collector.object.Object, "spec", "rules")
+	if rules.Malformed {
+		collector.addNotice(relatedTypeIngressBackend, relatedSourceIngressBackend, relatedItemError, "Ingress spec.rules was malformed and could not be resolved safely.")
+		return
+	}
+	for _, raw := range rules.Value {
+		rule, ok := raw.(map[string]interface{})
+		if !ok {
+			collector.addNotice(relatedTypeIngressBackend, relatedSourceIngressBackend, relatedItemError, "An Ingress rule was malformed and could not be resolved safely.")
+			continue
+		}
+		_, backends, ruleMalformed := ingressRuleSummary(rule)
+		if ruleMalformed {
+			collector.addNotice(relatedTypeIngressBackend, relatedSourceIngressBackend, relatedItemError, "An Ingress rule backend was malformed and could not be resolved safely.")
+		}
+		for _, backend := range backends {
+			addBackend(backend)
+		}
 	}
 }
 
