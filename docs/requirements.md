@@ -52,6 +52,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Version-aware CRD capabilities with served/preferred/storage metadata, bounded printer columns, subresource details, and schema-form YAML fallbacks.
 - Reliable resource and Event watches with bounded relist recovery, freshness states, cancellation, and safe failure signals.
 - Bounded read-only operational packs for built-in networking, policy, autoscaling, quota, storage, ServiceAccount/RBAC, and Pod posture views.
+- Bounded global search with canonical GVR result links, partial-source states, explicit submit behavior, and revision-bound local saved views.
 
 ### Partially Implemented
 
@@ -238,7 +239,7 @@ Add structured, read-only views for high-value built-in resources while retainin
 - Show missing APIs, unsupported versions, and RBAC denial per panel without hiding unrelated information.
 - Use the generic dynamic resource layer and bounded extractors rather than a typed backend implementation for every kind.
 
-### F6. Global search and saved views
+### F6. Global search and saved views (Implemented)
 
 Provide a bounded cross-resource search workflow for operators working across namespaces and resource kinds.
 

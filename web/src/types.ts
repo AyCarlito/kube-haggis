@@ -190,6 +190,80 @@ export interface ResourceListResponse {
   resourceVersion: string
 }
 
+/** Contains the URL-safe filters used by one bounded global search. */
+export interface SearchQuery {
+  query: string
+  group: string
+  kind: string
+  resource: string
+  namespace: string
+  name: string
+  labelSelector: string
+}
+
+/** Identifies the aggregate state of one global search response. */
+export type SearchState = 'available' | 'partial' | 'empty' | 'permission-denied' | 'unavailable' | 'error'
+
+/** Identifies the state of one exact discovered search source. */
+export type SearchSourceState = Exclude<SearchState, 'partial'>
+
+/** Contains complete GVR identity and safe summary fields for one search result. */
+export interface SearchResult {
+  group: string
+  version: string
+  resource: string
+  kind: string
+  scope: ResourceScope | string
+  namespaced: boolean
+  name: string
+  namespace?: string
+  createdAt: string
+  status: string
+  ready?: string
+  labels?: Record<string, string>
+}
+
+/** Reports one source outcome without returning a Kubernetes object body. */
+export interface SearchSource {
+  group: string
+  version: string
+  resource: string
+  kind: string
+  scope: ResourceScope | string
+  namespaced: boolean
+  state: SearchSourceState
+  resultCount: number
+  truncated?: boolean
+  issue?: string
+}
+
+/** Contains bounded global search results, source states, and revision-scoped catalog health. */
+export interface SearchResponse {
+  context: string
+  revision: number
+  state: SearchState
+  items: SearchResult[]
+  sources: SearchSource[]
+  issues?: DiscoveryIssue[]
+  partial: boolean
+  truncated: boolean
+  callCount: number
+  callBudget: number
+  resultLimit: number
+}
+
+/** Describes a validated locally persisted search view and its compatibility guard. */
+export interface SavedSearchView {
+  id: string
+  name: string
+  context: string
+  revision: number
+  query: SearchQuery
+  catalogFingerprint: string
+  createdAt: number
+  updatedAt: number
+}
+
 /** Describes one safe, resource-versioned selection in a generic bulk delete. */
 export interface ResourceDeleteItem {
   name: string
@@ -921,7 +995,8 @@ export interface PortForwardMessage {
 /** Represents the browser route used by the single-page application. */
 export interface RouteState {
   path: string
-  view?: 'history' | 'catalog'
+  view?: 'history' | 'catalog' | 'search'
+  search?: string
   group?: string
   version?: string
   resource?: string

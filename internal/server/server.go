@@ -72,6 +72,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/audit", s.handleAudit)
 	mux.HandleFunc("/api/overview", s.handleOverview)
 	mux.HandleFunc("/api/discovery", s.handleDiscovery)
+	mux.HandleFunc("/api/search", s.handleSearch)
 	mux.HandleFunc("/api/schema", s.handleSchema)
 	mux.HandleFunc("/api/resources", s.handleResources)
 	mux.HandleFunc("/api/resources/delete", s.handleBulkResourceDelete)
@@ -199,6 +200,30 @@ func (s *Server) handleDiscovery(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	writeJSON(writer, http.StatusOK, catalog)
+}
+
+// handleSearch runs one bounded cross-resource search without returning Kubernetes error bodies.
+func (s *Server) handleSearch(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	query := request.URL.Query()
+	result, err := s.kube.Search(request.Context(), query.Get("context"), kube.SearchRequest{
+		Query:         query.Get("query"),
+		Group:         query.Get("group"),
+		Kind:          query.Get("kind"),
+		Resource:      query.Get("resource"),
+		Namespace:     query.Get("namespace"),
+		Name:          query.Get("name"),
+		LabelSelector: query.Get("labelSelector"),
+	})
+	if err != nil {
+		writeSearchError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 
 // handleSchema returns a read-only structural CRD schema or an explicit YAML fallback state.
@@ -762,4 +787,15 @@ func writeError(writer http.ResponseWriter, err error) {
 		status = http.StatusBadRequest
 	}
 	writeJSON(writer, status, map[string]string{"error": err.Error()})
+}
+
+// writeSearchError returns a fixed safe message for search failures and validation errors.
+func writeSearchError(writer http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	message := "Global search is unavailable; retry the search."
+	if strings.Contains(strings.ToLower(err.Error()), "search filter") || strings.Contains(strings.ToLower(err.Error()), "label selector") {
+		status = http.StatusBadRequest
+		message = "Search filters are invalid; check the label selector and filter lengths."
+	}
+	writeJSON(writer, status, map[string]string{"error": message})
 }

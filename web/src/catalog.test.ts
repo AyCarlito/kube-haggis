@@ -35,6 +35,8 @@ export function runCatalogModelTests(): void {
   ]
   assertCatalog(catalogEventResourcePath(eventDefinitions, 'warning') === '/resources/core/v1/events/warning', 'core Event navigation did not retain exact GVR identity')
   assertCatalog(catalogResourcePathForSlug('events', eventDefinitions) === '/resources/events', 'generic ambiguous Event slug silently selected an API')
+  const searchRoute = parseResourceRoute('/search', '?namespace=team-a&q=api')
+  assertCatalog(searchRoute.view === 'search' && searchRoute.namespace === 'team-a' && searchRoute.search === '?namespace=team-a&q=api', 'global search route did not preserve namespace and query state')
   const groups = groupResourceCatalog(definitions)
   assertCatalog(groups.length === 3 && groups[0].group === '' && groups[1].group === 'example.com', 'catalog groups were not deterministic')
   assertCatalog(groups[0].versions[0].definitions[0].resource === 'pods', 'catalog group rows were not retained')

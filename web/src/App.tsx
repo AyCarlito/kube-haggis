@@ -4,6 +4,8 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpRight,
+  Bookmark,
+  BookmarkPlus,
   Box,
   Bug,
   Check,
@@ -51,6 +53,7 @@ import {
   deleteResources,
   fetchAudit,
   fetchContexts,
+  fetchGlobalSearch,
   fetchResourceCatalog,
   fetchOverview,
   fetchPVCOperations,
@@ -81,6 +84,8 @@ import {
   parseResourceRoute,
   resolveCatalogDefinition,
 } from './catalog'
+import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchHref, searchQueryEquals, searchResultKey, searchResultResourcePath } from './search'
+import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
@@ -123,6 +128,11 @@ import type {
   OperationalCondition,
   PodContainerSummary,
   ResourceSummary,
+  SavedSearchView,
+  SearchQuery,
+  SearchResponse,
+  SearchResult,
+  SearchSource,
   RelatedAggregateState,
   RelatedResourcesResponse,
   RelatedResource,
@@ -207,6 +217,7 @@ const navGroups = [
     label: 'Observe',
     items: [
       { label: 'Cluster overview', resource: undefined, icon: Gauge },
+      { label: 'Global search', path: '/search', icon: Search },
       { label: 'API resource catalog', path: '/catalog', icon: Box },
       { label: 'Pods', resource: 'pods', icon: CircleDot },
       { label: 'Nodes', resource: 'nodes', icon: Server },
@@ -405,6 +416,8 @@ export default function App() {
     <LoadingState label="Reading local kubeconfig" />
   ) : route.view === 'history' ? (
     <MutationHistoryPage contexts={contexts} selectedContext={selectedContext} activeContext={activeContext} revision={contextRevision} />
+  ) : route.view === 'search' ? (
+    <GlobalSearchPage context={selectedContext} namespace={selectedNamespace} revision={contextRevision} searchKey={route.search || ''} definitions={definitions} catalog={catalog} catalogLoading={catalogLoading} onNamespace={changeNamespace} onOpen={(result) => navigate(searchResultResourcePath(result), result.resource, result.name, result.namespace || undefined)} />
   ) : route.view === 'catalog' ? (
     <ResourceCatalogPage catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} onOpen={(definition) => navigate(catalogResourcePath(definition), definition.resource)} />
   ) : contexts.error || contexts.contexts.length === 0 ? (
@@ -497,7 +510,7 @@ export default function App() {
           <div className="crumbs">
             <span className="crumb-muted">KubeHaggis</span>
             <span className="crumb-slash">/</span>
-            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'catalog' ? 'API catalog' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
+            <span>{route.view === 'history' ? 'Mutation history' : route.view === 'search' ? 'Global search' : route.view === 'catalog' ? 'API catalog' : route.resource ? activeDefinition?.kind || titleCase(route.resource) : 'Cluster overview'}</span>
           </div>
           <div className="topbar-tools">
             <ContextPicker contexts={contexts?.contexts ?? []} value={selectedContext} onChange={changeContext} />
@@ -950,6 +963,266 @@ function CatalogResourceRow({ definition, onOpen }: { definition: ResourceDefini
 /** Renders a retryable resource-catalog failure without substituting a guessed resource. */
 function CatalogState({ title, detail, onRetry }: { title: string; detail: string; onRetry: () => void }) {
   return <div className="state-page"><div className="state-card"><span className="state-icon state-icon-warning"><AlertTriangle size={22} /></span><span className="eyebrow"><span className="eyebrow-mark" /> API catalog</span><h1>{title}</h1><p>{detail}</p><button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={15} /> Retry discovery</button></div></div>
+}
+
+/** Renders the explicit-submit global search page and its revision-bound saved views. */
+function GlobalSearchPage({ context, namespace, revision, searchKey, definitions, catalog, catalogLoading, onNamespace, onOpen }: { context: string; namespace: string; revision: number; searchKey: string; definitions: ResourceDefinition[]; catalog: ResourceCatalogResponse | null; catalogLoading: boolean; onNamespace: (namespace: string) => void; onOpen: (result: SearchResult) => void }) {
+  const initialQuery = parseSearchQuery(searchKey)
+  const [query, setQuery] = useState<SearchQuery>(() => initialQuery)
+  const [submittedQuery, setSubmittedQuery] = useState<SearchQuery | null>(() => hasSearchFilters(initialQuery) ? initialQuery : null)
+  const [response, setResponse] = useState<SearchResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [savedViews, setSavedViews] = useState<SavedSearchView[]>(() => {
+    const storage = browserSavedViewStorage()
+    return storage ? loadSavedSearchViews(storage) : []
+  })
+  const [viewName, setViewName] = useState('')
+  const [viewNotice, setViewNotice] = useState('')
+  const searchAbortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    const nextQuery = parseSearchQuery(searchKey)
+    const nextSubmittedQuery = hasSearchFilters(nextQuery) ? nextQuery : null
+    searchAbortRef.current?.abort()
+    searchAbortRef.current = null
+    setQuery((current) => searchQueryEquals(current, nextQuery) ? current : nextQuery)
+    setSubmittedQuery((current) => {
+      if (!nextSubmittedQuery) return current === null ? current : null
+      return current && searchQueryEquals(current, nextSubmittedQuery) ? current : nextSubmittedQuery
+    })
+    setResponse(null)
+    setLoading(false)
+    setError('')
+    setViewNotice('')
+  }, [searchKey])
+
+  useEffect(() => {
+    searchAbortRef.current?.abort()
+    searchAbortRef.current = null
+    setQuery((current) => current.namespace === namespace ? current : { ...current, namespace })
+    setSubmittedQuery((current) => current && current.namespace === namespace ? current : null)
+    setResponse(null)
+    setError('')
+  }, [namespace])
+
+  useEffect(() => {
+    if (!context || !submittedQuery) {
+      setLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    searchAbortRef.current = controller
+    setLoading(true)
+    setError('')
+    fetchGlobalSearch(context, submittedQuery, controller.signal)
+      .then((nextResponse) => {
+        if (controller.signal.aborted) return
+        setResponse(nextResponse)
+      })
+      .catch((loadError: unknown) => {
+        if (controller.signal.aborted || (loadError as Error).name === 'AbortError') return
+        setResponse(null)
+        setError('Global search could not be completed. Kubernetes error details are hidden by the local server; retry the search.')
+      })
+      .finally(() => !controller.signal.aborted && setLoading(false))
+    return () => {
+      controller.abort()
+      if (searchAbortRef.current === controller) searchAbortRef.current = null
+    }
+  }, [context, revision, submittedQuery])
+
+  /** Updates one filter and immediately records the deep-linkable URL without issuing a request. */
+  function updateQuery(field: keyof SearchQuery, value: string) {
+    const next = normalizeSearchQuery({ ...query, [field]: value })
+    setQuery(next)
+    if (field === 'namespace') onNamespace(next.namespace)
+    window.history.replaceState({}, '', searchHref(context, next))
+  }
+
+  /** Submits the current filter model as the next bounded Kubernetes search. */
+  function submitSearch() {
+    setViewNotice('')
+    setError('')
+    setResponse(null)
+    setSubmittedQuery({ ...query })
+  }
+
+  /** Clears search filters while retaining the active namespace scope. */
+  function clearSearch() {
+    const next = emptySearchQuery(namespace)
+    setQuery(next)
+    setSubmittedQuery(null)
+    setResponse(null)
+    setError('')
+    setViewNotice('')
+    window.history.replaceState({}, '', searchHref(context, next))
+  }
+
+  /** Stores the current filters only when the active context and catalog are available. */
+  function saveView() {
+    const storage = browserSavedViewStorage()
+    if (!storage) {
+      setViewNotice('Browser storage is unavailable; this view was not saved.')
+      return
+    }
+    if (!context || !catalog || catalogLoading || catalog.state !== 'available' || !definitions.length) {
+      setViewNotice('Wait for the current API catalog before saving a view.')
+      return
+    }
+    const view = createSavedSearchView(viewName, context, revision, query, definitions)
+    const next = upsertSavedSearchView(savedViews, view)
+    const persisted = persistSavedSearchViews(storage, next)
+    if (!persisted.some((candidate) => candidate.id === view.id)) {
+      setViewNotice('Browser storage could not retain this view within its fixed limit.')
+      return
+    }
+    setSavedViews(persisted)
+    setViewName('')
+    setViewNotice(`Saved “${view.name}” for ${context} at revision ${revision}.`)
+  }
+
+  /** Applies a view only after context, revision, and catalog identity validation succeeds. */
+  function applyView(view: SavedSearchView) {
+    if (!catalog || catalogLoading || catalog.state !== 'available' || !isSavedSearchViewApplicable(view, context, revision, definitions)) {
+      setViewNotice(`“${view.name}” is stale or no longer matches this context's discovered resources. Delete it or save a new view.`)
+      return
+    }
+    const next = normalizeSearchQuery(view.query)
+    setQuery(next)
+    setSubmittedQuery(next)
+    if (next.namespace !== namespace) onNamespace(next.namespace)
+    window.history.replaceState({}, '', searchHref(context, next))
+    setViewNotice(`Applied “${view.name}”.`)
+  }
+
+  /** Deletes one local view and persists the remaining bounded collection. */
+  function deleteView(view: SavedSearchView) {
+    const next = removeSavedSearchView(savedViews, view.id)
+    const storage = browserSavedViewStorage()
+    setSavedViews(storage ? persistSavedSearchViews(storage, next) : next)
+    setViewNotice(`Deleted “${view.name}”.`)
+  }
+
+  const groupOptions = Array.from(new Set(definitions.map((definition) => definition.group || 'core'))).sort((left, right) => left.localeCompare(right))
+  return (
+    <div className="search-page">
+      <section className="search-intro">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-mark" /> Global field scan / read-only</div>
+          <h1>Search the cluster</h1>
+          <p className="intro-copy">Find named objects across discovered API groups without guessing a short resource route. Every result keeps its complete group, version, and resource identity.</p>
+        </div>
+        <div className="search-stamp">
+          <span className="stamp-label">Current search scope</span>
+          <strong>{context || 'No context selected'}</strong>
+          <code>{namespace === 'all' ? 'all namespaces' : namespace} / kubeconfig rev {revision || '—'}</code>
+          <span className="stamp-status"><span className="signal-dot signal-dot-good" /> local backend / bounded scan</span>
+        </div>
+      </section>
+
+      <div className="search-layout">
+        <main className="search-main">
+          <section className="search-form-panel panel">
+            <div className="search-form-heading"><div><span className="panel-eyebrow">Operator query</span><h2>Set the field coordinates</h2><p>Typing changes only the URL. Submit deliberately to scan at most 24 sources and 200 summaries.</p></div><span className="search-budget-chip"><Search size={13} /> 24 sources / 6 concurrent</span></div>
+            <form className="search-form" onSubmit={(event) => { event.preventDefault(); submitSearch() }}>
+              <label className="search-primary-field"><Search size={17} /><span className="sr-only">Search text</span><input value={query.query} onChange={(event) => updateQuery('query', event.target.value)} placeholder="Search kind, resource, namespace, or object name" /><kbd>submit</kbd></label>
+              <div className="search-filter-grid">
+                <label className="search-control"><span>API group</span><select value={query.group} onChange={(event) => updateQuery('group', event.target.value)}><option value="">All groups</option>{groupOptions.map((group) => <option value={group} key={group}>{group === 'core' ? 'Core API' : group}</option>)}</select></label>
+                <label className="search-control"><span>Kind</span><input value={query.kind} onChange={(event) => updateQuery('kind', event.target.value)} placeholder="Deployment" /></label>
+                <label className="search-control"><span>Resource</span><input value={query.resource} onChange={(event) => updateQuery('resource', event.target.value)} placeholder="deployments" /></label>
+                <label className="search-control"><span>Namespace scope</span><input value={query.namespace === 'all' ? '' : query.namespace} onChange={(event) => updateQuery('namespace', event.target.value || 'all')} placeholder="all namespaces" /></label>
+                <label className="search-control"><span>Name / exact field selector</span><input value={query.name} onChange={(event) => updateQuery('name', event.target.value)} placeholder="api-server" /></label>
+                <label className="search-control search-control-wide"><span>Label selector / sent to Kubernetes</span><input value={query.labelSelector} onChange={(event) => updateQuery('labelSelector', event.target.value)} placeholder="app=api,track=stable" /></label>
+              </div>
+              <div className="search-form-actions"><span>Empty searches are allowed only by explicit submit and remain bounded.</span><div><button type="button" className="text-button" onClick={clearSearch}>Clear filters</button><button type="submit" className="primary-button" disabled={!context}><Search size={15} /> Run search</button></div></div>
+            </form>
+          </section>
+
+          {viewNotice && <div className="search-view-notice" role="status"><Bookmark size={14} />{viewNotice}</div>}
+          {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
+          {response && <SearchResponseNotice response={response} />}
+          {loading && !response && <div className="search-loading"><LoaderCircle size={18} className="spin" /> Reading bounded search sources</div>}
+          {loading && response && <div className="search-refresh-strip"><LoaderCircle size={14} className="spin" /> Refreshing this submitted search; the previous bounded result remains visible.</div>}
+          {response && <SearchSourcesPanel sources={response.sources} issues={response.issues} />}
+          {response && response.items.length > 0 && <SearchResultTable items={response.items} onOpen={onOpen} />}
+          {response && !response.items.length && !loading && <SearchNoResults response={response} />}
+          {!response && !loading && <div className="search-landing panel"><span className="search-landing-mark"><BookmarkPlus size={21} /></span><strong>Ready for a deliberate scan</strong><span>Use a name, kind, resource, namespace, or label selector, then run the search. No Kubernetes list calls happen while you type.</span></div>}
+        </main>
+
+        <aside className="saved-views-panel panel">
+          <div className="saved-views-heading"><div><span className="panel-eyebrow">Local bookmarks</span><h2>Saved views</h2></div><span className="saved-view-count">{savedViews.length}/12</span></div>
+          <p className="saved-views-copy">Views stay in this browser and are bound to <strong>{context || 'the active context'}</strong> / revision <strong>{revision || '—'}</strong>. Stale views never run silently.</p>
+          <div className="saved-view-create"><input value={viewName} onChange={(event) => setViewName(event.target.value)} placeholder="Name this filter set" maxLength={64} /><button type="button" className="secondary-button" onClick={saveView} disabled={!context || catalogLoading}><BookmarkPlus size={14} /> Save</button></div>
+          {!savedViews.length ? <div className="saved-views-empty"><Bookmark size={18} /><span>No saved field views yet.</span></div> : <div className="saved-view-list">{savedViews.map((view) => {
+            const state: SavedViewState | 'checking' = catalogLoading || !catalog ? 'checking' : catalog.state !== 'available' ? 'incompatible' : savedSearchViewState(view, context, revision, definitions)
+            const applicable = state === 'current'
+            return <div className={`saved-view-row saved-view-row-${state}`} key={view.id}><div className="saved-view-row-top"><strong>{view.name}</strong><button type="button" className="icon-button" onClick={() => deleteView(view)} aria-label={`Delete saved view ${view.name}`} title="Delete saved view"><Trash2 size={14} /></button></div><span>{savedViewStateLabel(state)} / {view.context} / rev {view.revision}</span><code>{savedViewQueryLabel(view.query)}</code><button type="button" className="text-button saved-view-apply" onClick={() => applyView(view)} disabled={!applicable}>{applicable ? 'Apply view' : state === 'checking' ? 'Checking catalog' : 'Cannot apply safely'}</button></div>
+          })}</div>}
+          <div className="saved-views-footer"><LockKeyhole size={13} /> Local only / no search index / fixed browser storage</div>
+        </aside>
+      </div>
+    </div>
+  )
+}
+
+/** Renders the aggregate search state without exposing backend Kubernetes error text. */
+function SearchResponseNotice({ response }: { response: SearchResponse }) {
+  if (response.state === 'available' && !response.truncated && !response.issues?.length) return null
+  const title = response.state === 'partial' ? 'Partial result set' : response.state === 'permission-denied' ? 'Search access is restricted' : response.state === 'unavailable' ? 'Some search APIs are unavailable' : response.state === 'error' ? 'Search sources returned errors' : 'Search returned no matches'
+  const detail = response.state === 'partial' ? `${response.items.length} safe result${response.items.length === 1 ? '' : 's'} returned. ${response.truncated ? 'The fixed source or result cap was reached. ' : ''}Review source states below before treating this as complete.` : response.state === 'permission-denied' ? 'Kubernetes RBAC denied every source that was queried. No raw API error body is shown.' : response.state === 'unavailable' ? 'One or more Kubernetes APIs did not respond or are not currently served. Retry when the cluster recovers.' : response.state === 'error' ? 'One or more source reads failed. Successful sources remain visible and each issue is classified below.' : 'The bounded scan completed without a matching object.'
+  return <div className={`search-response-notice search-response-notice-${response.state}`} role="status"><span className="search-response-icon">{response.state === 'partial' ? <AlertTriangle size={16} /> : response.state === 'permission-denied' ? <LockKeyhole size={16} /> : response.state === 'available' ? <RefreshCw size={16} /> : <AlertTriangle size={16} />}</span><div><strong>{title}</strong><span>{detail}</span>{response.issues?.slice(0, 3).map((issue, index) => <code key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}>{issue.message}</code>)}</div></div>
+}
+
+/** Renders per-source RBAC, unavailable, empty, and error outcomes for one search. */
+function SearchSourcesPanel({ sources, issues }: { sources: SearchSource[]; issues?: SearchResponse['issues'] }) {
+  if (!sources.length && !issues?.length) return null
+  return <section className="search-sources panel"><div className="search-sources-heading"><div><span className="panel-eyebrow">Source ledger</span><h2>Where the result came from</h2></div><span>{sources.length} queried</span></div>{issues?.length ? <div className="search-catalog-issues">{issues.map((issue, index) => <div key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={13} /><span>{issue.message}</span></div>)}</div> : null}<div className="search-source-list">{sources.map((source) => <div className={`search-source-row search-source-row-${source.state}`} key={`${source.group}/${source.version}/${source.resource}`}><span className="search-source-dot" /><div><strong>{source.kind || source.resource}</strong><code>{source.group ? `${source.group}/${source.version}` : source.version} / {source.resource}</code></div><span className="search-source-result-count">{source.resultCount} result{source.resultCount === 1 ? '' : 's'}</span><span className="search-source-state">{searchSourceStateLabel(source.state)}</span>{source.issue && <span className="search-source-issue">{source.issue}</span>}</div>)}</div></section>
+}
+
+/** Renders bounded safe summaries with canonical full-GVR navigation. */
+function SearchResultTable({ items, onOpen }: { items: SearchResult[]; onOpen: (result: SearchResult) => void }) {
+  return <section className="search-results panel"><div className="search-results-heading"><div><span className="panel-eyebrow">Safe coordinates</span><h2>Search results</h2></div><span>{items.length} returned</span></div><div className="search-results-wrap"><table className="search-results-table"><thead><tr><th>Object</th><th>API identity</th><th>Namespace</th><th>State</th><th>Labels</th><th /></tr></thead><tbody>{items.map((item) => <tr key={searchResultKey(item)} onClick={() => onOpen(item)}><td><button type="button" className="search-result-name" onClick={(event) => { event.stopPropagation(); onOpen(item) }}>{item.name || 'Unnamed'}</button><span className="search-result-kind">{item.kind}</span></td><td><code>{item.group ? `${item.group}/${item.version}` : item.version}</code><span>{item.resource}</span></td><td>{item.namespace || 'cluster'}</td><td><span className={`status-pill status-${resourceStatusTone(item.status)}`}><span />{item.status || 'Unknown'}{item.ready ? ` / ${item.ready}` : ''}</span></td><td><div className="label-stack">{Object.entries(item.labels ?? {}).slice(0, 2).map(([key, value]) => <span key={key}>{key}={value}</span>)}{!Object.keys(item.labels ?? {}).length && <span>—</span>}</div></td><td><ArrowUpRight size={15} className="search-result-open" /></td></tr>)}</tbody></table></div><div className="search-results-footer"><span><Search size={13} /> Results contain coordinates and summaries only; open YAML/detail for the complete generic fallback.</span><span>Click a row to open its canonical route.</span></div></section>
+}
+
+/** Renders the explicit empty, denied, unavailable, or error search state. */
+function SearchNoResults({ response }: { response: SearchResponse }) {
+  const title = response.state === 'permission-denied' ? 'Search is blocked by Kubernetes RBAC' : response.state === 'unavailable' ? 'Search APIs are unavailable' : response.state === 'error' ? 'Search did not complete cleanly' : response.state === 'partial' ? 'No matches in the scanned sources' : 'No matching resources'
+  const detail = response.state === 'permission-denied' ? 'This identity could not list any searched source. Review source access and retry.' : response.state === 'unavailable' ? 'The local backend could not read enough API sources to complete the scan. Retry when the cluster is reachable.' : response.state === 'error' ? 'No safe result was returned from the completed source calls. Review the source ledger and retry.' : response.state === 'partial' ? 'The search budget or discovery health limited coverage. Refine the filters or retry for a fresh bounded scan.' : 'The bounded scan completed successfully. Try a different name, exact kind/resource, namespace, or label selector.'
+  return <div className="search-no-results"><span className="search-no-results-icon">{response.state === 'permission-denied' ? <LockKeyhole size={20} /> : response.state === 'empty' ? <Box size={20} /> : <AlertTriangle size={20} />}</span><strong>{title}</strong><span>{detail}</span></div>
+}
+
+/** Converts one saved-view compatibility state into a compact operator label. */
+function savedViewStateLabel(state: SavedViewState | 'checking'): string {
+  if (state === 'current') return 'Ready'
+  if (state === 'checking') return 'Checking'
+  if (state === 'stale-context') return 'Other context'
+  if (state === 'stale-revision') return 'Stale revision'
+  return 'Catalog changed'
+}
+
+/** Converts one source state into the explicit label shown in the source ledger. */
+function searchSourceStateLabel(state: SearchSource['state']): string {
+  if (state === 'permission-denied') return 'RBAC denied'
+  if (state === 'unavailable') return 'Unavailable'
+  if (state === 'error') return 'Read error'
+  if (state === 'empty') return 'No matches'
+  return 'Read'
+}
+
+/** Formats safe saved-view filters without embedding a potentially long selector in the UI. */
+function savedViewQueryLabel(query: SearchQuery): string {
+  const parts = [query.query && `q:${query.query}`, query.kind && `kind:${query.kind}`, query.resource && `resource:${query.resource}`, query.namespace !== 'all' && `ns:${query.namespace}`, query.name && `name:${query.name}`, query.labelSelector && `labels:${query.labelSelector}`].filter(Boolean)
+  return parts.join(' / ') || 'all discovered resources'
+}
+
+/** Returns browser localStorage only when the local environment exposes it safely. */
+function browserSavedViewStorage(): Storage | null {
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
 }
 
 /** Renders the read-only local mutation ledger with bounded search and outcome filters. */

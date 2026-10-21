@@ -16,6 +16,7 @@ export interface CatalogGroup {
 export function parseResourceRoute(pathname: string, search: string): RouteState {
   const parts = pathname.split('/').filter(Boolean)
   if (parts[0] === 'history') return { path: '/history', view: 'history' }
+  if (parts[0] === 'search') return { path: '/search', view: 'search', search, namespace: new URLSearchParams(search).get('namespace') || undefined }
   if (parts[0] === 'catalog') return { path: '/catalog', view: 'catalog' }
   if (parts[0] !== 'resources' || !parts[1]) return { path: '/' }
   const namespace = new URLSearchParams(search).get('namespace') || undefined

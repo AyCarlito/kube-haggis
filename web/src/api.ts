@@ -16,6 +16,8 @@ import type {
   ResourceSchemaResponse,
   RelatedResourcesResponse,
   OperationalReadPackResponse,
+  SearchQuery,
+  SearchResponse,
   NodeActionRequest,
   NodeActionResponse,
   PVCActionRequest,
@@ -94,6 +96,23 @@ export function fetchOverview(context: string): Promise<ClusterOverview> {
 /** Loads the complete discovery-backed resource catalog for a kubeconfig context. */
 export function fetchResourceCatalog(context: string, refresh = false): Promise<ResourceCatalogResponse> {
   return fetchJson<ResourceCatalogResponse>(apiUrl('/api/discovery', { context, refresh: refresh ? 'true' : undefined }))
+}
+
+/** Runs one explicitly submitted bounded global search against the active catalog. */
+export function fetchGlobalSearch(context: string, query: SearchQuery, signal?: AbortSignal): Promise<SearchResponse> {
+  return fetchJson<SearchResponse>(
+    apiUrl('/api/search', {
+      context,
+      query: query.query,
+      group: query.group,
+      kind: query.kind,
+      resource: query.resource,
+      namespace: query.namespace,
+      name: query.name,
+      labelSelector: query.labelSelector,
+    }),
+    { signal },
+  )
 }
 
 /** Loads discovered API resource definitions for callers that only need catalog items. */
