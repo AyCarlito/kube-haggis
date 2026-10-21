@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -104,6 +105,23 @@ func parseResourceDocument(body []byte) map[string]interface{} {
 		return nil
 	}
 	return object
+}
+
+// sanitizedResourceBodyHash parses a resource document, removes server-owned metadata, and hashes its canonical JSON form.
+func sanitizedResourceBodyHash(body []byte) ([sha256.Size]byte, map[string]interface{}, error) {
+	var object map[string]interface{}
+	if err := yaml.Unmarshal(body, &object); err != nil {
+		return [sha256.Size]byte{}, nil, fmt.Errorf("resource mutation request is invalid")
+	}
+	if object == nil {
+		object = map[string]interface{}{}
+	}
+	unstructured.RemoveNestedField(object, "metadata", "managedFields")
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return [sha256.Size]byte{}, nil, fmt.Errorf("resource mutation request is invalid")
+	}
+	return sha256.Sum256(encoded), object, nil
 }
 
 // resourceObjectString reads one safe metadata string from a parsed generic resource document.
@@ -223,6 +241,96 @@ func (s *Server) deleteResource(ctx context.Context, contextName, group, version
 	return s.kube.DeleteResourceWithOptions(ctx, contextName, group, version, resource, namespace, name, namespaced, options)
 }
 
+// resourceApplyReviewBinding binds a generic full-object update to its effective coordinates and sanitized body hash.
+func resourceApplyReviewBinding(contextName, group, version, resource, namespace, name string, namespaced bool, object map[string]interface{}, bodyHash [sha256.Size]byte) reviewBinding {
+	return reviewBinding{
+		Context:                 strings.TrimSpace(contextName),
+		Group:                   strings.TrimSpace(group),
+		Version:                 strings.TrimSpace(version),
+		Resource:                strings.TrimSpace(resource),
+		Namespace:               reviewNamespace(namespace, namespaced, object),
+		Name:                    reviewName(name, object),
+		Namespaced:              namespaced,
+		ExpectedResourceVersion: resourceObjectString(object, "resourceVersion"),
+		Action:                  "apply",
+		ParametersHash: hashReviewParameters(struct {
+			Action string `json:"action"`
+		}{Action: "apply"}),
+		BodyHash:    bodyHash,
+		HasBodyHash: true,
+	}
+}
+
+// validateGenericApplyResourceVersion requires an expected version for an existing named generic update.
+func validateGenericApplyResourceVersion(name string, object map[string]interface{}) error {
+	if reviewName(name, object) != "" && resourceObjectString(object, "resourceVersion") == "" {
+		return fmt.Errorf("metadata.resourceVersion is required for named resource updates; refresh and review again")
+	}
+	return nil
+}
+
+// resourceDeleteReviewBinding binds one generic deletion to its resource version, force mode, and confirmation scope.
+func resourceDeleteReviewBinding(contextName, group, version, resource string, item kube.ResourceDeleteItem, namespaced, force bool) reviewBinding {
+	return reviewBinding{
+		Context:                 strings.TrimSpace(contextName),
+		Group:                   strings.TrimSpace(group),
+		Version:                 strings.TrimSpace(version),
+		Resource:                strings.TrimSpace(resource),
+		Namespace:               item.Namespace,
+		Name:                    item.Name,
+		Namespaced:              namespaced,
+		ExpectedResourceVersion: item.ResourceVersion,
+		Action:                  "delete",
+		ParametersHash: hashReviewParameters(struct {
+			Force bool `json:"force"`
+		}{Force: force}),
+		ConfirmationScope: item.Name,
+	}
+}
+
+// bulkDeleteReviewBinding binds the ordered selected resource-version set and exact destructive confirmation scope.
+func bulkDeleteReviewBinding(contextName, group, version, resource, namespace string, namespaced bool, items []kube.ResourceDeleteItem, force bool) reviewBinding {
+	scope := fmt.Sprintf("DELETE %d", len(items))
+	return reviewBinding{
+		Context:    strings.TrimSpace(contextName),
+		Group:      strings.TrimSpace(group),
+		Version:    strings.TrimSpace(version),
+		Resource:   strings.TrimSpace(resource),
+		Namespace:  strings.TrimSpace(namespace),
+		Namespaced: namespaced,
+		Action:     "bulk-delete",
+		ParametersHash: hashReviewParameters(struct {
+			Items             []kube.ResourceDeleteItem `json:"items"`
+			Force             bool                      `json:"force"`
+			ConfirmationScope string                    `json:"confirmationScope"`
+		}{Items: items, Force: force, ConfirmationScope: scope}),
+		ItemsHash:         hashReviewParameters(items),
+		HasItemsHash:      true,
+		ConfirmationScope: scope,
+	}
+}
+
+// reviewNamespace returns the effective namespace used by a namespaced resource mutation.
+func reviewNamespace(namespace string, namespaced bool, object map[string]interface{}) string {
+	if !namespaced {
+		return ""
+	}
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" || namespace == "all" {
+		return resourceObjectString(object, "namespace")
+	}
+	return namespace
+}
+
+// reviewName returns the effective request name, using document metadata for omitted or new requests.
+func reviewName(name string, object map[string]interface{}) string {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "new" {
+		return resourceObjectString(object, "name")
+	}
+	return name
+}
+
 // handleBulkResourceDelete reviews and executes bounded generic resource deletions.
 func (s *Server) handleBulkResourceDelete(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
@@ -263,6 +371,15 @@ func (s *Server) handleBulkResourceDelete(writer http.ResponseWriter, request *h
 			return
 		}
 	}
+	contextName := s.mutationReviewContext(request)
+	if !payload.DryRun {
+		binding := bulkDeleteReviewBinding(contextName, query.Get("group"), query.Get("version"), query.Get("resource"), query.Get("namespace"), namespaced, items, payload.Force)
+		if err := s.consumeMutationReview(request, binding); err != nil {
+			s.recordMutation(request, "bulk-delete", query.Get("group"), query.Get("version"), query.Get("resource"), query.Get("namespace"), "", false, false, "mutation review was rejected")
+			writeError(writer, err)
+			return
+		}
+	}
 
 	response := kube.BulkDeleteResponse{
 		Resource:  query.Get("resource"),
@@ -299,6 +416,12 @@ func (s *Server) handleBulkResourceDelete(writer http.ResponseWriter, request *h
 		response.Items = append(response.Items, result)
 	}
 	response.Status = bulkDeleteStatus(response)
+	if payload.DryRun && response.Status == "dry-run passed" {
+		binding := bulkDeleteReviewBinding(contextName, query.Get("group"), query.Get("version"), query.Get("resource"), query.Get("namespace"), namespaced, items, payload.Force)
+		if !s.writeMutationReviewHeader(writer, binding) {
+			return
+		}
+	}
 	writeJSON(writer, http.StatusOK, response)
 }
 

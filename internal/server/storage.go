@@ -16,6 +16,29 @@ type pvcOperationsLoader func(context.Context, string, string, string) (kube.PVC
 // pvcActionLoader describes the native PVC mutation seam used by the HTTP handler.
 type pvcActionLoader func(context.Context, string, string, string, kube.PVCActionRequest) (kube.PVCActionResult, error)
 
+// pvcActionReviewBinding binds a normalized PVC operation to its exact resource version and action parameters.
+func pvcActionReviewBinding(contextName, namespace, name string, request kube.PVCActionRequest) reviewBinding {
+	request.Action = strings.ToLower(strings.TrimSpace(request.Action))
+	request.ExpectedResourceVersion = strings.TrimSpace(request.ExpectedResourceVersion)
+	request.Storage = strings.TrimSpace(request.Storage)
+	request.SnapshotName = strings.TrimSpace(request.SnapshotName)
+	request.SnapshotClassName = strings.TrimSpace(request.SnapshotClassName)
+	request.DryRun = false
+	request.Confirmed = false
+	return reviewBinding{
+		Context:                 strings.TrimSpace(contextName),
+		Version:                 "v1",
+		Resource:                "persistentvolumeclaims",
+		Namespace:               strings.TrimSpace(namespace),
+		Name:                    strings.TrimSpace(name),
+		Namespaced:              true,
+		ExpectedResourceVersion: request.ExpectedResourceVersion,
+		Action:                  "pvc-action",
+		ParametersHash:          hashReviewParameters(request),
+		ConfirmationScope:       request.Action,
+	}
+}
+
 // handlePVCOperations returns resize and VolumeSnapshot capability states for one PVC.
 func (s *Server) handlePVCOperations(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
@@ -62,6 +85,15 @@ func (s *Server) handlePVCAction(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	query := request.URL.Query()
+	contextName := s.mutationReviewContext(request)
+	binding := pvcActionReviewBinding(contextName, query.Get("namespace"), query.Get("name"), payload)
+	if !payload.DryRun {
+		if err := s.consumeMutationReview(request, binding); err != nil {
+			s.recordMutation(request, pvcAuditOperation(payload.Action), "", "v1", "persistentvolumeclaims", query.Get("namespace"), query.Get("name"), false, false, "mutation review was rejected")
+			writeError(writer, err)
+			return
+		}
+	}
 	loadAction := s.pvcAction
 	if loadAction == nil {
 		if s.kube == nil {
@@ -75,6 +107,9 @@ func (s *Server) handlePVCAction(writer http.ResponseWriter, request *http.Reque
 	if err != nil {
 		s.recordMutation(request, operation, "", "v1", "persistentvolumeclaims", query.Get("namespace"), query.Get("name"), payload.DryRun, false, pvcAuditDetail(err))
 		writeError(writer, err)
+		return
+	}
+	if payload.DryRun && result.Status == "dry-run passed" && !s.writeMutationReviewHeader(writer, binding) {
 		return
 	}
 	detail := "PVC operation applied"

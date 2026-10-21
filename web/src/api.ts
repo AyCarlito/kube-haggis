@@ -41,6 +41,12 @@ export class ApiError extends Error {
   }
 }
 
+/** Wraps a mutation response with the opaque server-bound review handle returned by a dry-run. */
+export interface MutationResponse<T> {
+  value: T
+  reviewToken?: string
+}
+
 /** Describes the bounded server-side query controls for one resource page. */
 export interface ResourceListQuery {
   limit?: number
@@ -64,6 +70,17 @@ export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> 
   const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string' ? payload.error : `Request failed with ${response.status}`
   if (!response.ok) throw new ApiError(message, response.status, payload)
   return payload as T
+}
+
+/** Fetches JSON while returning the dedicated review header without exposing it in the response body. */
+export async function fetchJsonWithReview<T>(url: string, init: RequestInit | undefined, reviewToken?: string): Promise<MutationResponse<T>> {
+  const headers = new Headers(init?.headers)
+  if (reviewToken) headers.set('X-KubeHaggis-Review', reviewToken)
+  const response = await fetch(url, { ...init, headers })
+  const payload = (await response.json().catch(() => ({}))) as unknown
+  const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string' ? payload.error : `Request failed with ${response.status}`
+  if (!response.ok) throw new ApiError(message, response.status, payload)
+  return { value: payload as T, reviewToken: response.headers.get('X-KubeHaggis-Review') || undefined }
 }
 
 /** Extracts a dedicated resource-version conflict response without exposing arbitrary backend text. */
@@ -248,8 +265,9 @@ export function applyResource(
   name: string,
   body: string,
   dryRun: boolean,
-): Promise<ResourceObject> {
-  return fetchJson<ResourceObject>(
+  reviewToken?: string,
+): Promise<MutationResponse<ResourceObject>> {
+  return fetchJsonWithReview<ResourceObject>(
     apiUrl('/api/resource', {
       context,
       group: definition.group,
@@ -265,6 +283,7 @@ export function applyResource(
       headers: { 'Content-Type': 'application/apply-patch+yaml', 'X-KubeHaggis-Write': 'enabled' },
       body,
     },
+    reviewToken,
   )
 }
 
@@ -278,8 +297,9 @@ export function deleteResource(
   dryRun: boolean,
   confirmed: boolean,
   confirmName: string,
-): Promise<ResourceDeleteResponse> {
-  return fetchJson<ResourceDeleteResponse>(
+  reviewToken?: string,
+): Promise<MutationResponse<ResourceDeleteResponse>> {
+  return fetchJsonWithReview<ResourceDeleteResponse>(
     apiUrl('/api/resource', {
       context,
       group: definition.group,
@@ -297,6 +317,7 @@ export function deleteResource(
       method: 'DELETE',
       headers: { 'X-KubeHaggis-Write': 'enabled' },
     },
+    reviewToken,
   )
 }
 
@@ -309,8 +330,9 @@ export function deleteResources(
   dryRun: boolean,
   confirmed: boolean,
   confirmation: string,
-): Promise<BulkDeleteResponse> {
-  return fetchJson<BulkDeleteResponse>(
+  reviewToken?: string,
+): Promise<MutationResponse<BulkDeleteResponse>> {
+  return fetchJsonWithReview<BulkDeleteResponse>(
     apiUrl('/api/resources/delete', {
       context,
       group: definition.group,
@@ -324,6 +346,7 @@ export function deleteResources(
       headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
       body: JSON.stringify({ items, dryRun, confirmed, confirmation }),
     },
+    reviewToken,
   )
 }
 
@@ -334,8 +357,9 @@ export function applyWorkloadAction(
   namespace: string,
   name: string,
   request: WorkloadActionRequest,
-): Promise<WorkloadActionResponse> {
-  return fetchJson<WorkloadActionResponse>(
+  reviewToken?: string,
+): Promise<MutationResponse<WorkloadActionResponse>> {
+  return fetchJsonWithReview<WorkloadActionResponse>(
     apiUrl('/api/workload/action', {
       context,
       group: definition.group,
@@ -349,6 +373,7 @@ export function applyWorkloadAction(
       headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
       body: JSON.stringify(request),
     },
+    reviewToken,
   )
 }
 
@@ -358,26 +383,28 @@ export function fetchPVCOperations(context: string, namespace: string, name: str
 }
 
 /** Runs one reviewed native PVC resize or VolumeSnapshot operation. */
-export function applyPVCAction(context: string, namespace: string, name: string, request: PVCActionRequest): Promise<PVCActionResponse> {
-  return fetchJson<PVCActionResponse>(
+export function applyPVCAction(context: string, namespace: string, name: string, request: PVCActionRequest, reviewToken?: string): Promise<MutationResponse<PVCActionResponse>> {
+  return fetchJsonWithReview<PVCActionResponse>(
     apiUrl('/api/pvc/action', { context, namespace, name }),
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
       body: JSON.stringify(request),
     },
+    reviewToken,
   )
 }
 
 /** Runs one targeted native Node operation through the typed backend action path. */
-export function applyNodeAction(context: string, name: string, request: NodeActionRequest): Promise<NodeActionResponse> {
-  return fetchJson<NodeActionResponse>(
+export function applyNodeAction(context: string, name: string, request: NodeActionRequest, reviewToken?: string): Promise<MutationResponse<NodeActionResponse>> {
+  return fetchJsonWithReview<NodeActionResponse>(
     apiUrl('/api/node/action', { context, name }),
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
       body: JSON.stringify(request),
     },
+    reviewToken,
   )
 }
 

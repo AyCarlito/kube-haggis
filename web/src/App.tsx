@@ -1501,6 +1501,7 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
   const [refreshNonce, setRefreshNonce] = useState(0)
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
   const [bulkReview, setBulkReview] = useState<BulkDeleteResponse | null>(null)
+  const [bulkReviewToken, setBulkReviewToken] = useState<string | undefined>()
   const [bulkReviewSelection, setBulkReviewSelection] = useState<string[]>([])
   const [bulkResults, setBulkResults] = useState<BulkDeleteResponse | null>(null)
   const [bulkConfirmed, setBulkConfirmed] = useState(false)
@@ -1518,6 +1519,7 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
     setError('')
     setSelectedKeys([])
     setBulkReview(null)
+    setBulkReviewToken(undefined)
     setBulkReviewSelection([])
     setBulkConfirmed(false)
     setBulkConfirmation('')
@@ -1526,15 +1528,30 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
   }, [listQueryKey, revision, reloadEpoch])
 
   useEffect(() => {
+    if (!writeEnabled) {
+      setBulkReview(null)
+      setBulkReviewToken(undefined)
+      setBulkReviewSelection([])
+      setBulkConfirmed(false)
+      setBulkConfirmation('')
+    }
+  }, [writeEnabled])
+
+  useEffect(() => {
     setWatchSnapshot(initialWatchSnapshot())
     setError('')
     const controller = new ReliableWatchController<ResourceListResponse>({
       load: (signal) => fetchResources(context, definition, namespace, labelSelector, { limit: pageSize, continueToken }, signal),
       getResourceVersion: (data) => data.resourceVersion,
       watchUrl: (resourceVersion) => watchUrl(context, definition, namespace, resourceVersion),
-      onData: (data) => {
-        setResponse(data)
-        setSelectedKeys((current) => current.filter((key) => data.items.some((item) => resourceItemKey(item) === key)))
+       onData: (data) => {
+         setResponse(data)
+         setBulkReview(null)
+         setBulkReviewToken(undefined)
+         setBulkReviewSelection([])
+         setBulkConfirmed(false)
+         setBulkConfirmation('')
+         setSelectedKeys((current) => current.filter((key) => data.items.some((item) => resourceItemKey(item) === key)))
         setPagination((current) => {
           if (current.queryKey !== listQueryKey || current.pageIndex !== pageIndex) return current
           const tokens = current.tokens.slice(0, pageIndex + 1)
@@ -1642,6 +1659,7 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
   /** Clears a bulk review and any stale result when the selection changes. */
   function clearBulkReview() {
     setBulkReview(null)
+    setBulkReviewToken(undefined)
     setBulkReviewSelection([])
     setBulkConfirmed(false)
     setBulkConfirmation('')
@@ -1695,12 +1713,19 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
     setBulkError('')
     setBulkResults(null)
     try {
-      const result = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), true, false, '')
-      setBulkReview(result)
+      const response = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), true, false, '')
+      if (!response.reviewToken) {
+        setBulkError('The server did not return a mutation review handle. Review the delete again.')
+        return
+      }
+      setBulkReview(response.value)
+      setBulkReviewToken(response.reviewToken)
       setBulkReviewSelection(selected.map(resourceDeleteReviewKey).sort())
       setBulkConfirmed(false)
       setBulkConfirmation('')
     } catch (reviewError) {
+      setBulkReview(null)
+      setBulkReviewToken(undefined)
       setBulkError((reviewError as Error).message)
     } finally {
       setBulkBusy('')
@@ -1713,13 +1738,14 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
       setBulkError('Enable write mode before applying a bulk delete.')
       return
     }
-    if (!bulkReview || bulkReview.status !== 'dry-run passed') {
+    if (!bulkReview || bulkReview.status !== 'dry-run passed' || !bulkReviewToken) {
       setBulkError('Resolve every dry-run error before applying this bulk delete.')
       return
     }
     const currentSelection = selected.map(resourceDeleteReviewKey).sort()
     if (currentSelection.length !== bulkReviewSelection.length || currentSelection.some((key, index) => key !== bulkReviewSelection[index])) {
       setBulkReview(null)
+      setBulkReviewToken(undefined)
       setBulkReviewSelection([])
       setBulkConfirmed(false)
       setBulkConfirmation('')
@@ -1734,15 +1760,20 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
     setBulkBusy('apply')
     setBulkError('')
     try {
-      const result = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), false, true, bulkConfirmation.trim())
-      setBulkResults(result)
+      const response = await deleteResources(context, definition, namespace, selected.map(resourceDeleteItem), false, true, bulkConfirmation.trim(), bulkReviewToken)
+      setBulkResults(response.value)
       setBulkReview(null)
+      setBulkReviewToken(undefined)
       setBulkReviewSelection([])
       setBulkConfirmed(false)
       setBulkConfirmation('')
-      setSelectedKeys((current) => current.filter((key) => !result.items.some((item) => item.success && resourceItemKey(item) === key)))
+      setSelectedKeys((current) => current.filter((key) => !response.value.items.some((item) => item.success && resourceItemKey(item) === key)))
       setRefreshNonce((value) => value + 1)
     } catch (applyError) {
+      setBulkReview(null)
+      setBulkReviewToken(undefined)
+      setBulkConfirmed(false)
+      setBulkConfirmation('')
       setBulkError((applyError as Error).message)
     } finally {
       setBulkBusy('')
@@ -1920,6 +1951,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [reviewReady, setReviewReady] = useState(false)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [conflict, setConflict] = useState<ResourceConflictResponse | null>(null)
   const [conflictReviewed, setConflictReviewed] = useState(false)
   const [draftKept, setDraftKept] = useState(false)
@@ -1934,6 +1966,8 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
     setConflict(null)
     setConflictReviewed(false)
     setDraftKept(false)
+    setReviewReady(false)
+    setReviewToken(undefined)
     setTab(isNew && schemaCandidate ? 'form' : 'overview')
     if (isNew) {
       const initial: ResourceObject = {
@@ -1964,6 +1998,11 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       active = false
     }
   }, [context, definition.group, definition.version, definition.resource, definition.kind, definition.namespaced, namespace, name, isNew, isSecret])
+
+  useEffect(() => {
+    setReviewReady(false)
+    setReviewToken(undefined)
+  }, [context, writeEnabled, reloadEpoch])
 
   useEffect(() => {
     if (!schemaCandidate) {
@@ -2009,11 +2048,20 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
          setTab('yaml')
          return
        }
-       await applyResource(context, definition, namespace, name, yamlText, true)
+       setReviewReady(false)
+       setReviewToken(undefined)
+       const response = await applyResource(context, definition, namespace, name, yamlText, true)
+       if (!response.reviewToken) {
+         setError('The server did not return a mutation review handle. Review the changes again.')
+         return
+       }
        setReviewReady(true)
+       setReviewToken(response.reviewToken)
        setError('')
-     } catch (reviewError) {
-       if (!showResourceConflict(reviewError)) setError((reviewError as Error).message)
+      } catch (reviewError) {
+        setReviewReady(false)
+        setReviewToken(undefined)
+        if (!showResourceConflict(reviewError)) setError((reviewError as Error).message)
      } finally {
       setSaving(false)
     }
@@ -2021,9 +2069,15 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
 
   /** Applies a previously reviewed resource document to Kubernetes. */
   async function saveChanges() {
+    if (!reviewToken) {
+      setReviewReady(false)
+      setError('Run the server-side dry-run before applying these changes.')
+      return
+    }
     setSaving(true)
     try {
-       const applied = await applyResource(context, definition, namespace, name, yamlText, false)
+       const response = await applyResource(context, definition, namespace, name, yamlText, false, reviewToken)
+       const applied = response.value
       const appliedName = isNew ? metadataString(applied, 'name') : name
       const appliedNamespace = definition.namespaced && namespace === 'all' ? metadataString(applied, 'namespace') : namespace
       let refreshed = applied
@@ -2038,13 +2092,16 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       const safeRefreshed = sanitizeEditorObject(refreshed)
       const text = stringify(isSecret ? redactSecret(safeRefreshed) : safeRefreshed)
       setObject(refreshed)
-      setYamlText(text)
-      setOriginalYaml(text)
-      setReviewReady(false)
-      setError(refreshError)
-      setTab('overview')
-     } catch (saveError) {
-       if (!showResourceConflict(saveError)) setError((saveError as Error).message)
+       setYamlText(text)
+       setOriginalYaml(text)
+       setReviewReady(false)
+       setReviewToken(undefined)
+       setError(refreshError)
+       setTab('overview')
+      } catch (saveError) {
+        setReviewReady(false)
+        setReviewToken(undefined)
+        if (!showResourceConflict(saveError)) setError((saveError as Error).message)
      } finally {
        setSaving(false)
      }
@@ -2055,9 +2112,10 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
      const nextConflict = resourceConflictFromError(candidate)
      if (!nextConflict) return false
      setConflict(nextConflict)
-     setConflictReviewed(false)
-     setDraftKept(false)
-     setReviewReady(false)
+      setConflictReviewed(false)
+      setDraftKept(false)
+      setReviewReady(false)
+      setReviewToken(undefined)
      setTab('yaml')
      setError('')
      return true
@@ -2076,12 +2134,13 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
      const text = stringify(isSecret ? redactSecret(refreshed) : refreshed)
      setObject(conflict.currentObject)
      setYamlText(text)
-     setOriginalYaml(text)
-     setReviewReady(false)
+      setOriginalYaml(text)
+      setReviewReady(false)
+      setReviewToken(undefined)
      setConflict(null)
      setConflictReviewed(false)
-     setDraftKept(false)
-     if (isSecret) setSecretsRevealed(false)
+      setDraftKept(false)
+      if (isSecret) setSecretsRevealed(false)
      setError('Current cluster YAML loaded. Review any new edits before applying.')
    }
 
@@ -2108,23 +2167,28 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
      const metadata = nextObject.metadata && typeof nextObject.metadata === 'object' && !Array.isArray(nextObject.metadata) ? nextObject.metadata as Record<string, unknown> : {}
      metadata.resourceVersion = conflict.currentResourceVersion
      nextObject.metadata = metadata
-     setObject(nextObject)
-     setYamlText(stringify(nextObject))
-     setReviewReady(false)
-     setConflict(null)
+      setObject(nextObject)
+      setYamlText(stringify(nextObject))
+      setReviewReady(false)
+      setReviewToken(undefined)
+      setConflict(null)
      setConflictReviewed(false)
      setDraftKept(false)
      setError('Current resource version carried into the draft. Review changes again before applying.')
    }
 
-  /** Refreshes the complete Pod after an operational subresource changes it. */
-  async function refreshObject() {
-    const refreshed = await fetchResource(context, definition, namespace, name)
+   /** Refreshes the complete Pod after an operational subresource changes it. */
+   async function refreshObject() {
+     setReviewReady(false)
+     setReviewToken(undefined)
+     const refreshed = await fetchResource(context, definition, namespace, name)
     const editorObject = sanitizeEditorObject(refreshed)
     const text = stringify(isSecret ? redactSecret(editorObject) : editorObject)
     setObject(refreshed)
     setYamlText(text)
     setOriginalYaml(text)
+    setReviewReady(false)
+    setReviewToken(undefined)
     setError('')
   }
 
@@ -2134,6 +2198,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
     setObject(safeObject)
     setYamlText(stringify(safeObject))
     setReviewReady(false)
+    setReviewToken(undefined)
     setError('')
   }
 
@@ -2162,11 +2227,11 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
         {conflict && <ConflictResolutionPanel conflict={conflict} currentYaml={conflictCurrentYaml} isSecret={isSecret} draftKept={draftKept} reviewed={conflictReviewed} onReviewed={setConflictReviewed} onKeepDraft={keepConflictDraft} onReload={reloadConflictObject} onExport={exportConflictDraft} onPrepareRetry={prepareConflictRetry} />}
          {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div><div className="panel detail-panel"><PanelHeading eyebrow="Fields" title="Top-level shape" action={`${Object.keys(object).length} sections`} tone="neutral" /><div className="field-cloud">{Object.keys(object).map((key) => <span key={key}><span />{key}</span>)}</div></div></div>}
           {tab === 'read-pack' && isOperationalReadPackResource(definition) && <OperationalReadPackView context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} revision={revision} reloadEpoch={reloadEpoch} />}
-          {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
-         {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
-         {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+          {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
+          {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
+          {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
-      {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false); const parsed = parseResourceObject(event.target.value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
+       {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); setReviewReady(false); setReviewToken(undefined); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); setReviewReady(false); setReviewToken(undefined); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(event.target.value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
       {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
@@ -2649,10 +2714,19 @@ function parseResourceObject(value: string): ResourceObject | null {
 /** Renders a version-aware dry-run and exact-name confirmation flow for one delete. */
 function DeleteReviewPanel({ context, namespace, definition, name, resourceVersion, writeEnabled, onDeleted }: { context: string; namespace: string; definition: ResourceDefinition; name: string; resourceVersion: string; writeEnabled: boolean; onDeleted: () => void }) {
   const [review, setReview] = useState<ResourceDeleteResponse | null>(null)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
   const [confirmationText, setConfirmationText] = useState('')
   const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    setReview(null)
+    setReviewToken(undefined)
+    setConfirmed(false)
+    setConfirmationText('')
+    if (!writeEnabled) setError('')
+  }, [context, namespace, definition.group, definition.version, definition.resource, name, resourceVersion, writeEnabled])
 
   /** Runs the server-side Kubernetes dry-run before exposing final delete controls. */
   async function reviewDelete() {
@@ -2667,11 +2741,20 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
     setBusy('review')
     setError('')
     try {
-      const result = await deleteResource(context, definition, namespace, name, resourceVersion, true, false, '')
-      setReview(result)
+      const response = await deleteResource(context, definition, namespace, name, resourceVersion, true, false, '')
+      if (!response.reviewToken) {
+        setReview(null)
+        setReviewToken(undefined)
+        setError('The server did not return a mutation review handle. Review the delete again.')
+        return
+      }
+      setReview(response.value)
+      setReviewToken(response.reviewToken)
       setConfirmed(false)
       setConfirmationText('')
     } catch (reviewError) {
+      setReview(null)
+      setReviewToken(undefined)
       setError((reviewError as Error).message)
     } finally {
       setBusy('')
@@ -2684,7 +2767,7 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
       setError('Enable write mode before applying a delete.')
       return
     }
-    if (!review || review.status !== 'dry-run passed') {
+    if (!review || review.status !== 'dry-run passed' || !reviewToken) {
       setError('Run the server-side dry-run before applying this delete.')
       return
     }
@@ -2695,9 +2778,15 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
     setBusy('apply')
     setError('')
     try {
-      await deleteResource(context, definition, namespace, name, resourceVersion, false, true, confirmationText.trim())
+      await deleteResource(context, definition, namespace, name, resourceVersion, false, true, confirmationText.trim(), reviewToken)
+      setReview(null)
+      setReviewToken(undefined)
       onDeleted()
     } catch (applyError) {
+      setReview(null)
+      setReviewToken(undefined)
+      setConfirmed(false)
+      setConfirmationText('')
       setError((applyError as Error).message)
     } finally {
       setBusy('')
@@ -2711,8 +2800,8 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
     <div className="delete-review-intro"><strong>{definition.kind} / {namespace || 'cluster scope'} / {name}</strong><span>Deletion is permanent. KubeHaggis requires this exact resource version to pass a Kubernetes server-side dry-run before the final request.</span></div>
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to review and delete. Kubernetes RBAC still authorizes the final request.</div>}
     {!review && <div className="delete-review-start"><span>No cluster state changes during review. The final delete is a separate, confirmed request.</span><button type="button" className="danger-button primary-button" disabled={!writeEnabled || Boolean(busy)} onClick={() => void reviewDelete()}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing delete' : 'Review delete'}</button></div>}
-    {review && <div className={`delete-review ${ready ? '' : 'delete-review-blocked'}`}><div className="delete-review-heading"><span className={ready ? 'review-ready' : 'node-review-blocked-chip'}>{ready ? <><Check size={13} /> Dry-run passed</> : <><AlertTriangle size={13} /> Review blocked</>}</span><strong>{ready ? 'Delete is ready for final confirmation' : 'Delete cannot proceed'}</strong></div><p>{ready ? 'Kubernetes accepted this exact resource-versioned delete during server-side dry-run. No cluster state has changed.' : 'No deletion was submitted. Refresh the resource and resolve the review failure before retrying.'}</p>{ready && <><label className="destructive-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed this exact resource and understand Kubernetes will permanently delete it. Related resources may be affected by owner references or finalizers.</span></label><label className="destructive-confirm-input"><span>Type the exact resource name to authorize deletion: <strong>{name}</strong></span><input value={confirmationText} onChange={(event) => setConfirmationText(event.target.value)} disabled={busy === 'apply'} autoComplete="off" spellCheck={false} /></label></>}
-      <div className="delete-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setConfirmed(false); setConfirmationText(''); setError('') }} disabled={Boolean(busy)}>Change review</button><button type="button" className="danger-button primary-button" onClick={() => void applyReviewedDelete()} disabled={!canApply}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />} {busy === 'apply' ? 'Deleting' : 'Confirm and delete'}</button></div></div>}
+     {review && <div className={`delete-review ${ready ? '' : 'delete-review-blocked'}`}><div className="delete-review-heading"><span className={ready ? 'review-ready' : 'node-review-blocked-chip'}>{ready ? <><Check size={13} /> Dry-run passed</> : <><AlertTriangle size={13} /> Review blocked</>}</span><strong>{ready ? 'Delete is ready for final confirmation' : 'Delete cannot proceed'}</strong></div><p>{ready ? 'Kubernetes accepted this exact resource-versioned delete during server-side dry-run. No cluster state has changed.' : 'No deletion was submitted. Refresh the resource and resolve the review failure before retrying.'}</p>{ready && <><label className="destructive-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed this exact resource and understand Kubernetes will permanently delete it. Related resources may be affected by owner references or finalizers.</span></label><label className="destructive-confirm-input"><span>Type the exact resource name to authorize deletion: <strong>{name}</strong></span><input value={confirmationText} onChange={(event) => setConfirmationText(event.target.value)} disabled={busy === 'apply'} autoComplete="off" spellCheck={false} /></label></>}
+       <div className="delete-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setReviewToken(undefined); setConfirmed(false); setConfirmationText(''); setError('') }} disabled={Boolean(busy)}>Change review</button><button type="button" className="danger-button primary-button" onClick={() => void applyReviewedDelete()} disabled={!canApply}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />} {busy === 'apply' ? 'Deleting' : 'Confirm and delete'}</button></div></div>}
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
   </div>
 }
@@ -2850,7 +2939,7 @@ type WorkloadActionOption = {
 }
 
 /** Renders a two-step dry-run and confirmation form for built-in workloads. */
-function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, onRefresh }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
   const options = workloadActionOptions(definition.resource)
   const [action, setAction] = useState<WorkloadAction>(options[0]?.action || 'restart')
   const [replicas, setReplicas] = useState(workloadReplicaCount(object))
@@ -2859,6 +2948,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
   const [revision, setRevision] = useState('')
   const [schedule, setSchedule] = useState(workloadSchedule(object))
   const [review, setReview] = useState<WorkloadActionResponse | null>(null)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
   const [error, setError] = useState('')
@@ -2879,12 +2969,20 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     setReplicas(workloadReplicaCount(object))
     setSchedule(workloadSchedule(object))
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
   }, [object])
+
+  useEffect(() => {
+    setReview(null)
+    setReviewToken(undefined)
+    setConfirmed(false)
+  }, [context, writeEnabled, reloadEpoch])
 
   /** Clears a review so the operator can change the requested action. */
   function editAction() {
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setError('')
   }
@@ -2893,6 +2991,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
   function changeAction(value: WorkloadAction) {
     setAction(value)
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setError('')
     setSuccess('')
@@ -2951,10 +3050,19 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     setError('')
     setSuccess('')
     try {
-      const result = await applyWorkloadAction(context, definition, namespace, name, request)
-      setReview(result)
+       const response = await applyWorkloadAction(context, definition, namespace, name, request)
+       if (!response.reviewToken) {
+         setReview(null)
+         setReviewToken(undefined)
+         setError('The server did not return a mutation review handle. Review the action again.')
+         return
+       }
+       setReview(response.value)
+       setReviewToken(response.reviewToken)
       setConfirmed(false)
     } catch (reviewError) {
+      setReview(null)
+      setReviewToken(undefined)
       setError((reviewError as Error).message)
     } finally {
       setBusy('')
@@ -2967,7 +3075,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
       setError('Enable write mode before applying a workload action.')
       return
     }
-    if (!review) {
+    if (!review || !reviewToken) {
       setError('Run the server-side dry-run before applying this action.')
       return
     }
@@ -2981,10 +3089,12 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     setError('')
     setSuccess('')
     try {
-      const result = await applyWorkloadAction(context, definition, namespace, name, request)
+       const response = await applyWorkloadAction(context, definition, namespace, name, request, reviewToken)
+       const result = response.value
       const created = result.createdName ? ` / created ${result.createdName}` : ''
       setSuccess(`${workloadActionLabel(action)} applied${created}.`)
-      setReview(null)
+       setReview(null)
+       setReviewToken(undefined)
       setConfirmed(false)
       try {
         await onRefresh()
@@ -2992,6 +3102,9 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
         setError(`Action applied, but the workload refresh failed: ${(refreshError as Error).message}`)
       }
     } catch (applyError) {
+      setReview(null)
+      setReviewToken(undefined)
+      setConfirmed(false)
       setError((applyError as Error).message)
     } finally {
       setBusy('')
@@ -3019,13 +3132,14 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
 }
 
 /** Renders a two-step PVC resize and VolumeSnapshot workflow with capability states. */
-function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, onRefresh }: { context: string; namespace: string; name: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
   const [info, setInfo] = useState<PVCOperationInfo | null>(null)
   const [action, setAction] = useState<PVCAction>('resize')
   const [storage, setStorage] = useState(pvcRequestedStorage(object))
   const [snapshotName, setSnapshotName] = useState('')
   const [snapshotClassName, setSnapshotClassName] = useState('')
   const [review, setReview] = useState<PVCActionResponse | null>(null)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
   const [loading, setLoading] = useState(true)
@@ -3038,6 +3152,7 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
     setError('')
     setInfo(null)
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setStorage(pvcRequestedStorage(object))
     setSnapshotName('')
@@ -3054,10 +3169,17 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
     }
   }, [context, namespace, name, object])
 
+  useEffect(() => {
+    setReview(null)
+    setReviewToken(undefined)
+    setConfirmed(false)
+  }, [context, writeEnabled, reloadEpoch])
+
   /** Clears an older review when the operator changes the native PVC operation. */
   function changeAction(value: PVCAction) {
     setAction(value)
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setError('')
     setSuccess('')
@@ -3112,10 +3234,19 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
     setError('')
     setSuccess('')
     try {
-      const result = await applyPVCAction(context, namespace, name, request)
-      setReview(result)
+       const response = await applyPVCAction(context, namespace, name, request)
+       if (!response.reviewToken) {
+         setReview(null)
+         setReviewToken(undefined)
+         setError('The server did not return a mutation review handle. Review the operation again.')
+         return
+       }
+       setReview(response.value)
+       setReviewToken(response.reviewToken)
       setConfirmed(false)
     } catch (reviewError) {
+      setReview(null)
+      setReviewToken(undefined)
       setError((reviewError as Error).message)
     } finally {
       setBusy('')
@@ -3128,7 +3259,7 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
       setError('Enable write mode before applying a PVC operation.')
       return
     }
-    if (!review) {
+    if (!review || !reviewToken) {
       setError('Run the server-side dry-run before applying this PVC operation.')
       return
     }
@@ -3142,9 +3273,11 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
     setError('')
     setSuccess('')
     try {
-      const result = await applyPVCAction(context, namespace, name, request)
+       const response = await applyPVCAction(context, namespace, name, request, reviewToken)
+       const result = response.value
       setSuccess(action === 'resize' ? 'PVC resize applied. Kubernetes will complete expansion asynchronously.' : `VolumeSnapshot ${result.snapshotName || snapshotName.trim()} creation requested.`)
-      setReview(null)
+       setReview(null)
+       setReviewToken(undefined)
       setConfirmed(false)
       try {
         await onRefresh()
@@ -3152,6 +3285,9 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
         setError(`PVC operation applied, but the PVC refresh failed: ${(refreshError as Error).message}`)
       }
     } catch (applyError) {
+      setReview(null)
+      setReviewToken(undefined)
+      setConfirmed(false)
       setError((applyError as Error).message)
     } finally {
       setBusy('')
@@ -3178,7 +3314,7 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, on
       {action === 'snapshot' && <div className="pvc-operation-grid"><label className="pvc-operation-field"><span>Snapshot name</span><input value={snapshotName} onChange={(event) => setSnapshotName(event.target.value)} disabled={disabled} placeholder="data-copy" required /></label><label className="pvc-operation-field"><span>VolumeSnapshotClass</span><select value={snapshotClassName} onChange={(event) => setSnapshotClassName(event.target.value)} disabled={disabled}><option value="">Choose a class</option>{snapshotClasses.map((item) => <option key={item.name} value={item.name}>{item.name}{item.driver ? ` / ${item.driver}` : ''}</option>)}</select></label></div>}
       <div className="pvc-operation-actions"><span>{selectedAvailable ? 'Review first; no cluster state changes during dry-run.' : 'The selected native capability must be available before review.'}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review) || loading || !selectedAvailable}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review operation'}</button></div>
     </form>
-    {review && <div className="pvc-review"><div className="pvc-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{action === 'resize' ? 'Resize is ready' : 'Snapshot is ready'}</strong></div><p>Kubernetes accepted this exact resource-versioned request during server-side dry-run. No cluster state has changed; the final request is separate and must be explicitly authorized.</p><label className="pvc-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the exact dry-run and explicitly authorize this {action === 'resize' ? 'PVC resize' : 'VolumeSnapshot creation'}.</span></label><div className="pvc-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setConfirmed(false); setError('') }} disabled={Boolean(busy)}>Change operation</button><button type="button" className="primary-button" onClick={() => void applyReviewedPVCAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
+     {review && <div className="pvc-review"><div className="pvc-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{action === 'resize' ? 'Resize is ready' : 'Snapshot is ready'}</strong></div><p>Kubernetes accepted this exact resource-versioned request during server-side dry-run. No cluster state has changed; the final request is separate and must be explicitly authorized.</p><label className="pvc-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the exact dry-run and explicitly authorize this {action === 'resize' ? 'PVC resize' : 'VolumeSnapshot creation'}.</span></label><div className="pvc-review-actions"><button type="button" className="secondary-button" onClick={() => { setReview(null); setReviewToken(undefined); setConfirmed(false); setError('') }} disabled={Boolean(busy)}>Change operation</button><button type="button" className="primary-button" onClick={() => void applyReviewedPVCAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
     {success && <div className="operation-success"><Check size={15} />{success}</div>}
     <div className="pvc-operation-footer"><span><ShieldCheck size={14} /> Full-object PVC update / native snapshot create</span><span>RBAC, conflicts, unsupported APIs, and absent snapshot CRDs stay visible.</span></div>
@@ -3193,7 +3329,7 @@ type NodeActionOption = {
 }
 
 /** Renders a two-step Node operation form with drain impact review and strong confirmation. */
-function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }: { context: string; name: string; object: ResourceObject; writeEnabled: boolean; onRefresh: () => Promise<void> }) {
+function NodeOperationsPanel({ context, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
   const options = nodeActionOptions()
   const taints = nodeTaints(object)
   const [action, setAction] = useState<NodeAction>('cordon')
@@ -3205,6 +3341,7 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
   const [ignoreDaemonSets, setIgnoreDaemonSets] = useState(false)
   const [gracePeriod, setGracePeriod] = useState('')
   const [review, setReview] = useState<NodeActionResponse | null>(null)
+  const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
   const [confirmationText, setConfirmationText] = useState('')
   const [busy, setBusy] = useState<'review' | 'apply' | ''>('')
@@ -3217,13 +3354,22 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
   useEffect(() => {
     setTaintIndex((current) => Math.min(current, Math.max(taints.length - 1, 0)))
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setConfirmationText('')
   }, [object])
 
+  useEffect(() => {
+    setReview(null)
+    setReviewToken(undefined)
+    setConfirmed(false)
+    setConfirmationText('')
+  }, [context, writeEnabled, reloadEpoch])
+
   /** Clears a review so the operator can change the Node operation. */
   function editNodeAction() {
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setConfirmationText('')
     setError('')
@@ -3233,6 +3379,7 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
   function changeNodeAction(value: NodeAction) {
     setAction(value)
     setReview(null)
+    setReviewToken(undefined)
     setConfirmed(false)
     setConfirmationText('')
     setError('')
@@ -3297,11 +3444,20 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
     setError('')
     setSuccess('')
     try {
-      const result = await applyNodeAction(context, name, request)
-      setReview(result)
+       const response = await applyNodeAction(context, name, request)
+       if (!response.reviewToken) {
+         setReview(null)
+         setReviewToken(undefined)
+         setError('The server did not return a mutation review handle. Review the operation again.')
+         return
+       }
+       setReview(response.value)
+       setReviewToken(response.reviewToken)
       setConfirmed(false)
       setConfirmationText('')
     } catch (reviewError) {
+      setReview(null)
+      setReviewToken(undefined)
       setError((reviewError as Error).message)
     } finally {
       setBusy('')
@@ -3314,7 +3470,7 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
       setError('Enable write mode before applying a Node operation.')
       return
     }
-    if (!review || !review.ready || review.status !== 'dry-run passed') {
+    if (!review || !reviewToken || !review.ready || review.status !== 'dry-run passed') {
       setError('Resolve the drain limitations and pass a server-side dry-run before applying this operation.')
       return
     }
@@ -3332,10 +3488,12 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
     setError('')
     setSuccess('')
     try {
-      const result = await applyNodeAction(context, name, request)
+       const response = await applyNodeAction(context, name, request, reviewToken)
+       const result = response.value
       const drainSummary = action === 'drain' ? ` ${result.evictedCount || 0} Pod(s) evicted; ${result.skippedCount || 0} left in place.` : ''
       setSuccess(`${nodeActionLabel(action)} applied.${drainSummary}`)
-      setReview(null)
+       setReview(null)
+       setReviewToken(undefined)
       setConfirmed(false)
       setConfirmationText('')
       try {
@@ -3344,6 +3502,10 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, onRefresh }:
         setError(`Node operation applied, but the Node refresh failed: ${(refreshError as Error).message}`)
       }
     } catch (applyError) {
+      setReview(null)
+      setReviewToken(undefined)
+      setConfirmed(false)
+      setConfirmationText('')
       setError((applyError as Error).message)
     } finally {
       setBusy('')

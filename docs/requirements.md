@@ -53,6 +53,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Reliable resource and Event watches with bounded relist recovery, freshness states, cancellation, and safe failure signals.
 - Bounded read-only operational packs for built-in networking, policy, autoscaling, quota, storage, ServiceAccount/RBAC, and Pod posture views.
 - Bounded global search with canonical GVR result links, partial-source states, explicit submit behavior, and revision-bound local saved views.
+- Short-lived server-bound mutation review handles with exact request bindings, one-use consumption, expiry, and frontend token clearing.
 
 ### Partially Implemented
 
@@ -250,7 +251,7 @@ Provide a bounded cross-resource search workflow for operators working across na
 - Do not issue an unbounded request to every discovered resource on every keystroke; use debouncing, bounded fan-out, or a controlled cache.
 - Keep cluster context and kubeconfig revision associated with saved views so stale views fail safely.
 
-### F7. Server-bound mutation review
+### F7. Server-bound mutation review (Implemented)
 
 Ensure final mutations cannot bypass or reuse an unrelated client-side dry-run review.
 

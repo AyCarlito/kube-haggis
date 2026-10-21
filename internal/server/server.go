@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kube-haggis/kube-haggis/internal/audit"
@@ -41,6 +42,8 @@ type Server struct {
 	nodeAction     nodeActionLoader
 	pvcOperations  pvcOperationsLoader
 	pvcAction      pvcActionLoader
+	reviewStoreMu  sync.Mutex
+	reviewStore    *mutationReviewStore
 }
 
 // relatedLoader describes the read-only relationship aggregation seam used by the HTTP handler.
@@ -60,7 +63,7 @@ type resourceDeleteLoader func(context.Context, string, string, string, string, 
 
 // New creates an HTTP server for the KubeHaggis API.
 func New(kubernetes *kube.Service, webDir string, logger *slog.Logger, auditStore *audit.Store) *Server {
-	return &Server{kube: kubernetes, webDir: webDir, logger: logger, audit: auditStore}
+	return &Server{kube: kubernetes, webDir: webDir, logger: logger, audit: auditStore, reviewStore: newMutationReviewStore()}
 }
 
 // Handler returns the complete API and frontend HTTP handler tree.
@@ -119,6 +122,7 @@ func (s *Server) handleContextsReload(writer http.ResponseWriter, request *http.
 		return
 	}
 	snapshot, err := s.kube.ReloadContexts()
+	s.invalidateMutationReviews()
 	payload := contextSnapshotPayload(snapshot)
 	if err != nil {
 		payload["error"] = err.Error()
@@ -557,19 +561,42 @@ func (s *Server) handleResource(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, err)
 			return
 		}
-		item, err := s.applyResource(request.Context(), query.Get("context"), group, version, resource, namespace, namespaced, parseBool(query.Get("dryRun")), body)
+		dryRun := parseBool(query.Get("dryRun"))
+		bodyHash, bodyObject, hashErr := sanitizedResourceBodyHash(body)
+		if hashErr != nil {
+			s.recordMutation(request, "apply", group, version, resource, namespace, name, dryRun, false, "resource mutation request validation failed")
+			writeError(writer, hashErr)
+			return
+		}
+		if validationErr := validateGenericApplyResourceVersion(name, bodyObject); validationErr != nil {
+			s.recordMutation(request, "apply", group, version, resource, namespace, name, dryRun, false, "resource mutation request validation failed")
+			writeError(writer, validationErr)
+			return
+		}
+		binding := resourceApplyReviewBinding(s.mutationReviewContext(request), group, version, resource, namespace, name, namespaced, bodyObject, bodyHash)
+		if !dryRun {
+			if err := s.consumeMutationReview(request, binding); err != nil {
+				s.recordMutation(request, "apply", group, version, resource, namespace, name, false, false, "mutation review was rejected")
+				writeError(writer, err)
+				return
+			}
+		}
+		item, err := s.applyResource(request.Context(), query.Get("context"), group, version, resource, namespace, namespaced, dryRun, body)
 		if err != nil {
 			if isResourceVersionConflict(err) {
 				conflict := s.resourceConflictResponse(request.Context(), query.Get("context"), group, version, resource, namespace, name, namespaced, body)
-				s.recordMutation(request, "apply", group, version, resource, namespace, name, parseBool(query.Get("dryRun")), false, "resource update conflicted with a newer resource version")
+				s.recordMutation(request, "apply", group, version, resource, namespace, name, dryRun, false, "resource update conflicted with a newer resource version")
 				writeJSON(writer, http.StatusConflict, conflict)
 				return
 			}
-			s.recordMutation(request, "apply", group, version, resource, namespace, name, parseBool(query.Get("dryRun")), false, err.Error())
+			s.recordMutation(request, "apply", group, version, resource, namespace, name, dryRun, false, err.Error())
 			writeError(writer, resourceMutationError(err))
 			return
 		}
-		s.recordMutation(request, "apply", group, version, resource, namespace, item.GetName(), parseBool(query.Get("dryRun")), true, "")
+		if dryRun && !s.writeMutationReviewHeader(writer, binding) {
+			return
+		}
+		s.recordMutation(request, "apply", group, version, resource, namespace, item.GetName(), dryRun, true, "")
 		writeJSON(writer, http.StatusOK, item.Object)
 	case http.MethodDelete:
 		if request.Header.Get("X-KubeHaggis-Write") != "enabled" {
@@ -612,6 +639,14 @@ func (s *Server) handleResource(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, err)
 			return
 		}
+		binding := resourceDeleteReviewBinding(s.mutationReviewContext(request), group, version, resource, deleteItem, namespaced, parseBool(query.Get("force")))
+		if !dryRun {
+			if err := s.consumeMutationReview(request, binding); err != nil {
+				s.recordMutation(request, "delete", group, version, resource, namespace, name, false, false, "mutation review was rejected")
+				writeError(writer, err)
+				return
+			}
+		}
 		err := s.deleteResource(request.Context(), query.Get("context"), group, version, resource, namespace, name, namespaced, kube.ResourceDeleteOptions{
 			DryRun:                  dryRun,
 			Force:                   parseBool(query.Get("force")),
@@ -620,6 +655,9 @@ func (s *Server) handleResource(writer http.ResponseWriter, request *http.Reques
 		if err != nil {
 			s.recordMutation(request, "delete", group, version, resource, namespace, name, dryRun, false, deleteAuditDetail(err))
 			writeError(writer, fmt.Errorf("%s", deleteErrorMessage(err)))
+			return
+		}
+		if dryRun && !s.writeMutationReviewHeader(writer, binding) {
 			return
 		}
 		detail := "resource deleted"
@@ -784,6 +822,8 @@ func writeError(writer http.ResponseWriter, err error) {
 	case strings.Contains(message, "not available on this kubernetes api server"):
 		status = http.StatusNotImplemented
 	case strings.Contains(message, "pvc resize is unsupported") || strings.Contains(message, "unsupported pvc operation") || strings.Contains(message, "volumesnapshot api is unavailable") || strings.Contains(message, "confirmation") || strings.Contains(message, "required") || strings.Contains(message, "not found") || strings.Contains(message, "not present in the discovery catalog") || strings.Contains(message, "scope contradicts") || strings.Contains(message, "cluster-scoped resource") || strings.Contains(message, "invalid") || strings.Contains(message, "unsupported workload action") || strings.Contains(message, "unsupported node action") || strings.Contains(message, "not a supported workload") || strings.Contains(message, "not supported for node") || strings.Contains(message, "must ") || strings.Contains(message, "exceeds") || strings.Contains(message, "ended after") || strings.Contains(message, "decode ") || strings.Contains(message, "parse "):
+		status = http.StatusBadRequest
+	case strings.Contains(message, "mutation review") || strings.Contains(message, "review handle"):
 		status = http.StatusBadRequest
 	}
 	writeJSON(writer, status, map[string]string{"error": err.Error()})

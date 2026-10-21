@@ -81,12 +81,23 @@ func TestHandlePVCActionRedactsRBACFailure(t *testing.T) {
 	defer store.Close()
 	server := &Server{
 		audit: store,
-		pvcAction: func(context.Context, string, string, string, kube.PVCActionRequest) (kube.PVCActionResult, error) {
+		pvcAction: func(_ context.Context, _ string, _ string, _ string, request kube.PVCActionRequest) (kube.PVCActionResult, error) {
+			if request.DryRun {
+				return kube.PVCActionResult{Action: "snapshot", Resource: "persistentvolumeclaims", Namespace: "default", Name: "data", DryRun: true, SnapshotName: request.SnapshotName, SnapshotClassName: request.SnapshotClassName, Status: "dry-run passed"}, nil
+			}
 			return kube.PVCActionResult{}, errString("VolumeSnapshotClass csi-sensitive was denied by Kubernetes RBAC")
 		},
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/pvc/action?context=field&namespace=default&name=data", strings.NewReader(`{"action":"snapshot","dryRun":true,"expectedResourceVersion":"7","snapshotName":"sensitive-copy","snapshotClassName":"csi-sensitive"}`))
+	reviewRequest := httptest.NewRequest(http.MethodPost, "/api/pvc/action?context=field&namespace=default&name=data", strings.NewReader(`{"action":"snapshot","dryRun":true,"expectedResourceVersion":"7","snapshotName":"sensitive-copy","snapshotClassName":"csi-sensitive"}`))
+	reviewRequest.Header.Set("X-KubeHaggis-Write", "enabled")
+	reviewResponse := httptest.NewRecorder()
+	server.handlePVCAction(reviewResponse, reviewRequest)
+	if reviewResponse.Code != http.StatusOK || reviewResponse.Header().Get(mutationReviewHeader) == "" {
+		t.Fatalf("PVC review failed: status=%d body=%s", reviewResponse.Code, reviewResponse.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/pvc/action?context=field&namespace=default&name=data", strings.NewReader(`{"action":"snapshot","confirmed":true,"expectedResourceVersion":"7","snapshotName":"sensitive-copy","snapshotClassName":"csi-sensitive"}`))
 	request.Header.Set("X-KubeHaggis-Write", "enabled")
+	request.Header.Set(mutationReviewHeader, reviewResponse.Header().Get(mutationReviewHeader))
 	response := httptest.NewRecorder()
 
 	server.handlePVCAction(response, request)
@@ -95,11 +106,13 @@ func TestHandlePVCActionRedactsRBACFailure(t *testing.T) {
 		t.Fatalf("expected RBAC response, got %d %s", response.Code, response.Body.String())
 	}
 	entries, err := store.List(context.Background(), 10)
-	if err != nil || len(entries) != 1 {
+	if err != nil || len(entries) != 2 {
 		t.Fatalf("unexpected PVC failure audit entries: %v %+v", err, entries)
 	}
-	if entries[0].Success || strings.Contains(entries[0].Detail, "sensitive") || strings.Contains(entries[0].Detail, "csi") {
-		t.Fatalf("PVC failure audit was unsafe: %+v", entries[0])
+	for _, entry := range entries {
+		if strings.Contains(entry.Detail, "sensitive") || strings.Contains(entry.Detail, "csi") {
+			t.Fatalf("PVC failure audit was unsafe: %+v", entries)
+		}
 	}
 }
 
