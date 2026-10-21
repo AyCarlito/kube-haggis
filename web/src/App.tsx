@@ -88,7 +88,7 @@ import {
   resolveCatalogDefinition,
 } from './catalog'
 import { overviewEventDetailPath, overviewEventsPath, overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
-import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchHref, searchQueryEquals, searchResultKey, searchResultResourcePath } from './search'
+import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchGroupOptions, searchHref, searchKindOptions, searchQueryEquals, searchResourceOptions, searchResultKey, searchResultResourcePath, searchDefinitionCandidates } from './search'
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
@@ -1207,7 +1207,15 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setViewNotice(`Deleted “${view.name}”.`)
   }
 
-  const groupOptions = Array.from(new Set(definitions.map((definition) => definition.group || 'core'))).sort((left, right) => left.localeCompare(right))
+  const groupOptions = searchGroupOptions(definitions)
+  const kindOptions = searchKindOptions(definitions, query.group)
+  const resourceOptions = searchResourceOptions(definitions, query.group, query.kind)
+  const kindMatchesCatalog = !query.kind || searchDefinitionCandidates(definitions, { ...emptySearchQuery(namespace), group: query.group, kind: query.kind }).length > 0
+  const resourceMatchesCatalog = !query.resource || searchDefinitionCandidates(definitions, { ...emptySearchQuery(namespace), group: query.group, kind: query.kind, resource: query.resource }).length > 0
+  const kindNoMatch = Boolean(query.kind && definitions.length && !kindMatchesCatalog)
+  const resourceNoMatch = Boolean(query.resource && definitions.length && !resourceMatchesCatalog)
+  const kindHint = catalogLoading && !definitions.length ? 'Catalog suggestions are loading.' : kindNoMatch ? 'No loaded Kind matches this API group. Your free-form value stays unchanged.' : kindOptions.length ? `${kindOptions.length} catalog suggestion${kindOptions.length === 1 ? '' : 's'}; group/version context is shown.` : definitions.length ? 'No Kind suggestions for this group. Custom kinds remain allowed.' : 'No catalog suggestions loaded. Custom kinds remain allowed.'
+  const resourceHint = catalogLoading && !definitions.length ? 'Catalog suggestions are loading.' : resourceNoMatch ? 'No loaded Resource matches this API group and Kind. Your free-form value stays unchanged.' : resourceOptions.length ? `${resourceOptions.length} catalog suggestion${resourceOptions.length === 1 ? '' : 's'}; group/version/Kind context is shown.` : definitions.length ? 'No Resource suggestions match these filters. Custom resources remain allowed.' : 'No catalog suggestions loaded. Custom resources remain allowed.'
   return (
     <div className="search-page">
       <section className="search-intro">
@@ -1231,9 +1239,9 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
             <form className="search-form" onSubmit={(event) => { event.preventDefault(); submitSearch() }}>
               <label className="search-primary-field"><Search size={17} /><span className="sr-only">Search text</span><input value={query.query} onChange={(event) => updateQuery('query', event.target.value)} placeholder="Search kind, resource, namespace, or object name" /><kbd>submit</kbd></label>
               <div className="search-filter-grid">
-                <label className="search-control"><span>API group</span><select value={query.group} onChange={(event) => updateQuery('group', event.target.value)}><option value="">All groups</option>{groupOptions.map((group) => <option value={group} key={group}>{group === 'core' ? 'Core API' : group}</option>)}</select></label>
-                <label className="search-control"><span>Kind</span><input value={query.kind} onChange={(event) => updateQuery('kind', event.target.value)} placeholder="Deployment" /></label>
-                <label className="search-control"><span>Resource</span><input value={query.resource} onChange={(event) => updateQuery('resource', event.target.value)} placeholder="deployments" /></label>
+                <label className="search-control"><span>API group</span><select value={query.group} onChange={(event) => updateQuery('group', event.target.value)}><option value="">All groups</option>{groupOptions.map((group) => <option value={group.value} key={group.value}>{group.label}</option>)}</select></label>
+                <label className={`search-control search-control-autocomplete${kindNoMatch ? ' search-control-invalid' : ''}`}><span>Kind</span><input list="global-search-kind-options" aria-describedby="global-search-kind-help" aria-autocomplete="list" autoComplete="off" value={query.kind} onChange={(event) => updateQuery('kind', event.target.value)} placeholder="Deployment" /><datalist id="global-search-kind-options">{kindOptions.map((option) => <option key={option.value} value={option.value} label={option.label} />)}</datalist><small id="global-search-kind-help" className={kindNoMatch ? 'search-control-hint search-control-hint-warning' : 'search-control-hint'} role="status">{kindHint}</small></label>
+                <label className={`search-control search-control-autocomplete${resourceNoMatch ? ' search-control-invalid' : ''}`}><span>Resource</span><input list="global-search-resource-options" aria-describedby="global-search-resource-help" aria-autocomplete="list" autoComplete="off" value={query.resource} onChange={(event) => updateQuery('resource', event.target.value)} placeholder="deployments" /><datalist id="global-search-resource-options">{resourceOptions.map((option) => <option key={option.value} value={option.value} label={option.label} />)}</datalist><small id="global-search-resource-help" className={resourceNoMatch ? 'search-control-hint search-control-hint-warning' : 'search-control-hint'} role="status">{resourceHint}</small></label>
                 <label className="search-control"><span>Namespace scope</span><input value={query.namespace === 'all' ? '' : query.namespace} onChange={(event) => updateQuery('namespace', event.target.value || 'all')} placeholder="all namespaces" /></label>
                 <label className="search-control"><span>Name / exact field selector</span><input value={query.name} onChange={(event) => updateQuery('name', event.target.value)} placeholder="api-server" /></label>
                 <label className="search-control search-control-wide"><span>Label selector / sent to Kubernetes</span><input value={query.labelSelector} onChange={(event) => updateQuery('labelSelector', event.target.value)} placeholder="app=api,track=stable" /></label>

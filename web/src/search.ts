@@ -4,6 +4,19 @@ import type { ResourceDefinition, SearchQuery, SearchResult } from './types'
 /** Caps each browser-controlled search filter at the backend's safe query size. */
 export const SEARCH_FILTER_MAX = 256
 
+/** Describes one finite API-group choice derived from the loaded discovery catalog. */
+export interface SearchGroupOption {
+  value: string
+  label: string
+}
+
+/** Describes one contextual native-datalist choice for a structured search filter. */
+export interface SearchSuggestionOption {
+  value: string
+  label: string
+  identities: string[]
+}
+
 /** Returns the empty search model with an explicit all-namespaces scope. */
 export function emptySearchQuery(namespace = 'all'): SearchQuery {
   return { query: '', group: '', kind: '', resource: '', namespace: namespace || 'all', name: '', labelSelector: '' }
@@ -92,6 +105,55 @@ export function searchQueryEquals(left: SearchQuery, right: SearchQuery): boolea
   return left.query === right.query && left.group === right.group && left.kind === right.kind && left.resource === right.resource && left.namespace === right.namespace && left.name === right.name && left.labelSelector === right.labelSelector
 }
 
+/** Returns deterministic API-group choices while preserving the internal core-group value. */
+export function searchGroupOptions(definitions: ResourceDefinition[]): SearchGroupOption[] {
+  const groups = new Set(definitions.map((definition) => definition.group || 'core'))
+  return [...groups].sort((left, right) => {
+    if (left === 'core') return right === 'core' ? 0 : -1
+    if (right === 'core') return 1
+    return left.localeCompare(right)
+  }).map((value) => ({ value, label: value === 'core' ? 'Core API' : value }))
+}
+
+/** Returns kind choices limited to the selected API group and annotated with served versions. */
+export function searchKindOptions(definitions: ResourceDefinition[], group: string): SearchSuggestionOption[] {
+  const options = new Map<string, { value: string; contexts: Set<string>; identities: Set<string> }>()
+  definitions.filter((definition) => matchesSearchGroup(definition, group) && definition.kind.trim()).forEach((definition) => {
+    const value = definition.kind.trim()
+    const valueKey = value.toLowerCase()
+    const option = options.get(valueKey) ?? { value, contexts: new Set<string>(), identities: new Set<string>() }
+    if (value.localeCompare(option.value) < 0) option.value = value
+    option.contexts.add(searchDefinitionContext(definition))
+    option.identities.add(`${definition.group}\u001f${definition.version}\u001f${value}`)
+    options.set(valueKey, option)
+  })
+  return [...options.values()].sort(compareSuggestionValues).map((option) => ({
+    value: option.value,
+    label: `${option.value} (${[...option.contexts].sort(compareText).join(', ')})`,
+    identities: [...option.identities].sort(compareText),
+  }))
+}
+
+/** Returns resource choices limited to the selected API group and Kind context. */
+export function searchResourceOptions(definitions: ResourceDefinition[], group: string, kind: string): SearchSuggestionOption[] {
+  const normalizedKind = kind.trim().toLowerCase()
+  const options = new Map<string, { value: string; contexts: Set<string>; identities: Set<string> }>()
+  definitions.filter((definition) => matchesSearchGroup(definition, group) && (!normalizedKind || definition.kind.trim().toLowerCase() === normalizedKind) && definition.resource.trim()).forEach((definition) => {
+    const value = definition.resource.trim()
+    const valueKey = value.toLowerCase()
+    const option = options.get(valueKey) ?? { value, contexts: new Set<string>(), identities: new Set<string>() }
+    if (value.localeCompare(option.value) < 0) option.value = value
+    option.contexts.add(`${searchDefinitionContext(definition)} / ${definition.kind}`)
+    option.identities.add(`${definition.group}\u001f${definition.version}\u001f${value}\u001f${definition.kind.trim()}`)
+    options.set(valueKey, option)
+  })
+  return [...options.values()].sort(compareSuggestionValues).map((option) => ({
+    value: option.value,
+    label: `${option.value} (${[...option.contexts].sort(compareText).join(', ')})`,
+    identities: [...option.identities].sort(compareText),
+  }))
+}
+
 /** Filters catalog rows using the same exact identity and free-text candidate rules as the backend. */
 export function searchDefinitionCandidates(definitions: ResourceDefinition[], query: SearchQuery): ResourceDefinition[] {
 	const normalized = normalizeSearchQuery(query)
@@ -118,6 +180,28 @@ function searchDefinitionMatchesFilters(definition: ResourceDefinition, query: S
   if (query.kind && definition.kind.toLowerCase() !== query.kind.toLowerCase()) return false
   if (query.resource && definition.resource.toLowerCase() !== query.resource.toLowerCase()) return false
   return true
+}
+
+/** Checks a catalog definition against the search form's explicit group value. */
+function matchesSearchGroup(definition: ResourceDefinition, group: string): boolean {
+  const normalizedGroup = group.trim().toLowerCase()
+  if (!normalizedGroup) return true
+  return normalizedGroup === 'core' ? definition.group === '' : definition.group.toLowerCase() === normalizedGroup
+}
+
+/** Formats the group and version identity shown beside a native suggestion. */
+function searchDefinitionContext(definition: ResourceDefinition): string {
+  return `${definition.group || 'Core API'}/${definition.version}`
+}
+
+/** Sorts suggestions by their deterministic visible value. */
+function compareSuggestionValues(left: { value: string }, right: { value: string }): number {
+  return compareText(left.value, right.value)
+}
+
+/** Sorts two catalog strings without changing their original casing. */
+function compareText(left: string, right: string): number {
+  return left.localeCompare(right)
 }
 
 /** Trims one browser filter, strips controls, and applies the fixed query-size bound. */
