@@ -93,6 +93,7 @@ import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchView
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
+import { parseWorkloadReplicaInput, workloadReplicaInput, WORKLOAD_REPLICA_VALIDATION_MESSAGE } from './workload'
 import type {
   AuditEntry,
   AuditResponse,
@@ -3388,7 +3389,7 @@ type WorkloadActionOption = {
 function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
   const options = workloadActionOptions(definition.resource)
   const [action, setAction] = useState<WorkloadAction>(options[0]?.action || 'restart')
-  const [replicas, setReplicas] = useState(workloadReplicaCount(object))
+  const [replicas, setReplicas] = useState(workloadReplicaInput(object))
   const [container, setContainer] = useState(workloadContainerNames(definition.resource, object)[0] || '')
   const [image, setImage] = useState(workloadContainerImage(definition.resource, object, container))
   const [revision, setRevision] = useState('')
@@ -3401,6 +3402,8 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
   const [success, setSuccess] = useState('')
   const containers = workloadContainerNames(definition.resource, object)
   const selectedOption = options.find((option) => option.action === action) || options[0]
+  const parsedReplicas = parseWorkloadReplicaInput(replicas)
+  const scaleInputInvalid = action === 'scale' && parsedReplicas === undefined
 
   useEffect(() => {
     const nextOptions = workloadActionOptions(definition.resource)
@@ -3412,7 +3415,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     const nextContainer = nextContainers.includes(container) ? container : nextContainers[0] || ''
     setContainer(nextContainer)
     setImage(workloadContainerImage(definition.resource, object, nextContainer))
-    setReplicas(workloadReplicaCount(object))
+    setReplicas(workloadReplicaInput(object))
     setSchedule(workloadSchedule(object))
     setReview(null)
     setReviewToken(undefined)
@@ -3448,11 +3451,12 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     const expectedResourceVersion = metadataString(object, 'resourceVersion')
     const request: WorkloadActionRequest = { action, dryRun, expectedResourceVersion }
     if (action === 'scale') {
-      if (!Number.isInteger(replicas) || replicas < 0) {
-        setError('Replica count must be a whole number of zero or greater.')
+      const validatedReplicas = parseWorkloadReplicaInput(replicas)
+      if (validatedReplicas === undefined) {
+        setError(WORKLOAD_REPLICA_VALIDATION_MESSAGE)
         return null
       }
-      request.replicas = replicas
+      request.replicas = validatedReplicas
     }
     if (action === 'image') {
       if (!container) {
@@ -3564,11 +3568,11 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to review and apply workload actions. Kubernetes RBAC still authorizes the final operation.</div>}
     <form className="workload-operation-form" onSubmit={(event) => { event.preventDefault(); void reviewAction() }}>
       <div className="workload-action-picker"><label className="workload-operation-field"><span>Action</span><select value={action} onChange={(event) => changeAction(event.target.value as WorkloadAction)} disabled={disabled}>{options.map((option) => <option key={option.action} value={option.action}>{option.label}</option>)}</select></label><div className="workload-action-detail">{selectedOption?.detail}</div></div>
-      {action === 'scale' && <label className="workload-operation-field"><span>Desired replicas</span><input type="number" min="0" step="1" value={replicas} onChange={(event) => setReplicas(Number(event.target.value))} disabled={disabled} /></label>}
+      {action === 'scale' && <label className="workload-operation-field"><span>Desired replicas</span><input type="text" inputMode="numeric" value={replicas} onChange={(event) => setReplicas(event.target.value)} disabled={disabled} aria-invalid={scaleInputInvalid} aria-describedby={scaleInputInvalid ? 'workload-replica-guidance' : undefined} />{scaleInputInvalid && <small id="workload-replica-guidance" className="workload-field-error">{WORKLOAD_REPLICA_VALIDATION_MESSAGE}</small>}</label>}
       {action === 'image' && <div className="workload-operation-grid"><label className="workload-operation-field"><span>Container</span><select value={container} onChange={(event) => { setContainer(event.target.value); setImage(workloadContainerImage(definition.resource, object, event.target.value)) }} disabled={disabled}><option value="">Choose container</option>{containers.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label className="workload-operation-field"><span>New image</span><input value={image} onChange={(event) => setImage(event.target.value)} disabled={disabled} placeholder="registry.example/app:tag" /></label></div>}
       {action === 'rollback' && <label className="workload-operation-field"><span>Revision <em>blank = previous</em></span><input type="number" min="1" step="1" value={revision} onChange={(event) => setRevision(event.target.value)} disabled={disabled} placeholder="previous" /></label>}
       {action === 'schedule' && <label className="workload-operation-field"><span>Cron schedule</span><input value={schedule} onChange={(event) => setSchedule(event.target.value)} disabled={disabled} placeholder="*/15 * * * *" /></label>}
-      <div className="workload-operation-actions"><span>{selectedOption?.detail}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review)}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review action'}</button></div>
+      <div className="workload-operation-actions"><span>{selectedOption?.detail}</span><button type="submit" className="primary-button" disabled={!writeEnabled || Boolean(busy) || Boolean(review) || scaleInputInvalid}>{busy === 'review' ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} {busy === 'review' ? 'Reviewing' : 'Review action'}</button></div>
     </form>
     {review && <div className="workload-review"><div className="workload-review-heading"><span className="review-ready"><Check size={13} /> Dry-run passed</span><strong>{workloadActionLabel(action)} is ready</strong></div><p>Kubernetes accepted this exact resource-versioned operation for server-side dry-run. No cluster state has changed; the final request can still change live workload behavior.</p><label className="workload-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={busy === 'apply'} /><span>I reviewed the exact action and authorize the final request to change workload state.</span></label><div className="workload-review-actions"><button type="button" className="secondary-button" onClick={editAction} disabled={Boolean(busy)}>Change action</button><button type="button" className="primary-button" onClick={() => void applyReviewedAction()} disabled={busy === 'apply' || !confirmed}>{busy === 'apply' ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} {busy === 'apply' ? 'Applying' : 'Confirm and apply'}</button></div></div>}
     {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
@@ -4131,12 +4135,6 @@ function workloadContainerImage(resource: string, object: ResourceObject, contai
     if (candidate.name === containerName && typeof candidate.image === 'string') return candidate.image
   }
   return ''
-}
-
-/** Returns the current desired replica count for a scalable workload. */
-function workloadReplicaCount(object: ResourceObject): number {
-  const replicas = nestedObjectValue(object, ['spec', 'replicas'])
-  return typeof replicas === 'number' && Number.isFinite(replicas) ? replicas : 1
 }
 
 /** Returns the current CronJob schedule expression. */
