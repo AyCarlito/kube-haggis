@@ -86,7 +86,7 @@ import {
   parseResourceRoute,
   resolveCatalogDefinition,
 } from './catalog'
-import { overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
+import { overviewEventDetailPath, overviewEventsPath, overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
 import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchHref, searchQueryEquals, searchResultKey, searchResultResourcePath } from './search'
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
@@ -600,6 +600,9 @@ function OverviewPage({ context, namespace, definitions, contexts, activeContext
   const workloadReady = overview.workloads.healthyDeployments + overview.workloads.healthyStatefulSets + overview.workloads.healthyDaemonSets
   const warningCount = overview.warnings.length
   const targets = overviewNavigationTargets(definitions)
+  const eventsPath = overviewEventsPath(definitions)
+  const eventsHref = eventsPath ? routeHref(eventsPath, context, namespace) : undefined
+  const eventScope = namespace === 'all' ? 'all namespaces' : `namespace ${namespace}`
 
   return (
     <div className="dashboard-page">
@@ -625,8 +628,8 @@ function OverviewPage({ context, namespace, definitions, contexts, activeContext
 
       <section className="dashboard-grid">
         <div className="panel signal-panel">
-          <PanelHeading eyebrow="Signal check" title="What needs your eye" action={warningCount ? `${warningCount} warnings` : 'No warnings'} tone={warningCount ? 'warning' : 'good'} />
-          {overview.warnings.length ? <WarningList warnings={overview.warnings} /> : <QuietState icon={<ShieldCheck size={22} />} title="Nothing shouting" detail="No recent Warning Events were reported." />}
+          <PanelHeading eyebrow="Signal check" title="What needs your eye" action={eventsPath ? (warningCount ? `${warningCount} warnings` : 'No warnings') : 'Events unavailable'} actionHref={eventsHref} actionAriaLabel={eventsPath ? `Open Events list for ${eventScope}` : 'Events list unavailable because the exact core v1 Events resource is not in the current catalog'} tone={eventsPath ? (warningCount ? 'warning' : 'good') : 'neutral'} />
+          {overview.warnings.length ? <WarningList warnings={overview.warnings} definitions={definitions} eventsPath={eventsPath} context={context} namespace={namespace} /> : <QuietState icon={<ShieldCheck size={22} />} title="Nothing shouting" detail={eventsPath ? 'No recent Warning Events were reported.' : 'The exact core v1 Events resource is unavailable in the current API catalog.'} />}
         </div>
         <div className="panel posture-panel">
           <PanelHeading eyebrow="Cluster posture" title="Capacity & coverage" action={metricsStateLabel(overview.metricsAvailable, overview.metrics.state)} tone={metricsStateTone(overview.metricsAvailable, overview.metrics.state)} />
@@ -878,28 +881,42 @@ function MetricCard({ label, value, detail, tone, icon, href, ariaLabel }: { lab
 }
 
 /** Renders a section heading with a compact state marker. */
-function PanelHeading({ eyebrow, title, action, tone }: { eyebrow: string; title: string; action: string; tone: 'good' | 'warning' | 'neutral' }) {
+function PanelHeading({ eyebrow, title, action, tone, actionHref, actionAriaLabel }: { eyebrow: string; title: string; action: string; tone: 'good' | 'warning' | 'neutral'; actionHref?: string; actionAriaLabel?: string }) {
+  const actionContent = <><span aria-hidden="true" />{action}</>
   return (
     <div className="panel-heading">
       <div><span className="panel-eyebrow">{eyebrow}</span><h2>{title}</h2></div>
-      <span className={`panel-action panel-action-${tone}`}><span />{action}</span>
+      {actionHref ? <a className={`panel-action panel-action-${tone} panel-action-link`} href={actionHref} aria-label={actionAriaLabel || action}>{actionContent}</a> : <span className={`panel-action panel-action-${tone}`}>{actionContent}</span>}
     </div>
   )
 }
 
 /** Renders recent warning Events in a readable dashboard list. */
-function WarningList({ warnings }: { warnings: ClusterOverview['warnings'] }) {
+function WarningList({ warnings, definitions, eventsPath, context, namespace }: { warnings: ClusterOverview['warnings']; definitions: ResourceDefinition[]; eventsPath?: string; context: string; namespace: string }) {
   return (
     <div className="warning-list">
       {warnings.map((warning, index) => (
-        <div className="warning-row" key={`${warning.reason}-${warning.object}-${index}`}>
-          <span className="warning-index">{String(index + 1).padStart(2, '0')}</span>
-          <div className="warning-main"><strong>{warning.reason || 'Warning Event'}</strong><span>{warning.message}</span></div>
-          <div className="warning-meta"><code>{warning.object || 'cluster'}</code><span>{relativeTime(warning.lastSeen)}</span></div>
-        </div>
+        <WarningEventRow key={`${warning.namespace || ''}/${warning.name || ''}/${warning.reason}-${warning.object}-${index}`} warning={warning} definitions={definitions} eventsPath={eventsPath} context={context} namespace={namespace} index={index} />
       ))}
     </div>
   )
+}
+
+/** Renders one warning Event as an exact detail link, a bounded list fallback, or an unavailable state. */
+function WarningEventRow({ warning, definitions, eventsPath, context, namespace, index }: { warning: EventSummary; definitions: ResourceDefinition[]; eventsPath?: string; context: string; namespace: string; index: number }) {
+  const detailPath = overviewEventDetailPath(definitions, warning)
+  const targetPath = detailPath || eventsPath
+  const targetNamespace = warning.namespace || namespace
+  const targetHref = targetPath ? routeHref(targetPath, context, targetNamespace) : undefined
+  const targetLabel = detailPath
+    ? `Open Warning Event ${warning.name} in namespace ${warning.namespace}`
+    : eventsPath
+      ? `Open Events list for ${targetNamespace === 'all' ? 'all namespaces' : `namespace ${targetNamespace}`}; this Event identity is incomplete`
+      : 'Warning Event detail unavailable because the exact core v1 Events resource is not in the current catalog'
+  const targetNote = detailPath ? undefined : eventsPath ? 'Event identity incomplete; open the bounded Events list' : 'Event detail unavailable'
+  const content = <><span className="warning-index">{String(index + 1).padStart(2, '0')}</span><div className="warning-main"><strong>{warning.reason || 'Warning Event'}</strong><span>{warning.message || 'No message provided.'}</span>{targetNote && <small className="warning-target-note">{targetNote}</small>}</div><div className="warning-meta"><code>{warning.object || 'cluster'}</code><span>{relativeTime(warning.lastSeen)}</span></div></>
+  if (!targetHref) return <div className="warning-row warning-row-unavailable" aria-disabled="true" aria-label={targetLabel}>{content}</div>
+  return <a className={`warning-row warning-row-link ${detailPath ? '' : 'warning-row-fallback'}`} href={targetHref} aria-label={targetLabel}>{content}</a>
 }
 
 /** Renders a single posture statistic row. */

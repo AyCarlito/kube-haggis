@@ -1,5 +1,5 @@
 import type { ResourceDefinition } from './types'
-import { overviewNavigationTargets, workloadNavigationTargets } from './overview'
+import { overviewEventDetailPath, overviewEventsPath, overviewNavigationTargets, workloadNavigationTargets } from './overview'
 
 /** Fails a focused overview navigation assertion with a readable message. */
 function assertOverview(condition: boolean, message: string): void {
@@ -25,6 +25,16 @@ export function runOverviewModelTests(): void {
   assertOverview(targets.storageClaims === '/resources/core/v1/persistentvolumeclaims' && targets.boundClaims === targets.storageClaims, 'PVC overview targets were not canonical')
   assertOverview(targets.namespaces === '/resources/core/v1/namespaces', 'Namespaces overview target was not canonical')
   assertOverview(targets.workloads === '/workloads', 'aggregate workload target was not enabled for all controller kinds')
+
+  const eventDefinitions: ResourceDefinition[] = [
+    ...definitions,
+    { group: '', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] },
+    { group: 'events.k8s.io', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] },
+  ]
+  assertOverview(overviewEventsPath(eventDefinitions) === '/resources/core/v1/events', 'overview Event list did not retain the exact core GVR')
+  assertOverview(overviewEventDetailPath(eventDefinitions, { name: 'warning', namespace: 'team-a' }) === '/resources/core/v1/events/warning', 'overview Event detail did not retain the exact core GVR')
+  assertOverview(overviewEventDetailPath(eventDefinitions, { name: 'warning' }) === undefined, 'Event detail route appeared without a namespace')
+  assertOverview(overviewEventsPath(eventDefinitions.filter((definition) => definition.group !== '' || definition.resource !== 'events')) === undefined, 'overview Event navigation guessed a route without core Events discovery')
 
   const workloadTargets = workloadNavigationTargets(definitions)
   assertOverview(workloadTargets.every((target) => Boolean(target.path)), 'discovered workload targets were not all exposed')

@@ -1,5 +1,5 @@
-import { catalogResourcePath } from './catalog'
-import type { ResourceDefinition } from './types'
+import { catalogEventResourcePath, catalogResourcePath } from './catalog'
+import type { EventSummary, ResourceDefinition } from './types'
 
 /** Describes one exact workload resource destination shown by the workload hub. */
 export interface WorkloadNavigationTarget {
@@ -18,6 +18,18 @@ export interface OverviewNavigationTargets {
   namespaces?: string
   boundClaims?: string
   podRestarts?: string
+}
+
+/** Returns the exact core/v1 Events list route when that resource is discoverable. */
+export function overviewEventsPath(definitions: ResourceDefinition[]): string | undefined {
+  const events = definitions.some((definition) => definition.group === '' && definition.version === 'v1' && definition.resource === 'events')
+  return events ? catalogEventResourcePath(definitions) : undefined
+}
+
+/** Returns an exact core/v1 Event detail route only when its name and namespace are present. */
+export function overviewEventDetailPath(definitions: ResourceDefinition[], event: Pick<EventSummary, 'name' | 'namespace'>): string | undefined {
+  if (!event.name || !event.namespace) return undefined
+  return overviewEventsPath(definitions) ? catalogEventResourcePath(definitions, event.name) : undefined
 }
 
 /** Identifies the standard Kubernetes resource represented by one overview destination. */
