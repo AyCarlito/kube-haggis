@@ -22,7 +22,6 @@ import (
 const (
 	relatedResultLimit           = 100
 	relatedListLimit             = 100
-	relatedDefinitionScanLimit   = 128
 	relatedNoticeLimit           = 16
 	relatedStateAvailable        = "available"
 	relatedStateEmpty            = "empty"
@@ -42,10 +41,12 @@ const (
 	relatedTypeBoundVolume       = "bound-volume"
 	relatedTypeBoundClaim        = "bound-claim"
 	relatedTypeReference         = "reference"
+	relatedTypeInvolvedObject    = "involved-object"
 	relatedSourceOwnerReferences = "metadata.ownerReferences"
 	relatedSourceSelector        = "spec.selector"
 	relatedSourceVolumeName      = "spec.volumeName"
 	relatedSourceClaimRef        = "spec.claimRef"
+	relatedSourceInvolvedObject  = "involvedObject"
 )
 
 // RelatedResourceList is the bounded, sanitized relationship response for one Kubernetes object.
@@ -110,6 +111,38 @@ type relatedTargetResult struct {
 	err    error
 }
 
+// relatedDescendantRule identifies one supported native controller-to-child relationship.
+type relatedDescendantRule struct {
+	parentGroup    string
+	parentVersion  string
+	parentResource string
+	parentKind     string
+	childGroup     string
+	childVersion   string
+	childResource  string
+	childKind      string
+}
+
+// relatedDescendantQuery contains one native child query and its discovery and namespace availability.
+type relatedDescendantQuery struct {
+	definition  ResourceDefinition
+	namespace   string
+	namespaceOK bool
+	discovered  bool
+	listAllowed bool
+	source      string
+}
+
+// nativeRelatedDescendantRules is the complete Phase 1 native descendant relationship set.
+var nativeRelatedDescendantRules = []relatedDescendantRule{
+	{parentGroup: "apps", parentVersion: "v1", parentResource: "deployments", parentKind: "Deployment", childGroup: "apps", childVersion: "v1", childResource: "replicasets", childKind: "ReplicaSet"},
+	{parentGroup: "apps", parentVersion: "v1", parentResource: "replicasets", parentKind: "ReplicaSet", childGroup: "", childVersion: "v1", childResource: "pods", childKind: "Pod"},
+	{parentGroup: "apps", parentVersion: "v1", parentResource: "statefulsets", parentKind: "StatefulSet", childGroup: "", childVersion: "v1", childResource: "pods", childKind: "Pod"},
+	{parentGroup: "apps", parentVersion: "v1", parentResource: "daemonsets", parentKind: "DaemonSet", childGroup: "", childVersion: "v1", childResource: "pods", childKind: "Pod"},
+	{parentGroup: "batch", parentVersion: "v1", parentResource: "jobs", parentKind: "Job", childGroup: "", childVersion: "v1", childResource: "pods", childKind: "Pod"},
+	{parentGroup: "batch", parentVersion: "v1", parentResource: "cronjobs", parentKind: "CronJob", childGroup: "batch", childVersion: "v1", childResource: "jobs", childKind: "Job"},
+}
+
 // discoverDefinitions converts preferred discovery output into generic resource definitions.
 func discoverDefinitions(discoveryClient discovery.DiscoveryInterface) ([]ResourceDefinition, error) {
 	resourceLists, discoveryErr := discoveryClient.ServerPreferredResources()
@@ -121,7 +154,7 @@ func (s *Service) RelatedResources(ctx context.Context, contextName, group, vers
 	return s.relatedResources(ctx, contextName, group, version, resource, namespace, name, namespaced, true, false)
 }
 
-// RelatedReverseResources runs the deferred broad reverse-owner relationship operation.
+// RelatedReverseResources runs the deferred targeted native descendant relationship operation.
 func (s *Service) RelatedReverseResources(ctx context.Context, contextName, group, version, resource, namespace, name string, namespaced bool) (RelatedResourceList, error) {
 	return s.relatedResources(ctx, contextName, group, version, resource, namespace, name, namespaced, false, true)
 }
@@ -203,15 +236,20 @@ func collectRelatedResourcesWithBudget(ctx context.Context, client dynamic.Inter
 	}
 	if includeDirect {
 		collector.addOwnerRelationships()
-		collector.addSelectorRelationships()
-		collector.addStorageRelationships()
-		collector.addNativeReferences()
+		if collector.isEventResource() {
+			collector.addInvolvedObjectRelationship()
+		} else {
+			collector.addSelectorRelationships()
+			collector.addStorageRelationships()
+			collector.addNativeReferences()
+		}
 	}
 	if includeReverse {
-		collector.addOwnedDescendants()
+		if !collector.isEventResource() {
+			collector.addOwnedDescendants()
+		}
 	} else if includeDirect && object.GetUID() != "" {
-		collector.truncated = true
-		collector.addDeferredNotice(relatedTypeOwnedDescendant, relatedSourceOwnerReferences, relatedStatePartial, "Broad reverse-owner discovery was deferred until the secondary relationship operation is requested.")
+		collector.addDeferredOwnedDescendantNotices()
 	}
 	result := collector.result()
 	result.Diagnostics = relatedDiagnostics(budget, started, 0)
@@ -293,15 +331,25 @@ func nativeRelationshipDefinition(group, version, resource string) (ResourceDefi
 	return ResourceDefinition{Group: group, Version: version, Resource: resource, Kind: kind, Namespaced: namespaced}, true
 }
 
-// relatedDefinitionForKind finds a discovered definition from an owner API version and kind.
-func relatedDefinitionForKind(definitions []ResourceDefinition, apiVersion, kind string) (ResourceDefinition, bool) {
+// relatedDefinitionsForKind finds all discovered definitions for one exact API version and kind.
+func relatedDefinitionsForKind(definitions []ResourceDefinition, apiVersion, kind string) []ResourceDefinition {
 	group, version := splitAPIVersion(apiVersion)
+	matches := make([]ResourceDefinition, 0, 1)
 	for _, definition := range definitions {
 		if definition.Group == group && definition.Version == version && definition.Kind == kind {
-			return definition, true
+			matches = append(matches, definition)
 		}
 	}
-	return ResourceDefinition{}, false
+	return matches
+}
+
+// relatedDefinitionForKind finds one unambiguous discovered definition from an owner API version and kind.
+func relatedDefinitionForKind(definitions []ResourceDefinition, apiVersion, kind string) (ResourceDefinition, bool) {
+	matches := relatedDefinitionsForKind(definitions, apiVersion, kind)
+	if len(matches) != 1 {
+		return ResourceDefinition{}, false
+	}
+	return matches[0], true
 }
 
 // splitAPIVersion separates a core or grouped Kubernetes API version.
@@ -361,45 +409,222 @@ func (collector *relatedCollector) addOwnerRelationships() {
 	}
 }
 
-// addOwnedDescendants adds resources whose owner UID matches the current object's UID.
-func (collector *relatedCollector) addOwnedDescendants() {
-	uid := collector.object.GetUID()
-	if uid == "" {
-		collector.addNotice(relatedTypeOwnedDescendant, relatedSourceOwnerReferences, relatedItemUnavailable, "Reverse owner lookup requires the current object's metadata.uid.")
+// addInvolvedObjectRelationship resolves the exact target named by a core Event's involvedObject.
+func (collector *relatedCollector) addInvolvedObjectRelationship() {
+	item := RelatedResource{
+		Type:   relatedTypeInvolvedObject,
+		Source: relatedSourceInvolvedObject,
+		State:  relatedItemUnresolved,
+	}
+	involvedObject, found, err := unstructured.NestedMap(collector.object.Object, "involvedObject")
+	if err != nil {
+		item.Message = "Event involvedObject is malformed, so its target cannot be resolved safely."
+		collector.add(item)
 		return
 	}
-	definitions := collector.scannableDefinitions()
-	scanDefinitions := make([]ResourceDefinition, 0, len(definitions))
-	scanNamespaces := make([]string, 0, len(definitions))
-	for _, definition := range definitions {
-		if definitionKey(definition) == definitionKey(collector.currentDefinition) || !definitionAllowsList(definition) {
-			continue
-		}
-		namespace, ok := collector.scanNamespace(definition.Namespaced)
-		if !ok {
-			continue
-		}
-		scanDefinitions = append(scanDefinitions, definition)
-		scanNamespaces = append(scanNamespaces, namespace)
+	if !found {
+		return
 	}
 
-	results := make([]*unstructured.UnstructuredList, len(scanDefinitions))
-	errorsByDefinition := make([]error, len(scanDefinitions))
-	var waitGroup sync.WaitGroup
-	waitGroup.Add(len(scanDefinitions))
-	for index := range scanDefinitions {
-		index := index
-		go func() {
-			defer waitGroup.Done()
-			results[index], errorsByDefinition[index] = collector.list(scanDefinitions[index], scanNamespaces[index], metav1.ListOptions{Limit: relatedListLimit})
-		}()
+	item.APIVersion, _, err = relatedReferenceString(involvedObject, "apiVersion")
+	if err != nil {
+		item.Message = "Event involvedObject.apiVersion is malformed, so its target cannot be resolved safely."
+		collector.add(item)
+		return
 	}
-	waitGroup.Wait()
+	item.Kind, _, err = relatedReferenceString(involvedObject, "kind")
+	if err != nil {
+		item.Message = "Event involvedObject.kind is malformed, so its target cannot be resolved safely."
+		collector.add(item)
+		return
+	}
+	item.Name, _, err = relatedReferenceString(involvedObject, "name")
+	if err != nil {
+		item.Message = "Event involvedObject.name is malformed, so its target cannot be resolved safely."
+		collector.add(item)
+		return
+	}
+	item.Namespace, _, err = relatedReferenceString(involvedObject, "namespace")
+	if err != nil {
+		item.Message = "Event involvedObject.namespace is malformed, so its target cannot be resolved safely."
+		collector.add(item)
+		return
+	}
+	item.UID, _, err = relatedReferenceString(involvedObject, "uid")
+	if err != nil {
+		item.Message = "Event involvedObject.uid is malformed, so its target cannot be resolved safely."
+		collector.add(item)
+		return
+	}
+	if item.APIVersion == "" || item.Kind == "" || item.Name == "" {
+		item.Message = "Event involvedObject must include apiVersion, kind, and name before a safe target lookup."
+		collector.add(item)
+		return
+	}
 
-	for index, definition := range scanDefinitions {
-		items, err := results[index], errorsByDefinition[index]
+	definitions := relatedDefinitionsForKind(collector.definitions, item.APIVersion, item.Kind)
+	if len(definitions) == 0 {
+		item.Message = "The Event target API version and kind were not present in discovery, so navigation is unavailable."
+		collector.add(item)
+		return
+	}
+	if len(definitions) > 1 {
+		item.Message = "The Event target API version and kind matched multiple discovered resources, so navigation is unavailable."
+		collector.add(item)
+		return
+	}
+	definition := definitions[0]
+	item.Definition = relatedDefinitionPointer(definition)
+	targetNamespace := item.Namespace
+	if definition.Namespaced {
+		if targetNamespace == "" {
+			item.Message = "The Event target is namespaced, but involvedObject.namespace is missing."
+			collector.add(item)
+			return
+		}
+	} else if targetNamespace != "" {
+		item.Message = "The Event target is cluster-scoped, but involvedObject.namespace is not empty."
+		collector.add(item)
+		return
+	}
+	target, err := collector.getTarget(definition, targetNamespace, item.Name)
+	if err != nil {
+		item.State, item.Message = relatedItemErrorState(err)
+		collector.add(item)
+		return
+	}
+	if target.GetName() != item.Name {
+		item.Message = "The Event target response name did not match involvedObject.name."
+		collector.add(item)
+		return
+	}
+	if targetKind := target.GetKind(); targetKind != "" && targetKind != item.Kind {
+		item.Message = "The Event target response kind did not match involvedObject.kind."
+		collector.add(item)
+		return
+	}
+	if targetAPIVersion := target.GetAPIVersion(); targetAPIVersion != "" && targetAPIVersion != item.APIVersion {
+		item.Message = "The Event target response API version did not match involvedObject.apiVersion."
+		collector.add(item)
+		return
+	}
+	if item.UID != "" && target.GetUID() != types.UID(item.UID) {
+		item.Message = "The Event target name exists, but its UID does not match involvedObject.uid."
+		collector.add(item)
+		return
+	}
+	if definition.Namespaced && target.GetNamespace() != "" && target.GetNamespace() != targetNamespace {
+		item.Message = "The Event target response namespace did not match involvedObject.namespace."
+		collector.add(item)
+		return
+	}
+	item.State = relatedItemResolved
+	item.UID = string(target.GetUID())
+	item.Kind = relatedObjectKind(target, item.Kind)
+	collector.add(item)
+}
+
+// relatedReferenceString reads one optional string identity field from an Event ObjectReference.
+func relatedReferenceString(object map[string]interface{}, field string) (string, bool, error) {
+	value, found, err := unstructured.NestedString(object, field)
+	return strings.TrimSpace(value), found, err
+}
+
+// isEventResource identifies the exact core/v1 Event resource handled by the involvedObject rule.
+func (collector *relatedCollector) isEventResource() bool {
+	return collector.currentGroup == "" && collector.currentVersion == "v1" && collector.currentResource == "events" && collector.currentKind() == "Event"
+}
+
+// ownedDescendantQueryPlan builds only the explicit native child queries supported for the current resource.
+func (collector *relatedCollector) ownedDescendantQueryPlan() []relatedDescendantQuery {
+	uid := strings.TrimSpace(string(collector.object.GetUID()))
+	if uid == "" {
+		return nil
+	}
+	queries := make([]relatedDescendantQuery, 0, 1)
+	for _, rule := range nativeRelatedDescendantRules {
+		if collector.currentGroup != rule.parentGroup || collector.currentVersion != rule.parentVersion || collector.currentResource != rule.parentResource || collector.currentKind() != rule.parentKind {
+			continue
+		}
+		definition := relatedDefinition(collector.definitions, rule.childGroup, rule.childVersion, rule.childResource)
+		discovered := definition.Kind == rule.childKind
+		if !discovered {
+			fallback, fallbackFound := nativeRelationshipDefinition(rule.childGroup, rule.childVersion, rule.childResource)
+			if !fallbackFound {
+				continue
+			}
+			definition = fallback
+		}
+		namespace, namespaceOK := collector.descendantNamespace(definition.Namespaced)
+		queries = append(queries, relatedDescendantQuery{
+			definition:  definition,
+			namespace:   namespace,
+			namespaceOK: namespaceOK,
+			discovered:  discovered,
+			listAllowed: discovered && definitionAllowsList(definition),
+			source:      relatedDescendantSource(definition),
+		})
+	}
+	return queries
+}
+
+// relatedDescendantSource describes one exact child GVR in relationship notices.
+func relatedDescendantSource(definition ResourceDefinition) string {
+	return relatedSourceOwnerReferences + " -> " + apiVersionForDefinition(definition) + "/" + definition.Resource
+}
+
+// descendantNamespace determines whether a child list can be safely scoped to the current object's namespace.
+func (collector *relatedCollector) descendantNamespace(namespaced bool) (string, bool) {
+	if !namespaced {
+		return "", false
+	}
+	if !collector.currentNamespaced {
+		return "", false
+	}
+	namespace := strings.TrimSpace(collector.object.GetNamespace())
+	return namespace, namespace != ""
+}
+
+// addDeferredOwnedDescendantNotices advertises only supported native child queries for the optional phase.
+func (collector *relatedCollector) addDeferredOwnedDescendantNotices() {
+	for _, query := range collector.ownedDescendantQueryPlan() {
+		if !query.discovered {
+			collector.addNotice(relatedTypeOwnedDescendant, query.source, relatedItemUnavailable, fmt.Sprintf("The supported %s child API was not present in discovery.", query.definition.Kind))
+			continue
+		}
+		if !query.listAllowed {
+			collector.addNotice(relatedTypeOwnedDescendant, query.source, relatedItemUnavailable, fmt.Sprintf("Discovery did not advertise list access for supported %s descendants.", query.definition.Kind))
+			continue
+		}
+		if !query.namespaceOK {
+			collector.addNotice(relatedTypeOwnedDescendant, query.source, relatedItemUnavailable, fmt.Sprintf("The current namespace is not safe for targeted %s descendants.", query.definition.Kind))
+			continue
+		}
+		collector.truncated = true
+		collector.addDeferredNotice(relatedTypeOwnedDescendant, query.source, relatedStatePartial, fmt.Sprintf("Targeted %s descendants are available from the optional relationship operation.", query.definition.Kind))
+	}
+}
+
+// addOwnedDescendants lists only supported native children and filters each returned object by the exact owner UID.
+func (collector *relatedCollector) addOwnedDescendants() {
+	queries := collector.ownedDescendantQueryPlan()
+	uid := types.UID(strings.TrimSpace(string(collector.object.GetUID())))
+	for _, query := range queries {
+		if !query.discovered {
+			collector.addNotice(relatedTypeOwnedDescendant, query.source, relatedItemUnavailable, fmt.Sprintf("The supported %s child API was not present in discovery.", query.definition.Kind))
+			continue
+		}
+		if !query.listAllowed {
+			collector.addNotice(relatedTypeOwnedDescendant, query.source, relatedItemUnavailable, fmt.Sprintf("Discovery did not advertise list access for supported %s descendants.", query.definition.Kind))
+			continue
+		}
+		if !query.namespaceOK {
+			collector.addNotice(relatedTypeOwnedDescendant, query.source, relatedItemUnavailable, fmt.Sprintf("The current object has no safe namespace for targeted %s descendants.", query.definition.Kind))
+			continue
+		}
+		items, err := collector.list(query.definition, query.namespace, metav1.ListOptions{Limit: relatedListLimit})
 		if err != nil {
-			collector.addRelationshipListNotice(relatedTypeOwnedDescendant, relatedSourceOwnerReferences, err, fmt.Sprintf("Could not scan %s for owned descendants.", definition.Kind))
+			collector.addRelationshipListNotice(relatedTypeOwnedDescendant, query.source, err, fmt.Sprintf("Could not read targeted %s descendants.", query.definition.Kind))
 			continue
 		}
 		if items == nil {
@@ -411,23 +636,33 @@ func (collector *relatedCollector) addOwnedDescendants() {
 				if owner.UID != uid {
 					continue
 				}
+				namespace := item.GetNamespace()
+				if query.definition.Namespaced && namespace == "" {
+					namespace = query.namespace
+				}
+				apiVersion := item.GetAPIVersion()
+				if apiVersion == "" {
+					apiVersion = apiVersionForDefinition(query.definition)
+				}
 				collector.add(RelatedResource{
 					Type:               relatedTypeOwnedDescendant,
 					Source:             relatedSourceOwnerReferences,
 					State:              relatedItemResolved,
-					Definition:         relatedDefinitionPointer(definition),
-					APIVersion:         item.GetAPIVersion(),
-					Kind:               relatedObjectKind(item, definition.Kind),
+					Definition:         relatedDefinitionPointer(query.definition),
+					APIVersion:         apiVersion,
+					Kind:               relatedObjectKind(item, query.definition.Kind),
 					Name:               item.GetName(),
-					Namespace:          item.GetNamespace(),
+					Namespace:          namespace,
 					UID:                string(item.GetUID()),
 					Controller:         owner.Controller != nil && *owner.Controller,
 					BlockOwnerDeletion: owner.BlockOwnerDeletion != nil && *owner.BlockOwnerDeletion,
 				})
+				break
 			}
 		}
 		if items.GetContinue() != "" {
-			collector.markTruncated("Owned descendant results are capped by the Kubernetes list limit.")
+			collector.truncated = true
+			collector.addNotice(relatedTypeOwnedDescendant, query.source, relatedStatePartial, fmt.Sprintf("Targeted %s descendants are capped by the Kubernetes list limit.", query.definition.Kind))
 		}
 	}
 }
@@ -446,30 +681,6 @@ func (collector *relatedCollector) addRelationshipListNotice(relationshipType, s
 	}
 }
 
-// scannableDefinitions returns bounded, list-capable definitions for reverse owner discovery.
-func (collector *relatedCollector) scannableDefinitions() []ResourceDefinition {
-	definitions := make([]ResourceDefinition, 0, len(collector.definitions))
-	skipped := 0
-	for _, definition := range collector.definitions {
-		if strings.Contains(definition.Resource, "/") {
-			continue
-		}
-		if !definitionAllowsList(definition) {
-			skipped++
-			continue
-		}
-		definitions = append(definitions, definition)
-	}
-	if skipped > 0 {
-		collector.addNotice(relatedTypeOwnedDescendant, relatedSourceOwnerReferences, relatedItemUnavailable, fmt.Sprintf("Reverse owner discovery skipped %d discovered resources that do not advertise list access.", skipped))
-	}
-	if len(definitions) > relatedDefinitionScanLimit {
-		collector.markTruncated("Reverse owner discovery is limited to the first discovered list resources.")
-		definitions = definitions[:relatedDefinitionScanLimit]
-	}
-	return definitions
-}
-
 // definitionAllowsList uses advertised discovery verbs when they are available.
 func definitionAllowsList(definition ResourceDefinition) bool {
 	if len(definition.Verbs) == 0 {
@@ -481,22 +692,6 @@ func definitionAllowsList(definition ResourceDefinition) bool {
 		}
 	}
 	return false
-}
-
-// scanNamespace determines the safe namespace scope for reverse owner listing.
-func (collector *relatedCollector) scanNamespace(namespaced bool) (string, bool) {
-	if !namespaced {
-		return "", true
-	}
-	if collector.currentNamespaced {
-		namespace := collector.object.GetNamespace()
-		if namespace == "" {
-			collector.addNotice(relatedTypeOwnedDescendant, relatedSourceOwnerReferences, relatedItemUnavailable, "The current object has no namespace, so namespaced descendants were not scanned.")
-			return "", false
-		}
-		return namespace, true
-	}
-	return "", true
 }
 
 // addSelectorRelationships handles Service and workload selectors in both directions.

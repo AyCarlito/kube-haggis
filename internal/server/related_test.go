@@ -80,3 +80,29 @@ func TestHandleRelatedReverseUsesDeferredLoader(t *testing.T) {
 		t.Fatalf("deferred relationship endpoint failed: %d %s", response.Code, response.Body.String())
 	}
 }
+
+// TestHandleRelatedReverseDoesNotLoadEvents verifies the reverse endpoint cannot be used to scan Event descendants.
+func TestHandleRelatedReverseDoesNotLoadEvents(t *testing.T) {
+	called := false
+	server := &Server{
+		relatedReverse: func(context.Context, string, string, string, string, string, string, bool) (kube.RelatedResourceList, error) {
+			called = true
+			return kube.RelatedResourceList{}, nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/related/reverse?context=field&group=&version=v1&resource=events&namespace=default&name=warning&namespaced=true", nil)
+	response := httptest.NewRecorder()
+
+	server.handleRelatedReverse(response, request)
+
+	if response.Code != http.StatusOK || called {
+		t.Fatalf("Event reverse relationship loader was invoked: %d %s", response.Code, response.Body.String())
+	}
+	var payload kube.RelatedResourceList
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode Event reverse response: %v", err)
+	}
+	if payload.State != "empty" || len(payload.Items) != 0 || !strings.Contains(payload.Message, "involvedObject") {
+		t.Fatalf("Event reverse response did not explain omission: %+v", payload)
+	}
+}

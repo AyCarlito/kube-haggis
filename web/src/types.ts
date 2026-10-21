@@ -510,9 +510,19 @@ export interface EventSummary {
   name: string
   namespace?: string
   object: string
+  involvedObject?: EventObjectReference
   count: number
   firstSeen: string
   lastSeen: string
+}
+
+/** Contains the safe identity fields named by a Kubernetes Event involvedObject. */
+export interface EventObjectReference {
+  apiVersion: string
+  kind: string
+  name: string
+  namespace?: string
+  uid?: string
 }
 
 /** Contains Events associated with one Kubernetes resource. */

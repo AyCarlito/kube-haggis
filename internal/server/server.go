@@ -312,9 +312,17 @@ func (s *Server) handleRelated(writer http.ResponseWriter, request *http.Request
 	writeJSON(writer, http.StatusOK, relationships)
 }
 
-// handleRelatedReverse returns the deferred broad reverse-owner relationship phase.
+// handleRelatedReverse returns the deferred targeted native descendant relationship phase.
 func (s *Server) handleRelatedReverse(writer http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
+	if query.Get("group") == "" && query.Get("version") == "v1" && query.Get("resource") == "events" {
+		writeJSON(writer, http.StatusOK, kube.RelatedResourceList{
+			State:   "empty",
+			Message: "Events use involvedObject relationships; reverse-owner loading is not supported.",
+			Items:   []kube.RelatedResource{},
+		})
+		return
+	}
 	loadRelated := s.relatedReverse
 	if loadRelated == nil {
 		loadRelated = s.kube.RelatedReverseResources

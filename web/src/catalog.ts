@@ -1,4 +1,4 @@
-import type { ResourceDefinition, RouteState } from './types'
+import type { RelatedResource, ResourceDefinition, RouteState } from './types'
 
 /** Describes one served version within a grouped resource catalog. */
 export interface CatalogVersionGroup {
@@ -48,6 +48,12 @@ export function catalogResourcePath(definition: ResourceDefinition, name?: strin
   const group = definition.group ? `group-${encodeURIComponent(definition.group)}` : 'core'
   const base = `/resources/${group}/${encodeURIComponent(definition.version)}/${encodeURIComponent(definition.resource)}`
   return name === undefined ? base : `${base}/${encodeURIComponent(name)}`
+}
+
+/** Returns an exact detail route only for a resolved relationship with a discovered target definition. */
+export function relatedResourceDetailPath(item: Pick<RelatedResource, 'state' | 'definition' | 'name'>): string | undefined {
+  if (item.state !== 'resolved' || !item.definition || !item.name) return undefined
+  return catalogResourcePath(item.definition, item.name)
 }
 
 /** Keeps a short route only when the loaded catalog has exactly one matching resource name. */

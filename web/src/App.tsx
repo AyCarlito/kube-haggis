@@ -85,6 +85,7 @@ import {
   groupResourceCatalog,
   isAmbiguousCatalogRoute,
   parseResourceRoute,
+  relatedResourceDetailPath,
   resolveCatalogDefinition,
 } from './catalog'
 import { overviewEventDetailPath, overviewEventsPath, overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
@@ -3235,6 +3236,7 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
   const [error, setError] = useState('')
   const [reverseError, setReverseError] = useState('')
   const reverseRequestID = useRef(0)
+  const reverseSupported = !(definition.group === '' && definition.version === 'v1' && definition.resource === 'events')
 
   useEffect(() => {
     setResponse(null)
@@ -3263,8 +3265,9 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
     }
   }, [context, definition, namespace, name, isNew])
 
-  /** Loads broad reverse-owner relationships without delaying the direct relationship response. */
+  /** Loads supported reverse-owner relationships without delaying the direct relationship response. */
   async function loadReverseRelationships() {
+    if (!reverseSupported) return
     const requestID = reverseRequestID.current + 1
     reverseRequestID.current = requestID
     setReverseLoading(true)
@@ -3287,13 +3290,13 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
   const displayedResponse = response && reverseResponse ? mergeRelatedResponses(response, reverseResponse) : response
   const items = displayedResponse?.items ?? []
   const notices = displayedResponse?.notices ?? []
-  const reverseDeferred = Boolean(response?.notices?.some((notice) => notice.deferred)) && !reverseResponse
+  const reverseDeferred = reverseSupported && Boolean(response?.notices?.some((notice) => notice.deferred)) && !reverseResponse
   return <div className="relationship-panel">
     <div className="panel relationship-summary-panel">
       <PanelHeading eyebrow="Relationships" title="Related resources" action={relatedAggregateLabel(displayedResponse?.state || 'empty', items.length)} tone={relatedAggregateTone(displayedResponse?.state || 'empty')} />
       <p className="relationship-copy">Links are derived from Kubernetes owner metadata, native selectors, binding fields, and explicit PodSpec references. Only sanitized resource coordinates are returned; Secret values are never read into this view.</p>
       {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
-      {reverseDeferred && <button type="button" className="secondary-button" onClick={() => void loadReverseRelationships()} disabled={reverseLoading}>{reverseLoading ? <><LoaderCircle size={14} className="spin" /> Scanning reverse owners</> : <><Network size={14} /> Load owned descendants</>}</button>}
+      {reverseDeferred && <button type="button" className="secondary-button" onClick={() => void loadReverseRelationships()} disabled={reverseLoading}>{reverseLoading ? <><LoaderCircle size={14} className="spin" /> Reading supported descendants</> : <><Network size={14} /> Load supported descendants</>}</button>}
       {reverseError && <div className="inline-error"><AlertTriangle size={15} />{reverseError}</div>}
       {displayedResponse?.diagnostics && <div className="panel-note"><Activity size={13} /> {displayedResponse.diagnostics.queryCount}/{displayedResponse.diagnostics.queryBudget} relationship reads · {displayedResponse.diagnostics.durationMilliseconds} ms · {displayedResponse.diagnostics.concurrentLimit} concurrent max</div>}
     </div>
@@ -4145,7 +4148,8 @@ function pvcRequestedStorage(object: ResourceObject): string {
 
 /** Renders one related-resource target as a deep-link when it is verified and discovered. */
 function RelatedResourceRow({ item, onOpenResource }: { item: RelatedResource; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
-  const canOpen = item.state === 'resolved' && Boolean(item.definition && item.name)
+  const targetPath = relatedResourceDetailPath(item)
+  const canOpen = Boolean(targetPath)
   const kind = item.kind || item.definition?.kind || 'Resource'
   const name = item.name || 'Unnamed target'
   const row = <>
@@ -4189,6 +4193,7 @@ function relatedTypeLabel(type: string): string {
   const labels: Record<string, string> = {
     owner: 'Owner reference',
     'owned-descendant': 'Owned descendant',
+    'involved-object': 'Event involved object',
     'selector-match': 'Selector match',
     'selected-by': 'Selected by Service',
     'bound-volume': 'Bound volume',

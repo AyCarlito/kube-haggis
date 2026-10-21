@@ -259,7 +259,7 @@ export function fetchRelated(
   )
 }
 
-/** Loads the deferred broad reverse-owner relationship phase for one resource. */
+/** Loads the deferred targeted native descendant relationship phase for one resource. */
 export function fetchRelatedReverse(
   context: string,
   definition: ResourceDefinition,

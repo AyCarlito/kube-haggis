@@ -127,7 +127,7 @@ func TestBuildWarningEvents(t *testing.T) {
 			"reason":         "BackOff",
 			"message":        "container restart back-off",
 			"lastTimestamp":  time.Now().UTC().Format(time.RFC3339),
-			"involvedObject": map[string]interface{}{"kind": "Pod", "name": "api-0"},
+			"involvedObject": map[string]interface{}{"apiVersion": "v1", "kind": "Pod", "name": "api-0", "namespace": "default", "uid": "pod-uid"},
 		}},
 	}
 
@@ -148,7 +148,7 @@ func TestBuildEventSummaries(t *testing.T) {
 			"count":          int64(3),
 			"firstTimestamp": "2026-10-20T10:00:00Z",
 			"lastTimestamp":  "2026-10-20T10:05:00Z",
-			"involvedObject": map[string]interface{}{"kind": "Pod", "name": "api-0"},
+			"involvedObject": map[string]interface{}{"apiVersion": "v1", "kind": "Pod", "name": "api-0", "namespace": "default", "uid": "pod-uid"},
 		}},
 		{Object: map[string]interface{}{
 			"type":           "Normal",
@@ -161,6 +161,9 @@ func TestBuildEventSummaries(t *testing.T) {
 	events := buildEventSummaries(items, false)
 	if len(events) != 2 || events[0].Name != "backoff-event" || events[0].Count != 3 || events[0].Object != "Pod/api-0" || events[0].LastSeen.IsZero() {
 		t.Fatalf("unexpected event summaries: %+v", events)
+	}
+	if events[0].InvolvedObject == nil || events[0].InvolvedObject.APIVersion != "v1" || events[0].InvolvedObject.Kind != "Pod" || events[0].InvolvedObject.Name != "api-0" || events[0].InvolvedObject.Namespace != "default" || events[0].InvolvedObject.UID != "pod-uid" {
+		t.Fatalf("Event involvedObject identity was not preserved: %+v", events[0].InvolvedObject)
 	}
 	warnings := buildEventSummaries(items, true)
 	if len(warnings) != 1 || warnings[0].Type != "Warning" {
