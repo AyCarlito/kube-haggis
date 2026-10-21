@@ -3,6 +3,7 @@ import {
   catalogEventResourcePath,
   catalogResourcePath,
   catalogResourcePathForSlug,
+  catalogStaticNavigationPath,
   filterResourceCatalog,
   groupResourceCatalog,
   isAmbiguousCatalogRoute,
@@ -31,6 +32,15 @@ export function runCatalogModelTests(): void {
   assertCatalog(isAmbiguousCatalogRoute(shortRoute, definitions), 'ambiguous short route was not identified')
   assertCatalog(resolveCatalogDefinition(shortRoute, definitions) === undefined, 'ambiguous short route silently selected a resource')
   assertCatalog(catalogResourcePathForSlug('widgets', definitions) === '/resources/widgets', 'ambiguous navigation unexpectedly became canonical')
+  const duplicateMetricsDefinitions: ResourceDefinition[] = [
+    definitions[0],
+    { group: 'metrics.k8s.io', version: 'v1beta1', resource: 'pods', kind: 'PodMetrics', namespaced: true, scope: 'Namespaced', verbs: ['get'] },
+    { group: '', version: 'v1', resource: 'nodes', kind: 'Node', namespaced: false, scope: 'Cluster', verbs: ['get'] },
+    { group: 'metrics.k8s.io', version: 'v1beta1', resource: 'nodes', kind: 'NodeMetrics', namespaced: false, scope: 'Cluster', verbs: ['get'] },
+  ]
+  assertCatalog(catalogStaticNavigationPath('pods', duplicateMetricsDefinitions) === '/resources/core/v1/pods', 'static Pod navigation did not select the canonical core GVR')
+  assertCatalog(catalogStaticNavigationPath('nodes', duplicateMetricsDefinitions) === '/resources/core/v1/nodes', 'static Node navigation did not select the canonical core GVR')
+  assertCatalog(catalogStaticNavigationPath('widgets', definitions) === '/resources/widgets', 'unknown ambiguous static navigation did not retain its guarded short route')
   const eventDefinitions: ResourceDefinition[] = [
     { group: '', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] },
     { group: 'events.k8s.io', version: 'v1', resource: 'events', kind: 'Event', namespaced: true, scope: 'Namespaced', verbs: ['get', 'list'] },

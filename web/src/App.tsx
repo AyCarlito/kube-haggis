@@ -80,7 +80,7 @@ import {
 import {
   catalogEventResourcePath,
   catalogResourcePath,
-  catalogResourcePathForSlug,
+  catalogStaticNavigationPath,
   filterResourceCatalog,
   groupResourceCatalog,
   isAmbiguousCatalogRoute,
@@ -494,7 +494,7 @@ export default function App() {
               {group.items.map((item) => {
                 const Icon = item.icon
                 const isActive = 'path' in item ? route.path === item.path : item.resource ? route.resource === item.resource : !route.resource && !route.view
-                const destination = 'path' in item && item.path ? item.path : item.resource === 'events' ? catalogEventResourcePath(definitions) : item.resource ? catalogResourcePathForSlug(item.resource, definitions) : '/'
+                const destination = 'path' in item && item.path ? item.path : item.resource ? catalogStaticNavigationPath(item.resource, definitions) : '/'
                 return (
                   <a
                     className={`nav-item ${isActive ? 'nav-item-active' : ''}`}

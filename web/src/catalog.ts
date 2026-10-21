@@ -58,6 +58,31 @@ export function catalogResourcePathForSlug(resource: string, definitions: Resour
 	return name === undefined ? base : `${base}/${encodeURIComponent(name)}`
 }
 
+const staticNavigationResourceIdentities: Record<string, Pick<ResourceDefinition, 'group' | 'version' | 'resource'>> = {
+  pods: { group: '', version: 'v1', resource: 'pods' },
+  nodes: { group: '', version: 'v1', resource: 'nodes' },
+  events: { group: '', version: 'v1', resource: 'events' },
+  services: { group: '', version: 'v1', resource: 'services' },
+  configmaps: { group: '', version: 'v1', resource: 'configmaps' },
+  secrets: { group: '', version: 'v1', resource: 'secrets' },
+  persistentvolumeclaims: { group: '', version: 'v1', resource: 'persistentvolumeclaims' },
+  namespaces: { group: '', version: 'v1', resource: 'namespaces' },
+  deployments: { group: 'apps', version: 'v1', resource: 'deployments' },
+  statefulsets: { group: 'apps', version: 'v1', resource: 'statefulsets' },
+  daemonsets: { group: 'apps', version: 'v1', resource: 'daemonsets' },
+  jobs: { group: 'batch', version: 'v1', resource: 'jobs' },
+  cronjobs: { group: 'batch', version: 'v1', resource: 'cronjobs' },
+}
+
+/** Builds an exact route for a known static destination when its expected GVR is discovered, otherwise preserving generic slug routing. */
+export function catalogStaticNavigationPath(resource: string, definitions: ResourceDefinition[], name?: string): string {
+  const identity = staticNavigationResourceIdentities[resource]
+  const definition = identity
+    ? definitions.find((item) => item.group === identity.group && item.version === identity.version && item.resource === identity.resource)
+    : undefined
+  return definition ? catalogResourcePath(definition, name) : catalogResourcePathForSlug(resource, definitions, name)
+}
+
 /** Builds an exact Event route for core/v1 when both Kubernetes Event APIs are discovered. */
 export function catalogEventResourcePath(definitions: ResourceDefinition[], name?: string): string {
 	const coreEvents = definitions.find((item) => item.group === '' && item.version === 'v1' && item.resource === 'events')
