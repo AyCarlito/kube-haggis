@@ -576,8 +576,8 @@ func (store *diagnosticsStore) snapshot(kubernetes kube.DiagnosticsSnapshot, aud
 	if len(currentWatches) > maxDiagnosticWatches {
 		currentWatches = currentWatches[:maxDiagnosticWatches]
 	}
-	recentErrors := append([]diagnosticErrorEvent(nil), store.recentErrors...)
-	recentWatches := append([]diagnosticWatchEvent(nil), store.recentWatches...)
+	recentErrors := append([]diagnosticErrorEvent{}, store.recentErrors...)
+	recentWatches := append([]diagnosticWatchEvent{}, store.recentWatches...)
 	averageMilliseconds := float64(0)
 	if store.requestTotal > 0 {
 		averageMilliseconds = float64(store.durationTotal) / float64(store.requestTotal) / float64(time.Millisecond)

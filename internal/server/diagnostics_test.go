@@ -138,6 +138,26 @@ func TestDiagnosticsRetainsOnlyBoundedSafeEvents(t *testing.T) {
 	}
 }
 
+// TestDiagnosticsEmptyCollectionsEncodeAsArrays verifies clean snapshots never encode rendered collections as null.
+func TestDiagnosticsEmptyCollectionsEncodeAsArrays(t *testing.T) {
+	handler := (&Server{}).Handler()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/diagnostics", nil))
+	var payload struct {
+		RecentErrors []json.RawMessage `json:"recentErrors"`
+		Watches      struct {
+			Current []json.RawMessage `json:"current"`
+			Recent  []json.RawMessage `json:"recent"`
+		} `json:"watches"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode empty diagnostics response: %v", err)
+	}
+	if response.Code != http.StatusOK || payload.RecentErrors == nil || len(payload.RecentErrors) != 0 || payload.Watches.Current == nil || len(payload.Watches.Current) != 0 || payload.Watches.Recent == nil || len(payload.Watches.Recent) != 0 {
+		t.Fatalf("empty diagnostics collections were not encoded as arrays: status=%d payload=%+v body=%s", response.Code, payload, response.Body.String())
+	}
+}
+
 // TestHealthAndReadinessSeparateLiveness verifies liveness stays healthy when kubeconfig dependencies are absent.
 func TestHealthAndReadinessSeparateLiveness(t *testing.T) {
 	server := (&Server{kube: kube.NewService(filepath.Join(t.TempDir(), "missing-config"))}).Handler()

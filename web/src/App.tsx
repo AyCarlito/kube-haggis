@@ -97,7 +97,10 @@ import type {
   ClusterOverview,
   ContextSummary,
   ContextsResponse,
+  DiagnosticsErrorEvent,
   DiagnosticsResponse,
+  DiagnosticsWatchEvent,
+  DiagnosticsWatchView,
   CustomResourceCapabilities,
   CustomResourcePrinterColumn,
   EphemeralContainerRequest,
@@ -1371,7 +1374,7 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
       fetchDiagnostics(context)
         .then((nextResponse) => {
           if (!active) return
-          setResponse(nextResponse)
+          setResponse(normalizeDiagnosticsResponse(nextResponse))
           setError('')
         })
         .catch((loadError: Error) => active && setError(loadError.message || 'The local diagnostics endpoint could not be reached.'))
@@ -1391,9 +1394,12 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
 
   const discoveryTone = diagnosticsStateTone(response.discovery.state)
   const dependencyReady = response.kubeconfig.state !== 'error' && response.context.state === 'available' && response.discovery.state === 'available' && response.audit.state === 'available'
-  const sessions = response.sessions
-  const recentErrors = [...response.recentErrors].reverse()
-  const recentWatches = [...response.watches.recent].reverse()
+  const sessions = response.sessions ?? { terminal: 0, logs: 0, portForward: 0, watch: 0 }
+  const watches = response.watches ?? { active: 0, current: [], recent: [] }
+  const requests = response.requests ?? { total: 0, errors: 0, averageDurationMilliseconds: 0, maxDurationMilliseconds: 0, statuses: {}, operations: {}, errorCategories: {} }
+  const recentErrors = Array.isArray(response.recentErrors) ? [...response.recentErrors].reverse() : []
+  const recentWatches = Array.isArray(watches.recent) ? [...watches.recent].reverse() : []
+  const currentWatches = Array.isArray(watches.current) ? watches.current : []
   return (
     <div className="diagnostics-page">
       <section className="diagnostics-intro">
@@ -1449,25 +1455,25 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
       </div>
 
       <section className="diagnostics-panel diagnostics-requests panel">
-        <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">HTTP instrument</span><h2>Request counters &amp; timing</h2></div><span className="panel-action panel-action-neutral"><span />{response.requests.total} requests</span></div>
+        <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">HTTP instrument</span><h2>Request counters &amp; timing</h2></div><span className="panel-action panel-action-neutral"><span />{requests.total} requests</span></div>
         <div className="diagnostics-request-grid">
-          <DiagnosticsRequestMetric label="Requests" value={String(response.requests.total)} note="bounded total" />
-          <DiagnosticsRequestMetric label="Classified errors" value={String(response.requests.errors)} note="safe categories only" tone={response.requests.errors ? 'warning' : 'good'} />
-          <DiagnosticsRequestMetric label="Average" value={`${formatMilliseconds(response.requests.averageDurationMilliseconds)} ms`} note="completed requests" />
-          <DiagnosticsRequestMetric label="Slowest" value={`${formatMilliseconds(response.requests.maxDurationMilliseconds)} ms`} note="observed maximum" />
+          <DiagnosticsRequestMetric label="Requests" value={String(requests.total)} note="bounded total" />
+          <DiagnosticsRequestMetric label="Classified errors" value={String(requests.errors)} note="safe categories only" tone={requests.errors ? 'warning' : 'good'} />
+          <DiagnosticsRequestMetric label="Average" value={`${formatMilliseconds(requests.averageDurationMilliseconds)} ms`} note="completed requests" />
+          <DiagnosticsRequestMetric label="Slowest" value={`${formatMilliseconds(requests.maxDurationMilliseconds)} ms`} note="observed maximum" />
         </div>
         <div className="diagnostics-counter-columns">
-          <DiagnosticsCounterList title="Status" values={response.requests.statuses} />
-          <DiagnosticsCounterList title="Operation class" values={response.requests.operations} />
-          <DiagnosticsCounterList title="Error category" values={response.requests.errorCategories} emptyLabel="No classified errors" />
+          <DiagnosticsCounterList title="Status" values={requests.statuses} />
+          <DiagnosticsCounterList title="Operation class" values={requests.operations} />
+          <DiagnosticsCounterList title="Error category" values={requests.errorCategories} emptyLabel="No classified errors" />
         </div>
       </section>
 
       <div className="diagnostics-grid">
         <section className="diagnostics-panel panel">
-          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Watch ledger</span><h2>Recent lifecycle</h2></div><span className="panel-action panel-action-neutral"><span />{response.watches.active} active</span></div>
+          <div className="diagnostics-panel-heading"><div><span className="panel-eyebrow">Watch ledger</span><h2>Recent lifecycle</h2></div><span className="panel-action panel-action-neutral"><span />{watches.active} active</span></div>
           {!recentWatches.length ? <DiagnosticsEmptyState label="No server watch transitions yet" detail="Open a resource list or Event panel to see safe lifecycle state here." /> : <div className="diagnostics-event-list">{recentWatches.slice(0, 8).map((event, index) => <div className="diagnostics-event-row" key={`${event.at}-${event.state}-${index}`}><span className={`diagnostics-event-mark diagnostics-event-${event.errorCategory ? 'warning' : 'good'}`} /><div><strong>{diagnosticsWatchStateLabel(event.state, event.reconnect)}</strong><span>{event.resource || 'watch'}{event.context ? ` / ${event.context}` : ''}</span></div><code>{event.errorCategory || relativeTime(event.at)}</code></div>)}</div>}
-          {response.watches.current.length > 0 && <div className="diagnostics-watch-current">{response.watches.current.slice(0, 6).map((watch, index) => <div key={`${watch.resource}-${watch.context}-${index}`}><span className={`status-pill status-${watch.active ? 'good' : watch.errorCategory ? 'warning' : 'neutral'}`}><span />{watch.active ? 'Active' : diagnosticsStateLabel(watch.state)}</span><code>{watch.resource || 'watch'}</code><small>{watch.reconnects} reconnect{watch.reconnects === 1 ? '' : 's'}</small></div>)}</div>}
+          {currentWatches.length > 0 && <div className="diagnostics-watch-current">{currentWatches.slice(0, 6).map((watch, index) => <div key={`${watch.resource}-${watch.context}-${index}`}><span className={`status-pill status-${watch.active ? 'good' : watch.errorCategory ? 'warning' : 'neutral'}`}><span />{watch.active ? 'Active' : diagnosticsStateLabel(watch.state)}</span><code>{watch.resource || 'watch'}</code><small>{watch.reconnects} reconnect{watch.reconnects === 1 ? '' : 's'}</small></div>)}</div>}
         </section>
 
         <section className="diagnostics-panel panel">
@@ -1479,6 +1485,97 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
       <div className="diagnostics-footer-line"><span><RefreshCw size={13} /> Snapshot {relativeTime(response.generatedAt)}</span><span><Gauge size={13} /> Local only / no external telemetry</span><span><LockKeyhole size={13} /> Sensitive payloads excluded</span></div>
     </div>
   )
+}
+
+/** Identifies a JSON object before reading optional diagnostics fields from an older backend. */
+function isDiagnosticsRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+/** Normalizes bounded numeric diagnostics maps while discarding malformed values. */
+function normalizeDiagnosticsCounts(value: unknown): Record<string, number> {
+  if (!isDiagnosticsRecord(value)) return {}
+  return Object.fromEntries(Object.entries(value).filter(([, count]) => typeof count === 'number' && Number.isFinite(count))) as Record<string, number>
+}
+
+/** Normalizes a diagnostics payload so missing or older collections cannot break rendering. */
+function normalizeDiagnosticsResponse(value: unknown): DiagnosticsResponse {
+  const root = isDiagnosticsRecord(value) ? value : {}
+  const kubeconfig = isDiagnosticsRecord(root.kubeconfig) ? root.kubeconfig : {}
+  const contextInfo = isDiagnosticsRecord(root.context) ? root.context : {}
+  const discovery = isDiagnosticsRecord(root.discovery) ? root.discovery : {}
+  const watches = isDiagnosticsRecord(root.watches) ? root.watches : {}
+  const sessions = isDiagnosticsRecord(root.sessions) ? root.sessions : {}
+  const audit = isDiagnosticsRecord(root.audit) ? root.audit : {}
+  const requests = isDiagnosticsRecord(root.requests) ? root.requests : {}
+  const recentErrors: DiagnosticsErrorEvent[] = (Array.isArray(root.recentErrors) ? root.recentErrors : []).filter(isDiagnosticsRecord).map((event) => ({
+    at: typeof event.at === 'string' ? event.at : '',
+    status: typeof event.status === 'number' && Number.isFinite(event.status) ? event.status : undefined,
+    category: typeof event.category === 'string' ? event.category : 'unknown',
+    operation: typeof event.operation === 'string' ? event.operation : 'request',
+  }))
+  const recentWatches: DiagnosticsWatchEvent[] = (Array.isArray(watches.recent) ? watches.recent : []).filter(isDiagnosticsRecord).map((event) => ({
+    at: typeof event.at === 'string' ? event.at : '',
+    context: typeof event.context === 'string' ? event.context : undefined,
+    resource: typeof event.resource === 'string' ? event.resource : undefined,
+    state: typeof event.state === 'string' ? event.state : 'unknown',
+    reconnect: event.reconnect === true,
+    errorCategory: typeof event.errorCategory === 'string' ? event.errorCategory : undefined,
+  }))
+  const currentWatches: DiagnosticsWatchView[] = (Array.isArray(watches.current) ? watches.current : []).filter(isDiagnosticsRecord).map((watch) => ({
+    context: typeof watch.context === 'string' ? watch.context : undefined,
+    resource: typeof watch.resource === 'string' ? watch.resource : undefined,
+    state: typeof watch.state === 'string' ? watch.state : 'unknown',
+    lastAt: typeof watch.lastAt === 'string' ? watch.lastAt : '',
+    errorCategory: typeof watch.errorCategory === 'string' ? watch.errorCategory : undefined,
+    reconnects: typeof watch.reconnects === 'number' && Number.isFinite(watch.reconnects) ? watch.reconnects : 0,
+    active: watch.active === true,
+  }))
+  return {
+    generatedAt: typeof root.generatedAt === 'string' ? root.generatedAt : new Date(0).toISOString(),
+    uptimeSeconds: typeof root.uptimeSeconds === 'number' && Number.isFinite(root.uptimeSeconds) ? root.uptimeSeconds : 0,
+    kubeconfig: {
+      source: typeof kubeconfig.source === 'string' ? kubeconfig.source : '',
+      state: typeof kubeconfig.state === 'string' ? kubeconfig.state : 'unavailable',
+      revision: typeof kubeconfig.revision === 'number' && Number.isFinite(kubeconfig.revision) ? kubeconfig.revision : 0,
+    },
+    context: {
+      current: typeof contextInfo.current === 'string' ? contextInfo.current : '',
+      selected: typeof contextInfo.selected === 'string' ? contextInfo.selected : '',
+      state: typeof contextInfo.state === 'string' ? contextInfo.state : 'unavailable',
+    },
+    discovery: {
+      context: typeof discovery.context === 'string' ? discovery.context : '',
+      revision: typeof discovery.revision === 'number' && Number.isFinite(discovery.revision) ? discovery.revision : 0,
+      state: typeof discovery.state === 'string' ? discovery.state : 'unavailable',
+      ageSeconds: typeof discovery.ageSeconds === 'number' && Number.isFinite(discovery.ageSeconds) ? discovery.ageSeconds : undefined,
+      loadedAt: typeof discovery.loadedAt === 'string' ? discovery.loadedAt : undefined,
+      itemCount: typeof discovery.itemCount === 'number' && Number.isFinite(discovery.itemCount) ? discovery.itemCount : 0,
+      issueCount: typeof discovery.issueCount === 'number' && Number.isFinite(discovery.issueCount) ? discovery.issueCount : 0,
+    },
+    watches: {
+      active: typeof watches.active === 'number' && Number.isFinite(watches.active) ? watches.active : 0,
+      current: currentWatches,
+      recent: recentWatches,
+    },
+    recentErrors,
+    sessions: {
+      terminal: typeof sessions.terminal === 'number' && Number.isFinite(sessions.terminal) ? sessions.terminal : 0,
+      logs: typeof sessions.logs === 'number' && Number.isFinite(sessions.logs) ? sessions.logs : 0,
+      portForward: typeof sessions.portForward === 'number' && Number.isFinite(sessions.portForward) ? sessions.portForward : 0,
+      watch: typeof sessions.watch === 'number' && Number.isFinite(sessions.watch) ? sessions.watch : 0,
+    },
+    audit: { state: typeof audit.state === 'string' ? audit.state : 'unavailable' },
+    requests: {
+      total: typeof requests.total === 'number' && Number.isFinite(requests.total) ? requests.total : 0,
+      errors: typeof requests.errors === 'number' && Number.isFinite(requests.errors) ? requests.errors : 0,
+      averageDurationMilliseconds: typeof requests.averageDurationMilliseconds === 'number' && Number.isFinite(requests.averageDurationMilliseconds) ? requests.averageDurationMilliseconds : 0,
+      maxDurationMilliseconds: typeof requests.maxDurationMilliseconds === 'number' && Number.isFinite(requests.maxDurationMilliseconds) ? requests.maxDurationMilliseconds : 0,
+      statuses: normalizeDiagnosticsCounts(requests.statuses),
+      operations: normalizeDiagnosticsCounts(requests.operations),
+      errorCategories: normalizeDiagnosticsCounts(requests.errorCategories),
+    },
+  }
 }
 
 /** Renders the explicit disconnected state for a local diagnostics endpoint. */
