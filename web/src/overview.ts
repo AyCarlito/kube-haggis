@@ -20,6 +20,12 @@ export interface OverviewNavigationTargets {
   podRestarts?: string
 }
 
+/** Describes one exact resource detail destination for a landing-page metric sample. */
+export interface OverviewMetricDestination {
+  path: string
+  namespace?: string
+}
+
 /** Returns the exact core/v1 Events list route when that resource is discoverable. */
 export function overviewEventsPath(definitions: ResourceDefinition[]): string | undefined {
   const events = definitions.some((definition) => definition.group === '' && definition.version === 'v1' && definition.resource === 'events')
@@ -57,6 +63,19 @@ function findExactDefinition(definitions: ResourceDefinition[], identity: Overvi
 function exactResourcePath(definitions: ResourceDefinition[], identity: OverviewResourceIdentity): string | undefined {
   const definition = findExactDefinition(definitions, identity)
   return definition ? catalogResourcePath(definition) : undefined
+}
+
+const metricResourceIdentities: Record<'node' | 'pod', OverviewResourceIdentity> = {
+  node: { group: '', version: 'v1', resource: 'nodes' },
+  pod: { group: '', version: 'v1', resource: 'pods' },
+}
+
+/** Returns an exact discovered Node or namespaced Pod detail destination for a metric sample. */
+export function overviewMetricDestination(definitions: ResourceDefinition[], kind: 'node' | 'pod', name: string, namespace?: string): OverviewMetricDestination | undefined {
+  if (!name || (kind === 'pod' && !namespace)) return undefined
+  const definition = findExactDefinition(definitions, metricResourceIdentities[kind])
+  if (!definition) return undefined
+  return kind === 'pod' ? { path: catalogResourcePath(definition, name), namespace } : { path: catalogResourcePath(definition, name) }
 }
 
 /** Builds workload links without selecting a misleading single controller kind for aggregate health. */

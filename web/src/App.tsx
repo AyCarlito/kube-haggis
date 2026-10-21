@@ -88,7 +88,7 @@ import {
   relatedResourceDetailPath,
   resolveCatalogDefinition,
 } from './catalog'
-import { overviewEventDetailPath, overviewEventsPath, overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
+import { overviewEventDetailPath, overviewEventsPath, overviewMetricDestination, overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
 import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchGroupOptions, searchHref, searchKindOptions, searchQueryEquals, searchResourceOptions, searchResultKey, searchResultResourcePath, searchDefinitionCandidates } from './search'
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
@@ -96,6 +96,7 @@ import { isOperationalReadPackResource, operationalReadPackStateLabel } from './
 import { parseSchemaInput, projectSchemaIdentityFields, validateSchemaScalarValue } from './schemaForm'
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
 import { parseWorkloadReplicaInput, workloadReplicaInput, WORKLOAD_REPLICA_VALIDATION_MESSAGE } from './workload'
+import { MetricSample } from './metricSample'
 import type {
   AuditEntry,
   AuditResponse,
@@ -647,7 +648,7 @@ function OverviewPage({ context, namespace, definitions, contexts, activeContext
         </div>
       </section>
 
-      <MetricsPanel metrics={overview.metrics} metricsAvailable={overview.metricsAvailable} loading={loading} />
+      <MetricsPanel metrics={overview.metrics} metricsAvailable={overview.metricsAvailable} loading={loading} definitions={definitions} context={context} namespace={namespace} />
 
       <section className="dashboard-footer-line">
         <span><RefreshCw size={13} /> Refreshed {relativeTime(overview.updatedAt)}</span>
@@ -706,7 +707,7 @@ function WorkloadDestination({ target, context, namespace }: { target: WorkloadN
 }
 
 /** Renders native node and Pod usage charts with explicit source states. */
-function MetricsPanel({ metrics, metricsAvailable, loading }: { metrics: MetricsOverview; metricsAvailable: boolean; loading: boolean }) {
+function MetricsPanel({ metrics, metricsAvailable, loading, definitions, context, namespace }: { metrics: MetricsOverview; metricsAvailable: boolean; loading: boolean; definitions: ResourceDefinition[]; context: string; namespace: string }) {
   const hasNodeSamples = metrics.nodes.length > 0
   const hasPodSamples = metrics.pods.length > 0
   const hasSamples = hasNodeSamples || hasPodSamples
@@ -726,8 +727,8 @@ function MetricsPanel({ metrics, metricsAvailable, loading }: { metrics: Metrics
       {!hasSamples ? <MetricStateNotice state={displayState} message={displayState === 'loading' ? undefined : metrics.message} /> : null}
       {hasSamples ? (
         <div className="metrics-chart-grid">
-          <NodeUsageChart state={metrics.nodeState} message={metrics.nodeMessage} count={metrics.nodeCount} items={metrics.nodes} />
-          <PodUsageChart state={metrics.podState} message={metrics.podMessage} count={metrics.podCount} items={metrics.pods} />
+          <NodeUsageChart state={metrics.nodeState} message={metrics.nodeMessage} count={metrics.nodeCount} items={metrics.nodes} definitions={definitions} context={context} namespace={namespace} />
+          <PodUsageChart state={metrics.podState} message={metrics.podMessage} count={metrics.podCount} items={metrics.pods} definitions={definitions} context={context} />
         </div>
       ) : null}
       {hasMetricTimestamp(metrics.updatedAt) && <div className="metrics-panel-footer"><span><Activity size={13} /> Latest sample {relativeTime(metrics.updatedAt)}</span><span>{metrics.message || 'Native metrics are read through the local Go backend.'}</span></div>}
@@ -739,7 +740,7 @@ function MetricsPanel({ metrics, metricsAvailable, loading }: { metrics: Metrics
 type MetricsDisplayState = MetricsState | 'loading'
 
 /** Renders a node usage chart with CPU and memory capacity bars. */
-function NodeUsageChart({ state, message, count, items }: { state: MetricsState; message?: string; count: number; items: NodeMetric[] }) {
+function NodeUsageChart({ state, message, count, items, definitions, context, namespace }: { state: MetricsState; message?: string; count: number; items: NodeMetric[]; definitions: ResourceDefinition[]; context: string; namespace: string }) {
   const maxCpu = Math.max(...items.map((item) => item.usage.cpuCores), 0)
   const maxMemory = Math.max(...items.map((item) => item.usage.memoryBytes), 0)
   const showNotice = state !== 'available' && state !== 'stale'
@@ -751,13 +752,13 @@ function NodeUsageChart({ state, message, count, items }: { state: MetricsState;
       </div>
       {showNotice || !items.length ? <MetricStateNotice state={state} message={message} compact /> : null}
       {state === 'stale' && items.length ? <div className="metrics-stale-note"><AlertTriangle size={14} />{message || 'Node samples may be stale.'}</div> : null}
-      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <NodeUsageRow key={item.name} item={item} maxCpu={maxCpu} maxMemory={maxMemory} />)}</div> : null}
+      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <NodeUsageRow key={item.name} item={item} maxCpu={maxCpu} maxMemory={maxMemory} definitions={definitions} context={context} namespace={namespace} />)}</div> : null}
     </article>
   )
 }
 
 /** Renders a Pod usage chart with relative CPU and memory bars. */
-function PodUsageChart({ state, message, count, items }: { state: MetricsState; message?: string; count: number; items: PodMetric[] }) {
+function PodUsageChart({ state, message, count, items, definitions, context }: { state: MetricsState; message?: string; count: number; items: PodMetric[]; definitions: ResourceDefinition[]; context: string }) {
   const maxCpu = Math.max(...items.map((item) => item.usage.cpuCores), 0)
   const maxMemory = Math.max(...items.map((item) => item.usage.memoryBytes), 0)
   const showNotice = state !== 'available' && state !== 'stale'
@@ -769,22 +770,26 @@ function PodUsageChart({ state, message, count, items }: { state: MetricsState; 
       </div>
       {showNotice || !items.length ? <MetricStateNotice state={state} message={message} compact /> : null}
       {state === 'stale' && items.length ? <div className="metrics-stale-note"><AlertTriangle size={14} />{message || 'Pod samples may be stale.'}</div> : null}
-      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <PodUsageRow key={`${item.namespace}/${item.name}`} item={item} maxCpu={maxCpu} maxMemory={maxMemory} />)}</div> : null}
+      {!showNotice && items.length ? <div className="metrics-chart-list">{items.map((item) => <PodUsageRow key={`${item.namespace}/${item.name}`} item={item} maxCpu={maxCpu} maxMemory={maxMemory} definitions={definitions} context={context} />)}</div> : null}
     </article>
   )
 }
 
 /** Renders one node's CPU and memory utilization bars. */
-function NodeUsageRow({ item, maxCpu, maxMemory }: { item: NodeMetric; maxCpu: number; maxMemory: number }) {
+function NodeUsageRow({ item, maxCpu, maxMemory, definitions, context, namespace }: { item: NodeMetric; maxCpu: number; maxMemory: number; definitions: ResourceDefinition[]; context: string; namespace: string }) {
   const cpuWidth = usageBarWidth(item.cpuPercent, item.usage.cpuCores, maxCpu)
   const memoryWidth = usageBarWidth(item.memoryPercent, item.usage.memoryBytes, maxMemory)
-  return <div className="metrics-row"><div className="metrics-row-label"><strong>{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={cpuWidth} value={item.cpuPercent > 0 ? `${formatMetricPercent(item.cpuPercent)}` : formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={memoryWidth} value={item.memoryPercent > 0 ? `${formatMetricPercent(item.memoryPercent)}` : formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></div>
+  const destination = overviewMetricDestination(definitions, 'node', item.name)
+  const href = destination ? routeHref(destination.path, context, namespace) : undefined
+  return <MetricSample href={href} ariaLabel={`Open Node ${item.name} resource detail`}><div className="metrics-row-label"><strong>{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={cpuWidth} value={item.cpuPercent > 0 ? `${formatMetricPercent(item.cpuPercent)}` : formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={memoryWidth} value={item.memoryPercent > 0 ? `${formatMetricPercent(item.memoryPercent)}` : formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></MetricSample>
 }
 
 /** Renders one Pod's aggregated CPU and memory bars. */
-function PodUsageRow({ item, maxCpu, maxMemory }: { item: PodMetric; maxCpu: number; maxMemory: number }) {
-  const namespace = item.namespace ? `${item.namespace}/` : ''
-  return <div className="metrics-row"><div className="metrics-row-label"><strong>{namespace}{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={usageBarWidth(0, item.usage.cpuCores, maxCpu)} value={formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={usageBarWidth(0, item.usage.memoryBytes, maxMemory)} value={formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></div>
+function PodUsageRow({ item, maxCpu, maxMemory, definitions, context }: { item: PodMetric; maxCpu: number; maxMemory: number; definitions: ResourceDefinition[]; context: string }) {
+  const podPrefix = item.namespace ? `${item.namespace}/` : ''
+  const destination = overviewMetricDestination(definitions, 'pod', item.name, item.namespace)
+  const href = destination?.namespace ? routeHref(destination.path, context, destination.namespace) : undefined
+  return <MetricSample href={href} ariaLabel={item.namespace ? `Open Pod ${item.name} in namespace ${item.namespace} resource detail` : `Pod ${item.name} resource detail unavailable without a namespace`}><div className="metrics-row-label"><strong>{podPrefix}{item.name}</strong><span>{formatMetricCPU(item.usage.cpuCores)} CPU / {formatMetricMemory(item.usage.memoryBytes)}</span></div><MetricBar label="CPU" width={usageBarWidth(0, item.usage.cpuCores, maxCpu)} value={formatMetricCPU(item.usage.cpuCores)} tone="copper" /><MetricBar label="MEM" width={usageBarWidth(0, item.usage.memoryBytes, maxMemory)} value={formatMetricMemory(item.usage.memoryBytes)} tone="moss" /></MetricSample>
 }
 
 /** Renders one labeled usage bar shared by node and Pod rows. */
