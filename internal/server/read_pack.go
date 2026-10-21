@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 )
 
 // operationalReadPackLoader describes the bounded, read-only operational summary seam.

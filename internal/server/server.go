@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kube-haggis/kube-haggis/internal/audit"
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/audit"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -814,11 +814,6 @@ func redactMutationDetail(dryRun, success bool, detail string) string {
 func (s *Server) handleFrontend(writer http.ResponseWriter, request *http.Request) {
 	if s.webDir == "" {
 		http.Error(writer, "KubeHaggis frontend is not built", http.StatusNotFound)
-		return
-	}
-	if request.URL.Path == "/haggis.svg" {
-		assetPath := filepath.Join(s.webDir, "..", "..", "haggis.svg")
-		http.ServeFile(writer, request, assetPath)
 		return
 	}
 	cleanPath := filepath.Clean(request.URL.Path)

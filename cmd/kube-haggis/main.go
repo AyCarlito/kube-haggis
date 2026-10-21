@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/kube-haggis/kube-haggis/internal/audit"
-	"github.com/kube-haggis/kube-haggis/internal/kube"
-	"github.com/kube-haggis/kube-haggis/internal/server"
+	"github.com/AyCarlito/kube-haggis/internal/audit"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/server"
 )
 
 // main configures and starts the localhost KubeHaggis server.

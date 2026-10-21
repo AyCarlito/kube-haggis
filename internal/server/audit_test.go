@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kube-haggis/kube-haggis/internal/audit"
+	"github.com/AyCarlito/kube-haggis/internal/audit"
 )
 
 // TestHandleAuditReturnsSafeRedactedEntries verifies persisted error text cannot reach the browser.

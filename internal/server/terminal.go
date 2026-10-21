@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/kube-haggis/kube-haggis/internal/kube"
+	"github.com/AyCarlito/kube-haggis/internal/kube"
 	"golang.org/x/net/websocket"
 	"k8s.io/client-go/tools/remotecommand"
 )
