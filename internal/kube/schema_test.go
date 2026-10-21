@@ -2,14 +2,19 @@ package kube
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
+	openapi_v2 "github.com/google/gnostic-models/openapiv2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/openapi"
 	clienttesting "k8s.io/client-go/testing"
 )
 
@@ -90,6 +95,309 @@ func TestLoadResourceSchemaClassifiesRBACDenial(t *testing.T) {
 	if err != nil || result.State != resourceSchemaStatePermissionDenied || result.Schema != nil || strings.Contains(result.Message, "widgets.widgets.example.com") {
 		t.Fatalf("RBAC denial was not safely classified: result=%+v err=%v", result, err)
 	}
+}
+
+// TestLoadResourceSchemaPrefersOpenAPIV3AndLocksServerFields verifies exact v3 retrieval and safe form metadata.
+func TestLoadResourceSchemaPrefersOpenAPIV3AndLocksServerFields(t *testing.T) {
+	discovery := testSchemaDiscovery(t, "Deployment", map[string]interface{}{
+		"io.k8s.api.apps.v1.Deployment": map[string]interface{}{
+			"type":        "object",
+			"title":       "Workload deployment",
+			"description": "A workload controller.",
+			"properties": map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name":            map[string]interface{}{"type": "string"},
+						"namespace":       map[string]interface{}{"type": "string"},
+						"uid":             map[string]interface{}{"type": "string"},
+						"resourceVersion": map[string]interface{}{"type": "string"},
+						"labels":          map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+					},
+				},
+				"spec": map[string]interface{}{
+					"type":        "object",
+					"description": "Desired deployment state.",
+					"required":    []interface{}{"mode"},
+					"properties": map[string]interface{}{
+						"mode": map[string]interface{}{
+							"type":        "string",
+							"format":      "hostname",
+							"description": "Rollout mode.",
+							"default":     "active",
+							"enum":        []interface{}{"active", "paused"},
+							"minLength":   float64(1),
+						},
+					},
+				},
+				"status": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"ready": map[string]interface{}{"type": "boolean"},
+					},
+				},
+			},
+		},
+	}, nil)
+	result, err := loadResourceSchema(context.Background(), fake.NewSimpleDynamicClient(runtime.NewScheme()), "apps", "v1", "deployments", discovery)
+	if err != nil || result.State != resourceSchemaStateAvailable || result.Source != resourceSchemaSourceOpenAPIV3 || result.Kind != "Deployment" || result.Schema == nil {
+		t.Fatalf("OpenAPI v3 schema retrieval failed: result=%+v err=%v", result, err)
+	}
+	if result.Schema.Title != "Workload deployment" || result.Schema.Description != "A workload controller." {
+		t.Fatalf("root descriptions were not preserved: %+v", result.Schema)
+	}
+	metadata := schemaFieldProperty(result.Schema, "metadata")
+	nameField := schemaFieldProperty(metadata, "name")
+	namespaceField := schemaFieldProperty(metadata, "namespace")
+	uidField := schemaFieldProperty(metadata, "uid")
+	resourceVersionField := schemaFieldProperty(metadata, "resourceVersion")
+	if metadata == nil || nameField == nil || !nameField.ReadOnly || namespaceField == nil || !namespaceField.ReadOnly || uidField == nil || !uidField.ReadOnly || resourceVersionField == nil || !resourceVersionField.ReadOnly {
+		t.Fatalf("server-owned metadata fields were not locked: %+v", metadata)
+	}
+	spec := schemaFieldProperty(result.Schema, "spec")
+	mode := schemaFieldProperty(spec, "mode")
+	if spec == nil || mode == nil || !mode.Required || mode.Description != "Rollout mode." || mode.Format != "hostname" || mode.Default != "active" || len(mode.Enum) != 2 || mode.MinLength == nil || *mode.MinLength != 1 {
+		t.Fatalf("v3 field metadata was not normalized: spec=%+v mode=%+v", spec, mode)
+	}
+	status := schemaFieldProperty(result.Schema, "status")
+	readyField := schemaFieldProperty(status, "ready")
+	if status == nil || !status.ReadOnly || readyField == nil || !readyField.ReadOnly {
+		t.Fatalf("status was writable in the normalized form: %+v", status)
+	}
+}
+
+// TestLoadResourceSchemaFallsBackToOpenAPIV2 verifies the compatibility document is used when v3 is unavailable.
+func TestLoadResourceSchemaFallsBackToOpenAPIV2(t *testing.T) {
+	v2Schema := &openapi_v2.Schema{
+		Type:        &openapi_v2.TypeItem{Value: []string{"object"}},
+		Description: "A compatibility schema.",
+		Properties: &openapi_v2.Properties{AdditionalProperties: []*openapi_v2.NamedSchema{{
+			Name: "spec",
+			Value: &openapi_v2.Schema{
+				Type:       &openapi_v2.TypeItem{Value: []string{"object"}},
+				Required:   []string{"mode"},
+				Properties: &openapi_v2.Properties{AdditionalProperties: []*openapi_v2.NamedSchema{{Name: "mode", Value: &openapi_v2.Schema{Type: &openapi_v2.TypeItem{Value: []string{"string"}}, Default: &openapi_v2.Any{Yaml: "active"}, Description: "Compatibility mode."}}}},
+			},
+		}}},
+	}
+	discovery := testSchemaDiscovery(t, "Widget", nil, &openapi_v2.Document{Definitions: &openapi_v2.Definitions{AdditionalProperties: []*openapi_v2.NamedSchema{{Name: "io.k8s.api.example.v1.Widget", Value: v2Schema}}}})
+	result, err := loadResourceSchema(context.Background(), fake.NewSimpleDynamicClient(runtime.NewScheme()), "example", "v1", "widgets", discovery)
+	if err != nil || result.State != resourceSchemaStateAvailable || result.Source != resourceSchemaSourceOpenAPIV2 || result.Schema == nil {
+		t.Fatalf("OpenAPI v2 fallback failed: result=%+v err=%v", result, err)
+	}
+	if result.Schema.Description != "A compatibility schema." || schemaFieldProperty(schemaFieldProperty(result.Schema, "spec"), "mode").Default != "active" {
+		t.Fatalf("v2 descriptions/defaults were not preserved: %+v", result.Schema)
+	}
+}
+
+// TestSelectOpenAPISchemaRequiresExactGVK verifies version and kind mismatches cannot satisfy a schema request.
+func TestSelectOpenAPISchemaRequiresExactGVK(t *testing.T) {
+	definitions := map[string]map[string]interface{}{
+		"io.k8s.api.apps.v1.Deployment":      {"type": "object", "x-kubernetes-group-version-kind": []interface{}{map[string]interface{}{"group": "apps", "version": "v1", "kind": "StatefulSet"}}},
+		"io.k8s.api.apps.v1beta1.Deployment": {"type": "object", "x-kubernetes-group-version-kind": []interface{}{map[string]interface{}{"group": "apps", "version": "v1beta1", "kind": "Deployment"}}},
+	}
+	if _, found, err := selectOpenAPISchema(definitions, "apps", "v1", "Deployment"); err != nil || found {
+		t.Fatalf("mismatched GVK was selected: found=%t err=%v", found, err)
+	}
+	definitions["custom"] = map[string]interface{}{"type": "object", "x-kubernetes-group-version-kind": []interface{}{map[string]interface{}{"group": "apps", "version": "v1", "kind": "Deployment"}}}
+	selected, found, err := selectOpenAPISchema(definitions, "apps", "v1", "Deployment")
+	if err != nil || !found || selected["type"] != "object" {
+		t.Fatalf("exact extension GVK was not selected: selected=%+v found=%t err=%v", selected, found, err)
+	}
+	custom, found, err := selectOpenAPISchema(map[string]map[string]interface{}{"com.example.v1.Widget": {"type": "object"}}, "example.com", "v1", "Widget")
+	if err != nil || !found || custom["type"] != "object" {
+		t.Fatalf("reversed CRD model name was not selected: selected=%+v found=%t err=%v", custom, found, err)
+	}
+}
+
+// TestNormalizeOpenAPISchemaBoundsRecursiveReferences verifies recursive refs become bounded field fallbacks.
+func TestNormalizeOpenAPISchemaBoundsRecursiveReferences(t *testing.T) {
+	definitions := map[string]map[string]interface{}{
+		"#/components/schemas/Spec": {
+			"type":        "object",
+			"description": "Desired state.",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{"type": "string"},
+				"loop": map[string]interface{}{"$ref": "#/components/schemas/Spec"},
+			},
+		},
+	}
+	normalized, err := normalizeOpenAPISchema(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"spec": map[string]interface{}{"$ref": "#/components/schemas/Spec"},
+		},
+	}, definitions, "#/components/schemas/")
+	if err != nil || normalized.field == nil || len(normalized.fallbacks) != 1 || normalized.fallbacks[0].Path != "$.spec.loop" {
+		t.Fatalf("recursive ref was not converted to one bounded fallback: normalized=%+v err=%v", normalized, err)
+	}
+	if spec := schemaFieldProperty(normalized.field, "spec"); spec == nil || spec.Description != "Desired state." || schemaFieldProperty(spec, "name") == nil {
+		t.Fatalf("supported fields around recursive ref were lost: %+v", normalized.field)
+	}
+}
+
+// TestLoadResourceSchemaReportsOpenAPIStates verifies missing, malformed, unavailable, and RBAC outcomes remain explicit.
+func TestLoadResourceSchemaReportsOpenAPIStates(t *testing.T) {
+	tests := []struct {
+		name        string
+		discovery   resourceSchemaDiscovery
+		state       string
+		messagePart string
+	}{
+		{name: "missing", discovery: testSchemaDiscovery(t, "Deployment", nil, nil), state: resourceSchemaStateMissing, messagePart: "does not publish"},
+		{name: "malformed", discovery: testSchemaDiscovery(t, "Deployment", map[string]interface{}{"broken": "not a schema"}, nil), state: resourceSchemaStateMalformed, messagePart: "malformed"},
+		{name: "unavailable", discovery: testSchemaDiscoveryWithErrors(t, "Deployment", fmt.Errorf("connection refused"), nil), state: resourceSchemaStateUnavailable, messagePart: "unavailable"},
+		{name: "permission denied", discovery: testSchemaDiscoveryWithErrors(t, "Deployment", apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "list", nil), nil), state: resourceSchemaStatePermissionDenied, messagePart: "RBAC"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := loadResourceSchema(context.Background(), fake.NewSimpleDynamicClient(runtime.NewScheme()), "apps", "v1", "deployments", test.discovery)
+			if err != nil || result.State != test.state || !strings.Contains(result.Message, test.messagePart) {
+				t.Fatalf("unexpected explicit state: result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+// TestLoadResourceSchemaUsesYAMLFallbackForUnsupportedFields verifies a supported root keeps form fields beside union fallbacks.
+func TestLoadResourceSchemaUsesYAMLFallbackForUnsupportedFields(t *testing.T) {
+	discovery := testSchemaDiscovery(t, "Widget", map[string]interface{}{
+		"io.k8s.api.example.v1.Widget": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"spec": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"mode":  map[string]interface{}{"type": "string"},
+						"value": map[string]interface{}{"type": "string", "oneOf": []interface{}{map[string]interface{}{"type": "string"}}},
+					},
+				},
+			},
+		},
+	}, nil)
+	result, err := loadResourceSchema(context.Background(), fake.NewSimpleDynamicClient(runtime.NewScheme()), "example", "v1", "widgets", discovery)
+	if err != nil || result.State != resourceSchemaStateAvailable || result.Schema == nil || len(result.Fallbacks) != 1 || result.Fallbacks[0].Path != "$.spec.value" || schemaFieldProperty(schemaFieldProperty(result.Schema, "spec"), "mode") == nil || schemaFieldProperty(schemaFieldProperty(result.Schema, "spec"), "value") != nil {
+		t.Fatalf("unsupported field did not remain a YAML fallback: result=%+v err=%v", result, err)
+	}
+}
+
+// TestResourceSchemaCacheIsBoundedAndDetached verifies revision-scoped schema cache eviction and clone safety.
+func TestResourceSchemaCacheIsBoundedAndDetached(t *testing.T) {
+	service := &Service{revision: 1}
+	firstKey := resourceSchemaCacheKey{contextName: "field", revision: 1, group: "apps", version: "v1", resource: "resource-0"}
+	for index := 0; index < resourceSchemaCacheMaxEntries+1; index++ {
+		key := resourceSchemaCacheKey{contextName: "field", revision: 1, group: "apps", version: "v1", resource: fmt.Sprintf("resource-%d", index)}
+		service.storeResourceSchema(key, ResourceSchema{State: resourceSchemaStateAvailable, Schema: &SchemaField{Type: "object", Properties: []SchemaField{{Name: "spec", Type: "object"}}}})
+	}
+	if _, found := service.cachedResourceSchema(firstKey); found {
+		t.Fatal("oldest schema cache entry was not evicted")
+	}
+	lastKey := resourceSchemaCacheKey{contextName: "field", revision: 1, group: "apps", version: "v1", resource: fmt.Sprintf("resource-%d", resourceSchemaCacheMaxEntries)}
+	cached, found := service.cachedResourceSchema(lastKey)
+	if !found || cached.Schema == nil {
+		t.Fatalf("newest schema cache entry was not retained: %+v found=%t", cached, found)
+	}
+	cached.Schema.Properties[0].Name = "mutated"
+	uncopied, found := service.cachedResourceSchema(lastKey)
+	if !found || uncopied.Schema.Properties[0].Name != "spec" {
+		t.Fatalf("schema cache returned shared mutable data: %+v found=%t", uncopied, found)
+	}
+}
+
+// schemaDiscoveryFixture provides deterministic resource discovery and OpenAPI document responses for schema tests.
+type schemaDiscoveryFixture struct {
+	resources   *metav1.APIResourceList
+	resourceErr error
+	v3          openapi.Client
+	v2          *openapi_v2.Document
+	v2Err       error
+}
+
+// ServerResourcesForGroupVersion returns the fixture's exact top-level resource list.
+func (f *schemaDiscoveryFixture) ServerResourcesForGroupVersion(string) (*metav1.APIResourceList, error) {
+	return f.resources, f.resourceErr
+}
+
+// OpenAPIV3 returns the fixture's version-specific OpenAPI client.
+func (f *schemaDiscoveryFixture) OpenAPIV3() openapi.Client {
+	return f.v3
+}
+
+// OpenAPISchema returns the fixture's compatibility OpenAPI v2 document.
+func (f *schemaDiscoveryFixture) OpenAPISchema() (*openapi_v2.Document, error) {
+	return f.v2, f.v2Err
+}
+
+// schemaOpenAPIClient serves one raw version-specific document through the client-go OpenAPI interface.
+type schemaOpenAPIClient struct {
+	paths map[string]openapi.GroupVersion
+	err   error
+}
+
+// Paths returns deterministic version-specific OpenAPI paths.
+func (c *schemaOpenAPIClient) Paths() (map[string]openapi.GroupVersion, error) {
+	return c.paths, c.err
+}
+
+// schemaOpenAPIGroupVersion stores one JSON OpenAPI document for a fake version path.
+type schemaOpenAPIGroupVersion struct {
+	body []byte
+	err  error
+}
+
+// Schema returns the fake version-specific OpenAPI JSON regardless of requested content type.
+func (g *schemaOpenAPIGroupVersion) Schema(string) ([]byte, error) {
+	return g.body, g.err
+}
+
+// ServerRelativeURL returns the stable fake schema URL used only for the client cache key.
+func (g *schemaOpenAPIGroupVersion) ServerRelativeURL() string {
+	return "/openapi/v3/schema-test"
+}
+
+// testSchemaDiscovery builds a fixture with either a v3 component map or a v2 compatibility document.
+func testSchemaDiscovery(t *testing.T, kind string, schemas map[string]interface{}, v2 *openapi_v2.Document) *schemaDiscoveryFixture {
+	return testSchemaDiscoveryWithErrors(t, kind, nil, v2, schemas)
+}
+
+// testSchemaDiscoveryWithErrors builds a fixture with explicit v3 retrieval and v2 document behavior.
+func testSchemaDiscoveryWithErrors(t *testing.T, kind string, v3Err error, v2 *openapi_v2.Document, schemas ...map[string]interface{}) *schemaDiscoveryFixture {
+	t.Helper()
+	resource := strings.ToLower(kind) + "s"
+	fixture := &schemaDiscoveryFixture{
+		resources: &metav1.APIResourceList{APIResources: []metav1.APIResource{{Name: resource, Kind: kind}}},
+		v2:        v2,
+	}
+	if v3Err != nil {
+		fixture.v3 = &schemaOpenAPIClient{err: v3Err}
+		return fixture
+	}
+	paths := map[string]openapi.GroupVersion{}
+	if len(schemas) > 0 && schemas[0] != nil {
+		document := map[string]interface{}{"openapi": "3.0.0", "components": map[string]interface{}{"schemas": schemas[0]}}
+		body, err := json.Marshal(document)
+		if err != nil {
+			t.Fatalf("marshal fake OpenAPI v3 document: %v", err)
+		}
+		for _, path := range []string{"apis/apps/v1", "apis/example/v1", "api/v1"} {
+			paths[path] = &schemaOpenAPIGroupVersion{body: body}
+		}
+	}
+	fixture.v3 = &schemaOpenAPIClient{paths: paths}
+	return fixture
+}
+
+// schemaFieldProperty returns one named normalized child field.
+func schemaFieldProperty(field *SchemaField, name string) *SchemaField {
+	if field == nil {
+		return nil
+	}
+	for index := range field.Properties {
+		if field.Properties[index].Name == name {
+			return &field.Properties[index]
+		}
+	}
+	return nil
 }
 
 // TestParseCRDResourceSchemaUsesYAMLFallbackForUnsupportedConstructs verifies unsafe unions do not become guessed forms.

@@ -22,6 +22,8 @@ const (
 	resourceSchemaStateMissing          = "missing"
 	resourceSchemaStateNonStructural    = "non-structural"
 	resourceSchemaStatePermissionDenied = "permission-denied"
+	resourceSchemaStateUnavailable      = "unavailable"
+	resourceSchemaStateMalformed        = "malformed"
 	resourceSchemaStateError            = "error"
 	resourceSchemaMaxDepth              = 32
 	resourceSchemaMaxFields             = 512
@@ -36,6 +38,7 @@ type ResourceSchema struct {
 	Version            string           `json:"version"`
 	Resource           string           `json:"resource"`
 	Kind               string           `json:"kind,omitempty"`
+	Source             string           `json:"source,omitempty"`
 	Schema             *SchemaField     `json:"schema,omitempty"`
 	Fallbacks          []SchemaFallback `json:"fallbacks,omitempty"`
 	FallbacksTruncated bool             `json:"fallbacksTruncated,omitempty"`
@@ -76,7 +79,7 @@ type SchemaField struct {
 	UniqueItems          bool          `json:"uniqueItems,omitempty"`
 }
 
-// ResourceSchema returns the structural schema for a discovered custom resource.
+// ResourceSchema returns the normalized schema for one discovered resource GVR.
 func (s *Service) ResourceSchema(ctx context.Context, contextName, group, version, resource string) (ResourceSchema, error) {
 	group = strings.TrimSpace(group)
 	version = strings.TrimSpace(version)
@@ -84,22 +87,23 @@ func (s *Service) ResourceSchema(ctx context.Context, contextName, group, versio
 	if version == "" || resource == "" {
 		return ResourceSchema{}, fmt.Errorf("version and resource are required for schema discovery")
 	}
-	result := ResourceSchema{Group: group, Version: version, Resource: resource}
-	if group == "" || group == "apiextensions.k8s.io" {
-		result.State = resourceSchemaStateUnsupported
-		result.Message = "Schema forms are available for custom resources only; use the YAML editor for this resource."
-		return result, nil
-	}
-
-	dynamicClient, _, _, err := s.clients(contextName)
+	dynamicClient, discoveryClient, _, resolvedContext, revision, err := s.clientsWithRevision(contextName)
 	if err != nil {
 		return ResourceSchema{}, err
 	}
-	return loadResourceSchema(ctx, dynamicClient, group, version, resource)
+	key := resourceSchemaCacheKey{contextName: resolvedContext, revision: revision, group: group, version: version, resource: resource}
+	if cached, found := s.cachedResourceSchema(key); found {
+		return cached, nil
+	}
+	result, err := loadResourceSchema(ctx, dynamicClient, group, version, resource, discoveryClient)
+	if err == nil && result.State == resourceSchemaStateAvailable && result.Schema != nil {
+		s.storeResourceSchema(key, result)
+	}
+	return result, err
 }
 
-// loadResourceSchema reads one CustomResourceDefinition through the generic dynamic API.
-func loadResourceSchema(ctx context.Context, client dynamic.Interface, group, version, resource string) (ResourceSchema, error) {
+// loadCRDResourceSchema reads one CustomResourceDefinition through the generic dynamic API.
+func loadCRDResourceSchema(ctx context.Context, client dynamic.Interface, group, version, resource string) (ResourceSchema, error) {
 	result := ResourceSchema{Group: group, Version: version, Resource: resource}
 	crdName := resource + "." + group
 	crd, err := client.Resource(customResourceDefinitionGVR()).Get(ctx, crdName, metav1.GetOptions{})
@@ -444,6 +448,56 @@ func stripUnsupportedSchemaFieldsBounded(raw map[string]interface{}, path string
 		appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("unsupported schema construct %q", keyword))
 		return nil, nil
 	}
+	typeName, foundType, typeErr := unstructured.NestedString(raw, "type")
+	if typeErr != nil || !foundType || typeName == "" {
+		if path == "$" {
+			return nil, fmt.Errorf("schema field at %s does not declare a type", path)
+		}
+		appendSchemaFallback(fallbacks, truncated, path, "field schema does not declare a supported type")
+		return nil, nil
+	}
+	if !supportedSchemaType(typeName) {
+		if path == "$" {
+			return nil, fmt.Errorf("schema field at %s uses unsupported type %q", path, typeName)
+		}
+		appendSchemaFallback(fallbacks, truncated, path, fmt.Sprintf("field uses unsupported type %q", typeName))
+		return nil, nil
+	}
+	if typeName == "array" {
+		items, foundItems := raw["items"]
+		if !foundItems {
+			if path == "$" {
+				return nil, fmt.Errorf("schema array field at %s has no item schema", path)
+			}
+			appendSchemaFallback(fallbacks, truncated, path, "array item schema requires YAML")
+			return nil, nil
+		}
+		if _, ok := items.(map[string]interface{}); !ok {
+			if path == "$" {
+				return nil, fmt.Errorf("schema array field at %s has malformed item schema", path)
+			}
+			appendSchemaFallback(fallbacks, truncated, path, "malformed array item schema requires YAML")
+			return nil, nil
+		}
+	}
+	if typeName == "object" {
+		if additional, foundAdditional := raw["additionalProperties"]; foundAdditional {
+			if allowed, isBool := additional.(bool); isBool && allowed {
+				if path == "$" {
+					return nil, fmt.Errorf("schema object at %s allows untyped additional properties", path)
+				}
+				appendSchemaFallback(fallbacks, truncated, path, "untyped additional properties require YAML")
+				return nil, nil
+			}
+			if _, isMap := additional.(map[string]interface{}); !isMap && additional != nil {
+				if path == "$" {
+					return nil, fmt.Errorf("schema object at %s has malformed additional properties", path)
+				}
+				appendSchemaFallback(fallbacks, truncated, path, "malformed additional properties require YAML")
+				return nil, nil
+			}
+		}
+	}
 	if required, found := raw["required"]; found {
 		if requiredNames, ok := required.([]interface{}); ok && len(requiredNames) > resourceSchemaMaxFields {
 			if path == "$" {
@@ -479,7 +533,7 @@ func stripUnsupportedSchemaFieldsBounded(raw map[string]interface{}, path string
 				rawProperty := properties[propertyName]
 				property, ok := rawProperty.(map[string]interface{})
 				if !ok {
-					cleanedProperties[propertyName] = rawProperty
+					appendSchemaFallback(fallbacks, truncated, schemaPath(path, propertyName), "malformed field schema requires YAML")
 					continue
 				}
 				child, err := stripUnsupportedSchemaFieldsBounded(property, schemaPath(path, propertyName), fallbacks, truncated, depth+1, fields)

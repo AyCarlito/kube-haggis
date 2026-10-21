@@ -2389,7 +2389,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const [draftKept, setDraftKept] = useState(false)
   const isSecret = definition.resource === 'secrets'
   const isNew = name === 'new'
-  const schemaCandidate = !isSecret && isCustomResourceDefinition(definition)
+  const schemaCandidate = !isSecret
   const [resourceSchema, setResourceSchema] = useState<ResourceSchemaResponse | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(false)
 
@@ -2856,13 +2856,13 @@ function ConflictResolutionPanel({ conflict, currentYaml, isSecret, draftKept, r
   </section>
 }
 
-/** Renders a structural CRD form while keeping YAML as the complete editing fallback. */
+/** Renders a normalized Kubernetes resource form while keeping YAML as the complete editing fallback. */
 function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespace, writeEnabled, reviewReady, onChange, onOpenYaml }: { response: ResourceSchemaResponse | null; loading: boolean; object: ResourceObject; isNew: boolean; namespaced: boolean; namespace: string; writeEnabled: boolean; reviewReady: boolean; onChange: (object: ResourceObject) => void; onOpenYaml: () => void }) {
   if (loading && !response) {
-    return <div className="schema-form-panel"><div className="schema-form-loading"><LoaderCircle size={18} className="spin" /> Reading structural OpenAPI v3 schema</div></div>
+    return <div className="schema-form-panel"><div className="schema-form-loading"><LoaderCircle size={18} className="spin" /> Reading the version-specific OpenAPI schema</div></div>
   }
   if (!response || response.state !== 'available' || !response.schema) {
-    return <div className="schema-form-panel"><div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>Schema form unavailable</strong><span>YAML remains complete</span></div><span className="schema-state-chip schema-state-warning">{schemaStateLabel(response?.state)}</span></div><div className="schema-form-fallback"><AlertTriangle size={18} /><div><strong>{schemaStateTitle(response?.state)}</strong><span>{response?.message || 'The cluster did not provide a usable structural schema for this custom resource.'}</span></div></div><div className="schema-form-footer"><span>Generic CRUD and deep links remain available.</span><button type="button" className="secondary-button" onClick={onOpenYaml}><FileCode2 size={14} /> Open YAML editor</button></div></div>
+    return <div className="schema-form-panel"><div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>Schema form unavailable</strong><span>YAML remains complete</span></div><span className="schema-state-chip schema-state-warning">{schemaStateLabel(response?.state)}</span></div><div className="schema-form-fallback"><AlertTriangle size={18} /><div><strong>{schemaStateTitle(response?.state)}</strong><span>{response?.message || 'The Kubernetes API server did not provide a usable schema for this resource.'}</span></div></div><div className="schema-form-footer"><span>Generic CRUD and deep links remain available.</span><button type="button" className="secondary-button" onClick={onOpenYaml}><FileCode2 size={14} /> Open YAML editor</button></div></div>
   }
 
   const validationErrors = validateSchemaDocument(response.schema, object)
@@ -2871,10 +2871,13 @@ function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespa
   const metadataNamespace = typeof metadata.namespace === 'string' ? metadata.namespace : namespace === 'all' ? '' : namespace
   const fallbackText = response.fallbacks?.length ? schemaFallbackSummary(response.fallbacks, response.fallbacksTruncated) : ''
   const statusNotice = schemaStatusNotice(response)
+  const formSchema = response.schema.type === 'object' && response.schema.properties?.some((property) => property.name === 'metadata')
+    ? { ...response.schema, properties: response.schema.properties.filter((property) => property.name !== 'metadata') }
+    : response.schema
   const updatePath = (path: string[], value: unknown) => onChange(updateSchemaObject(object, path, value))
   return <div className="schema-form-panel">
-    <div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>{isNew ? 'Create from schema' : 'Edit from schema'}</strong><span>structural OpenAPI v3</span></div><div className="schema-form-header-meta">{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}<span className="schema-state-chip schema-state-good">Form ready</span></div></div>
-    <div className="schema-form-intro"><strong>Fields are generated from the cluster CRD.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span>{response.message && <span>{response.message}</span>}</div>
+     <div className="schema-form-header"><div className="logs-title"><FileCode2 size={16} /><strong>{isNew ? 'Create from schema' : 'Edit from schema'}</strong><span>{schemaSourceLabel(response.source)}</span></div><div className="schema-form-header-meta">{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}<span className="schema-state-chip schema-state-good">Form ready</span></div></div>
+     <div className="schema-form-intro"><strong>Fields are generated from the Kubernetes API schema.</strong><span>Nested objects, arrays, typed maps, required fields, defaults, enums, descriptions, and common validation constraints are shown here. YAML remains the complete fallback for fields the form does not model.</span><span>Identity metadata is controlled by the Metadata section above; labels, annotations, and other metadata remain available through YAML.</span>{response.message && <span>{response.message}</span>}</div>
     {statusNotice && <div className="schema-readonly-notice"><LockKeyhole size={15} /><span>{statusNotice}</span></div>}
     {fallbackText && <div className="schema-partial-fallback"><AlertTriangle size={15} /><div><strong>Some fields use the YAML fallback</strong><span>{fallbackText}</span></div><button type="button" className="text-button" onClick={onOpenYaml}>Open YAML</button></div>}
     {!writeEnabled && <div className="operation-lock"><LockKeyhole size={14} /> Enable write mode to edit this form. Review still performs the existing Kubernetes server-side dry-run.</div>}
@@ -2886,7 +2889,7 @@ function SchemaFormPanel({ response, loading, object, isNew, namespaced, namespa
           {namespaced && <label className="schema-field"><span>Namespace {isNew && namespace === 'all' && <b>required</b>}</span><input value={metadataNamespace} onChange={(event) => updatePath(['metadata', 'namespace'], event.target.value || undefined)} readOnly={!isNew} required={isNew && namespace === 'all'} /></label>}
         </div>
       </fieldset>
-      <SchemaFieldEditor field={response.schema} value={object} path={[]} writeEnabled={writeEnabled} onChange={updatePath} />
+      <SchemaFieldEditor field={formSchema} value={object} path={[]} writeEnabled={writeEnabled} onChange={updatePath} />
     </form>
     {validationErrors.length > 0 && <div className="schema-validation"><AlertTriangle size={15} /><div><strong>Form needs attention</strong><span>{validationErrors.slice(0, 4).join(' ')}</span></div></div>}
     <div className="schema-form-footer"><span><ShieldCheck size={14} /> Full-object update / resource-version concurrency</span><button type="button" className="secondary-button" onClick={onOpenYaml}><FileCode2 size={14} /> Use YAML fallback</button></div>
@@ -2953,18 +2956,29 @@ function schemaStateLabel(state?: ResourceSchemaResponse['state']): string {
   if (state === 'non-structural') return 'Non-structural'
   if (state === 'unsupported') return 'Unsupported'
   if (state === 'missing') return 'Schema missing'
+  if (state === 'unavailable') return 'API unavailable'
+  if (state === 'malformed') return 'Malformed schema'
   if (state === 'error') return 'Read failed'
   return state === 'available' ? 'Available' : 'Reading'
 }
 
 /** Returns a direct explanation for one schema fallback state. */
 function schemaStateTitle(state?: ResourceSchemaResponse['state']): string {
-  if (state === 'permission-denied') return 'CRD schema access is denied'
-  if (state === 'non-structural') return 'This CRD is not structural'
+  if (state === 'permission-denied') return 'Schema access is denied by Kubernetes RBAC'
+  if (state === 'non-structural') return 'This resource has no structural schema'
   if (state === 'unsupported') return 'This schema needs YAML'
-  if (state === 'missing') return 'No matching CRD schema'
-  if (state === 'error') return 'CRD schema could not be read'
+  if (state === 'missing') return 'No matching OpenAPI schema'
+  if (state === 'unavailable') return 'The OpenAPI API is unavailable'
+  if (state === 'malformed') return 'The API returned a malformed schema'
+  if (state === 'error') return 'The resource schema could not be read'
   return 'Schema form is loading'
+}
+
+/** Returns the authenticated schema source shown beside a ready form. */
+function schemaSourceLabel(source?: ResourceSchemaResponse['source']): string {
+  if (source === 'openapi-v2') return 'OpenAPI v2 compatibility'
+  if (source === 'crd') return 'CRD schema fallback'
+  return 'OpenAPI v3 / version-specific'
 }
 
 /** Returns a safe immutable update of one resource object path. */
@@ -4859,13 +4873,6 @@ function metadataString(object: ResourceObject, field: string): string {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return ''
   const value = (metadata as Record<string, unknown>)[field]
   return typeof value === 'string' ? value : ''
-}
-
-/** Identifies custom-resource candidates without probing built-in API groups for CRD schemas. */
-function isCustomResourceDefinition(definition: ResourceDefinition): boolean {
-  if (definition.customResource) return true
-  if (!definition.group) return false
-  return !['admissionregistration.k8s.io', 'apiextensions.k8s.io', 'authentication.k8s.io', 'authorization.k8s.io', 'autoscaling', 'batch', 'certificates.k8s.io', 'coordination.k8s.io', 'discovery.k8s.io', 'events.k8s.io', 'extensions', 'flowcontrol.apiserver.k8s.io', 'gateway.networking.k8s.io', 'metrics.k8s.io', 'networking.k8s.io', 'node.k8s.io', 'policy', 'rbac.authorization.k8s.io', 'resource.k8s.io', 'scheduling.k8s.io', 'snapshot.storage.k8s.io', 'storage.k8s.io'].includes(definition.group)
 }
 
 /** Returns the browser storage key used for one context namespace selection. */

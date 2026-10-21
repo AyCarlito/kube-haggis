@@ -220,7 +220,7 @@ export interface ResourceCatalogResponse {
 }
 
 /** Identifies why a schema form is available or why YAML remains the fallback. */
-export type ResourceSchemaState = 'available' | 'unsupported' | 'missing' | 'non-structural' | 'permission-denied' | 'error'
+export type ResourceSchemaState = 'available' | 'unsupported' | 'missing' | 'non-structural' | 'permission-denied' | 'unavailable' | 'malformed' | 'error'
 
 /** Describes one normalized structural OpenAPI field used by the browser form. */
 export interface ResourceSchemaField {
@@ -249,7 +249,7 @@ export interface ResourceSchemaField {
   uniqueItems?: boolean
 }
 
-/** Contains the read-only structural CRD schema and explicit YAML fallback state. */
+/** Contains the normalized resource schema and explicit YAML fallback state. */
 export interface ResourceSchemaResponse {
   state: ResourceSchemaState
   message?: string
@@ -257,6 +257,7 @@ export interface ResourceSchemaResponse {
   version: string
   resource: string
   kind?: string
+  source?: 'openapi-v3' | 'openapi-v2' | 'crd'
   schema?: ResourceSchemaField
   fallbacks?: ResourceSchemaFallback[]
   fallbacksTruncated?: boolean

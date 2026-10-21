@@ -21,7 +21,7 @@ export function schemaFallbackSummary(fallbacks: ResourceSchemaFallback[], trunc
   return paths.join(' / ')
 }
 
-/** Returns the read-only explanation required when a CRD exposes a status subresource. */
+/** Returns the read-only explanation required when a resource exposes status fields. */
 export function schemaStatusNotice(response: ResourceSchemaResponse): string {
-  return response.statusSubresource ? 'The CRD status subresource is enabled; status fields are read-only in this form.' : ''
+  return response.statusSubresource ? 'The status subresource is enabled; status fields are read-only in this form.' : 'Status fields are server-managed and read-only in this form.'
 }

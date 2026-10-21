@@ -262,17 +262,19 @@ type configLoadResult struct {
 
 // Service owns kubeconfig loading and creates dynamic clients for contexts.
 type Service struct {
-	kubeconfigPath       string
-	mu                   sync.Mutex
-	rules                *clientcmd.ClientConfigLoadingRules
-	config               *clientcmdapi.Config
-	fingerprint          configSourceFingerprint
-	loaded               bool
-	revision             uint64
-	lastReloadError      string
-	discoveryCache       map[discoveryCacheKey]discoveryCacheEntry
-	discoveryFlights     map[discoveryCacheKey]*discoveryFlight
-	discoveryGenerations map[discoveryCacheKey]uint64
+	kubeconfigPath           string
+	mu                       sync.Mutex
+	rules                    *clientcmd.ClientConfigLoadingRules
+	config                   *clientcmdapi.Config
+	fingerprint              configSourceFingerprint
+	loaded                   bool
+	revision                 uint64
+	lastReloadError          string
+	discoveryCache           map[discoveryCacheKey]discoveryCacheEntry
+	discoveryFlights         map[discoveryCacheKey]*discoveryFlight
+	discoveryGenerations     map[discoveryCacheKey]uint64
+	resourceSchemaCache      map[resourceSchemaCacheKey]ResourceSchema
+	resourceSchemaCacheOrder []resourceSchemaCacheKey
 }
 
 const (
@@ -291,6 +293,7 @@ func NewService(kubeconfigPath string) *Service {
 		discoveryCache:       make(map[discoveryCacheKey]discoveryCacheEntry),
 		discoveryFlights:     make(map[discoveryCacheKey]*discoveryFlight),
 		discoveryGenerations: make(map[discoveryCacheKey]uint64),
+		resourceSchemaCache:  make(map[resourceSchemaCacheKey]ResourceSchema),
 	}
 }
 
@@ -872,6 +875,8 @@ func (s *Service) ensureConfigLocked(force bool) (*clientcmdapi.Config, configLo
 	s.loaded = true
 	s.revision++
 	s.discoveryCache = make(map[discoveryCacheKey]discoveryCacheEntry)
+	s.resourceSchemaCache = make(map[resourceSchemaCacheKey]ResourceSchema)
+	s.resourceSchemaCacheOrder = nil
 	s.lastReloadError = ""
 	return config, configLoadResult{Reloaded: wasLoaded || force}, nil
 }
