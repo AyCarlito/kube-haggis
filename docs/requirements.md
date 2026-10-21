@@ -8,7 +8,7 @@ The application is desktop-first and responsive. The application name is `KubeHa
 
 ## Implementation Status
 
-The repository contains the completed agreed first-release operation set. The backend and browser UI are real Kubernetes integrations, not mock data. Implemented follow-on requirements are documented below, and additional planned UX improvements are documented separately at the end of this file.
+The repository contains the completed agreed first-release operation set. The backend and browser UI are real Kubernetes integrations, not mock data. Implemented follow-on requirements are documented below, and implemented UX improvements are documented separately at the end of this file.
 
 ### Implemented
 
@@ -274,11 +274,11 @@ Provide safe, local-only diagnostics for discovery, watches, API latency, stream
 - Show correlation IDs and safe retry classifications in UI failures.
 - Distinguish liveness from dependency/readiness state for local health checks.
 
-## Planned UX Requirements
+## Implemented UX Requirements
 
-The following requirements improve navigation, discoverability, readability, form coverage, and input behavior without changing the native Kubernetes safety model. They are planned and are not yet implemented.
+The following requirements improve navigation, discoverability, readability, form coverage, and input behavior without changing the native Kubernetes safety model. They are completed and implemented.
 
-### U1. Actionable overview navigation (Planned)
+### U1. Actionable overview navigation (Implemented)
 
 Make overview summaries useful starting points rather than static status readouts.
 
@@ -290,7 +290,7 @@ Make overview summaries useful starting points rather than static status readout
 - Apply the same navigation rule to overview posture rows and other summary values when an exact target exists, including Namespaces, bound claims, and Pod restart views. Keep aggregate or unresolved values static or provide an explicit aggregate destination rather than guessing.
 - Keep loading, permission-denied, unavailable, and empty states visible; a missing destination must not become a dead click or a guessed resource route.
 
-### U2. Signal check and Event navigation (Planned)
+### U2. Signal check and Event navigation (Implemented)
 
 Turn the landing-page warning panel into a reliable path to Event investigation.
 
@@ -301,7 +301,7 @@ Turn the landing-page warning panel into a reliable path to Event investigation.
 - Retain the existing Event watch, stale/reconnecting states, and RBAC/unavailable messaging after navigation.
 - Use consistent link/button semantics, focus states, and labels for the panel action and individual Event rows.
 
-### U3. Searchable and collapsible resource catalog (Planned)
+### U3. Searchable and collapsible resource catalog (Implemented)
 
 Make large discovery catalogs navigable without losing complete discovery coverage.
 
@@ -313,7 +313,7 @@ Make large discovery catalogs navigable without losing complete discovery covera
 - Keep catalog row navigation unchanged: selecting a row opens its exact group/version/resource route.
 - Key any remembered expansion state by active context and catalog revision if it is persisted; stale expansion state must not affect catalog contents.
 
-### U4. Contextual autocomplete for operator inputs (Planned)
+### U4. Contextual autocomplete for operator inputs (Implemented)
 
 Use the already loaded discovery catalog to make structured inputs easier to complete without turning typing into unbounded Kubernetes activity.
 
@@ -329,7 +329,7 @@ Use the already loaded discovery catalog to make structured inputs easier to com
 - Reuse the same discovery-backed suggestion model in catalog filters and other structured resource selectors where an exact catalog identity is available.
 - Candidate follow-on uses include resource-list label-selector assistance, bounded namespace/resource filters, and known container or revision choices in operational forms. Container selectors already provided as native selects should not be replaced merely to add autocomplete.
 
-### U5. Readable and consistent typography (Planned)
+### U5. Readable and consistent typography (Implemented)
 
 Increase legibility while preserving the dense field-console character and desktop-first layout.
 
@@ -342,7 +342,7 @@ Increase legibility while preserving the dense field-console character and deskt
 - Review sidebar navigation, top-bar controls, overview cards, catalog rows, search controls, tables, Events, schema forms, operations, diagnostics, and mobile layouts together so the scale is consistent across views.
 - Verify readability at normal desktop zoom, browser zoom through 200%, and the existing narrow responsive breakpoint without horizontal clipping of essential content.
 
-### U6. Schema-generated forms for built-in resources (Planned)
+### U6. Schema-generated forms for built-in resources (Implemented)
 
 Extend the existing schema form beyond CRDs by using the Kubernetes API server's published type schema and field descriptions.
 
@@ -357,7 +357,7 @@ Extend the existing schema form beyond CRDs by using the Kubernetes API server's
 - Cache normalized schemas by kubeconfig context, revision, and exact GVR with bounded size and safe invalidation after kubeconfig or discovery changes.
 - Add deterministic tests for built-in OpenAPI v3 descriptions, OpenAPI v2 fallback, version/kind matching, read-only status fields, bounded unsupported constructs, permission failures, and YAML fallback behavior.
 
-### U7. Editable scale replica input (Planned)
+### U7. Editable scale replica input (Implemented)
 
 Allow operators to replace a scale value rather than being forced to edit around a coerced numeric value.
 
