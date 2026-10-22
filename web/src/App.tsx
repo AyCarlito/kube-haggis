@@ -2005,6 +2005,8 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
   const [sortDirection, setSortDirection] = useState<ResourceSortDirection>('asc')
   const [visibleColumns, setVisibleColumns] = useState<ResourceColumnKey[]>(defaultResourceColumns)
   const [columnsOpen, setColumnsOpen] = useState(false)
+  const columnsMenuRef = useRef<HTMLDivElement | null>(null)
+  const columnsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const [pageSize, setPageSize] = useState(100)
   const [pagination, setPagination] = useState<ResourcePaginationState>({ queryKey: '', pageIndex: 0, tokens: [''] })
   const [watchSnapshot, setWatchSnapshot] = useState<WatchSnapshot>(() => initialWatchSnapshot())
@@ -2022,6 +2024,32 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
   const paginationMatchesQuery = pagination.queryKey === listQueryKey
   const pageIndex = paginationMatchesQuery ? pagination.pageIndex : 0
   const continueToken = paginationMatchesQuery ? pagination.tokens[pageIndex] || '' : ''
+
+  useEffect(() => {
+    if (!columnsOpen) return
+
+    /** Closes the columns menu when pointer input starts outside its surface. */
+    function handleColumnsPointerDown(event: PointerEvent) {
+      const target = event.target
+      if (target instanceof Node && columnsMenuRef.current?.contains(target)) return
+      setColumnsOpen(false)
+    }
+
+    /** Closes the columns menu on Escape and returns focus to its trigger. */
+    function handleColumnsKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setColumnsOpen(false)
+      columnsTriggerRef.current?.focus()
+    }
+
+    document.addEventListener('pointerdown', handleColumnsPointerDown)
+    document.addEventListener('keydown', handleColumnsKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handleColumnsPointerDown)
+      document.removeEventListener('keydown', handleColumnsKeyDown)
+    }
+  }, [columnsOpen])
 
   useEffect(() => {
     setPagination({ queryKey: listQueryKey, pageIndex: 0, tokens: [''] })
@@ -2302,9 +2330,9 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
         <label className="resource-control"><span>Status <em>local page</em></span><select value={statusFilter} onChange={(event) => changeStatusFilter(event.target.value)}><option value="all">All statuses</option>{statusOptions.map((status) => <option value={status} key={status}>{status}</option>)}</select></label>
         <label className="resource-control"><span>Sort <em>local page</em></span><select value={sortKey} onChange={(event) => changeSortKey(event.target.value as ResourceSortKey)}><option value="name">Name</option><option value="namespace">Namespace</option><option value="status">Status</option><option value="ready">Ready</option><option value="age">Age</option></select></label>
         <button type="button" className="icon-button sort-direction" onClick={toggleSortDirection} aria-label={`Sort ${sortDirection === 'asc' ? 'descending' : 'ascending'}`} title={`Sort ${sortDirection === 'asc' ? 'descending' : 'ascending'}`}>{sortDirection === 'asc' ? <ArrowUp size={15} /> : <ArrowDown size={15} />}</button>
-        <div className="column-menu">
-          <button type="button" className="secondary-button column-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Settings2 size={14} /> Columns <span>{visibleColumnDefinitions.length}/{resourceColumnDefinitions.length}</span></button>
-          {columnsOpen && <div className="column-menu-panel"><strong>Visible columns</strong>{resourceColumnDefinitions.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} disabled={column.required} onChange={(event) => toggleColumn(column, event.target.checked)} /><span>{column.label}</span>{column.required && <em>required</em>}</label>)}<small>Columns change this browser view only.</small></div>}
+        <div ref={columnsMenuRef} className="column-menu">
+          <button ref={columnsTriggerRef} type="button" className="secondary-button column-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen} aria-controls="visible-columns-menu"><Settings2 size={14} /> Columns <span>{visibleColumnDefinitions.length}/{resourceColumnDefinitions.length}</span></button>
+          {columnsOpen && <div id="visible-columns-menu" className="column-menu-panel"><strong>Visible columns</strong>{resourceColumnDefinitions.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} disabled={column.required} onChange={(event) => toggleColumn(column, event.target.checked)} /><span>{column.label}</span>{column.required && <em>required</em>}</label>)}<small>Columns change this browser view only.</small></div>}
         </div>
         <button className="icon-button toolbar-action" onClick={() => setRefreshNonce((value) => value + 1)} aria-label="Refresh resources"><RefreshCw size={16} /></button>
         <button className="primary-button" disabled={!writeEnabled} onClick={onCreate} title={writeEnabled ? `Create a ${definition.kind}` : 'Enable write mode to create resources'}><span>+</span> New {definition.kind}</button>
