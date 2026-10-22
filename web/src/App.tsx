@@ -45,6 +45,7 @@ import '@xterm/xterm/css/xterm.css'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { parse, stringify } from 'yaml'
 import {
+  ApiError,
   applyResource,
   applyNodeAction,
   applyPVCAction,
@@ -89,7 +90,7 @@ import {
   resolveCatalogDefinition,
 } from './catalog'
 import { overviewEventDetailPath, overviewEventsPath, overviewMetricDestination, overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
-import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchGroupOptions, searchHref, searchKindOptions, searchQueryEquals, searchResourceOptions, searchResultKey, searchResultResourcePath, searchDefinitionCandidates } from './search'
+import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchGroupOptions, searchHref, searchKindOptions, searchQueryEquals, searchResourceOptions, searchResultKey, searchResultResourcePath, searchDefinitionCandidates, SEARCH_DEFAULT_PAGE_SIZE, SEARCH_PAGE_SIZES } from './search'
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
@@ -1087,6 +1088,9 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
   const [response, setResponse] = useState<SearchResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [pageSize, setPageSize] = useState(SEARCH_DEFAULT_PAGE_SIZE)
+  const [pageIndex, setPageIndex] = useState(0)
+  const [cursorHistory, setCursorHistory] = useState<string[]>([''])
   const [savedViews, setSavedViews] = useState<SavedSearchView[]>(() => {
     const storage = browserSavedViewStorage()
     return storage ? loadSavedSearchViews(storage) : []
@@ -1094,6 +1098,15 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
   const [viewName, setViewName] = useState('')
   const [viewNotice, setViewNotice] = useState('')
   const searchAbortRef = useRef<AbortController | null>(null)
+  const searchCursorScopeRef = useRef('')
+  const currentCursor = cursorHistory[pageIndex] || ''
+  const searchScope = `${context}\u001f${revision}\u001f${namespace}\u001f${JSON.stringify(submittedQuery)}\u001f${pageSize}`
+
+  /** Resets the visible result page and its opaque cursor history. */
+  function resetPagination() {
+    setPageIndex(0)
+    setCursorHistory([''])
+  }
 
   useEffect(() => {
     const nextQuery = parseSearchQuery(searchKey)
@@ -1109,6 +1122,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setLoading(false)
     setError('')
     setViewNotice('')
+    resetPagination()
   }, [searchKey])
 
   useEffect(() => {
@@ -1118,6 +1132,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setSubmittedQuery((current) => current && current.namespace === namespace ? current : null)
     setResponse(null)
     setError('')
+    resetPagination()
   }, [namespace])
 
   useEffect(() => {
@@ -1125,11 +1140,21 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
       setLoading(false)
       return
     }
+    if (searchCursorScopeRef.current !== searchScope) {
+      searchCursorScopeRef.current = searchScope
+      if (currentCursor) {
+        searchAbortRef.current?.abort()
+        setResponse(null)
+        setLoading(false)
+        resetPagination()
+        return
+      }
+    }
     const controller = new AbortController()
     searchAbortRef.current = controller
     setLoading(true)
     setError('')
-    fetchGlobalSearch(context, submittedQuery, controller.signal)
+    fetchGlobalSearch(context, submittedQuery, { pageSize, cursor: currentCursor }, controller.signal)
       .then((nextResponse) => {
         if (controller.signal.aborted) return
         setResponse(nextResponse)
@@ -1137,6 +1162,11 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
       .catch((loadError: unknown) => {
         if (controller.signal.aborted || (loadError as Error).name === 'AbortError') return
         setResponse(null)
+        if (loadError instanceof ApiError && loadError.status === 409) {
+          resetPagination()
+          setError('This search page expired or the active context changed. Run the search again.')
+          return
+        }
         setError('Global search could not be completed. Kubernetes error details are hidden by the local server; retry the search.')
       })
       .finally(() => !controller.signal.aborted && setLoading(false))
@@ -1144,7 +1174,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
       controller.abort()
       if (searchAbortRef.current === controller) searchAbortRef.current = null
     }
-  }, [context, revision, submittedQuery])
+  }, [context, revision, namespace, submittedQuery, pageSize, currentCursor, searchScope])
 
   /** Updates one filter and immediately records the deep-linkable URL without issuing a request. */
   function updateQuery(field: keyof SearchQuery, value: string) {
@@ -1159,6 +1189,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setViewNotice('')
     setError('')
     setResponse(null)
+    resetPagination()
     setSubmittedQuery({ ...query })
   }
 
@@ -1170,7 +1201,30 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setResponse(null)
     setError('')
     setViewNotice('')
+    resetPagination()
     window.history.replaceState({}, '', searchHref(context, next))
+  }
+
+  /** Changes the result page size and restarts the submitted search from its first cursor. */
+  function changePageSize(nextPageSize: number) {
+    setPageSize(nextPageSize)
+    resetPagination()
+    setResponse(null)
+  }
+
+  /** Advances to the next global search page using only the returned opaque cursor. */
+  function nextSearchPage() {
+    if (!response?.hasMore || !response.nextCursor || loading) return
+    setResponse(null)
+    setCursorHistory((current) => [...current.slice(0, pageIndex + 1), response.nextCursor as string])
+    setPageIndex((current) => current + 1)
+  }
+
+  /** Returns to a previously requested global search page. */
+  function previousSearchPage() {
+    if (pageIndex === 0 || loading) return
+    setResponse(null)
+    setPageIndex((current) => Math.max(0, current - 1))
   }
 
   /** Stores the current filters only when the active context and catalog are available. */
@@ -1204,6 +1258,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     }
     const next = normalizeSearchQuery(view.query)
     setQuery(next)
+    resetPagination()
     setSubmittedQuery(next)
     if (next.namespace !== namespace) onNamespace(next.namespace)
     window.history.replaceState({}, '', searchHref(context, next))
@@ -1246,7 +1301,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
       <div className="search-layout">
         <main className="search-main">
           <section className="search-form-panel panel">
-            <div className="search-form-heading"><div><span className="panel-eyebrow">Operator query</span><h2>Set the field coordinates</h2><p>Typing changes only the URL. Submit deliberately to scan at most 24 sources and 200 summaries.</p></div><span className="search-budget-chip"><Search size={13} /> 24 sources / 6 concurrent</span></div>
+            <div className="search-form-heading"><div><span className="panel-eyebrow">Operator query</span><h2>Set the field coordinates</h2><p>Typing changes only the URL. Submit deliberately to scan at most 24 sources per page; use the result pager for more summaries.</p></div><span className="search-budget-chip"><Search size={13} /> 24 sources / 6 concurrent / paginated</span></div>
             <form className="search-form" onSubmit={(event) => { event.preventDefault(); submitSearch() }}>
               <label className="search-primary-field"><Search size={17} /><span className="sr-only">Search text</span><input value={query.query} onChange={(event) => updateQuery('query', event.target.value)} placeholder="Search kind, resource, namespace, or object name" /><kbd>submit</kbd></label>
               <div className="search-filter-grid">
@@ -1268,7 +1323,8 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
           {loading && response && <div className="search-refresh-strip"><LoaderCircle size={14} className="spin" /> Refreshing this submitted search; the previous bounded result remains visible.</div>}
           {response && <SearchSourcesPanel sources={response.sources} issues={response.issues} />}
           {response && response.items.length > 0 && <SearchResultTable items={response.items} onOpen={onOpen} />}
-          {response && !response.items.length && !loading && <SearchNoResults response={response} />}
+          {response && <SearchPagination response={response} pageIndex={pageIndex} pageSize={pageSize} loading={loading} onPageSize={changePageSize} onPrevious={previousSearchPage} onNext={nextSearchPage} />}
+          {response && !response.items.length && !response.hasMore && !loading && <SearchNoResults response={response} />}
           {!response && !loading && <div className="search-landing panel"><span className="search-landing-mark"><BookmarkPlus size={21} /></span><strong>Ready for a deliberate scan</strong><span>Use a name, kind, resource, namespace, or label selector, then run the search. No Kubernetes list calls happen while you type.</span></div>}
         </main>
 
@@ -1291,15 +1347,20 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
 /** Renders the aggregate search state without exposing backend Kubernetes error text. */
 function SearchResponseNotice({ response }: { response: SearchResponse }) {
   if (response.state === 'available' && !response.truncated && !response.issues?.length) return null
-  const title = response.state === 'partial' ? 'Partial result set' : response.state === 'permission-denied' ? 'Search access is restricted' : response.state === 'unavailable' ? 'Some search APIs are unavailable' : response.state === 'error' ? 'Search sources returned errors' : 'Search returned no matches'
-  const detail = response.state === 'partial' ? `${response.items.length} safe result${response.items.length === 1 ? '' : 's'} returned. ${response.truncated ? 'The fixed source or result cap was reached. ' : ''}Review source states below before treating this as complete.` : response.state === 'permission-denied' ? 'Kubernetes RBAC denied every source that was queried. No raw API error body is shown.' : response.state === 'unavailable' ? 'One or more Kubernetes APIs did not respond or are not currently served. Retry when the cluster recovers.' : response.state === 'error' ? 'One or more source reads failed. Successful sources remain visible and each issue is classified below.' : 'The bounded scan completed without a matching object.'
+  const title = response.state === 'partial' ? 'Partial result set' : response.state === 'permission-denied' ? 'Search access is restricted' : response.state === 'unavailable' ? 'Some search APIs are unavailable' : response.state === 'error' ? 'Search sources returned errors' : response.hasMore && !response.items.length ? 'More search pages available' : 'Search returned no matches'
+  const detail = response.state === 'partial' ? `${response.items.length} safe result${response.items.length === 1 ? '' : 's'} returned. ${response.truncated ? 'The fixed source or page scan budget was reached. ' : ''}Review source states below before treating this as complete.` : response.state === 'permission-denied' ? 'Kubernetes RBAC denied every source that was queried. No raw API error body is shown.' : response.state === 'unavailable' ? 'One or more Kubernetes APIs did not respond or are not currently served. Retry when the cluster recovers.' : response.state === 'error' ? 'One or more source reads failed. Successful sources remain visible and each issue is classified below.' : response.hasMore ? 'This page did not contain a matching object, but more source pages remain. Use Next to continue the scan.' : 'The bounded scan completed without a matching object.'
   return <div className={`search-response-notice search-response-notice-${response.state}`} role="status"><span className="search-response-icon">{response.state === 'partial' ? <AlertTriangle size={16} /> : response.state === 'permission-denied' ? <LockKeyhole size={16} /> : response.state === 'available' ? <RefreshCw size={16} /> : <AlertTriangle size={16} />}</span><div><strong>{title}</strong><span>{detail}</span>{response.issues?.slice(0, 3).map((issue, index) => <code key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}>{issue.message}</code>)}</div></div>
 }
 
 /** Renders per-source RBAC, unavailable, empty, and error outcomes for one search. */
 function SearchSourcesPanel({ sources, issues }: { sources: SearchSource[]; issues?: SearchResponse['issues'] }) {
   if (!sources.length && !issues?.length) return null
-  return <section className="search-sources panel"><div className="search-sources-heading"><div><span className="panel-eyebrow">Source ledger</span><h2>Where the result came from</h2></div><span>{sources.length} queried</span></div>{issues?.length ? <div className="search-catalog-issues">{issues.map((issue, index) => <div key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={13} /><span>{issue.message}</span></div>)}</div> : null}<div className="search-source-list">{sources.map((source) => <div className={`search-source-row search-source-row-${source.state}`} key={`${source.group}/${source.version}/${source.resource}`}><span className="search-source-dot" /><div><strong>{source.kind || source.resource}</strong><code>{source.group ? `${source.group}/${source.version}` : source.version} / {source.resource}</code></div><span className="search-source-result-count">{source.resultCount} result{source.resultCount === 1 ? '' : 's'}</span><span className="search-source-state">{searchSourceStateLabel(source.state)}</span>{source.issue && <span className="search-source-issue">{source.issue}</span>}</div>)}</div></section>
+  return <section className="search-sources panel"><div className="search-sources-heading"><div><span className="panel-eyebrow">Source ledger</span><h2>Where the result came from</h2></div><span>{sources.length} queried</span></div>{issues?.length ? <div className="search-catalog-issues">{issues.map((issue, index) => <div key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={13} /><span>{issue.message}</span></div>)}</div> : null}<div className="search-source-list">{sources.map((source) => <div className={`search-source-row search-source-row-${source.state}`} key={`${source.group}/${source.version}/${source.resource}`}><span className="search-source-dot" /><div><strong>{source.kind || source.resource}</strong><code>{source.group ? `${source.group}/${source.version}` : source.version} / {source.resource}</code></div><span className="search-source-result-count">{source.resultCount} result{source.resultCount === 1 ? '' : 's'}</span><span className="search-source-state">{searchSourceStateLabel(source.state, source.hasMore)}</span>{source.issue && <span className="search-source-issue">{source.issue}</span>}</div>)}</div></section>
+}
+
+/** Renders page-size and opaque-cursor navigation for one global search response. */
+function SearchPagination({ response, pageIndex, pageSize, loading, onPageSize, onPrevious, onNext }: { response: SearchResponse; pageIndex: number; pageSize: number; loading: boolean; onPageSize: (pageSize: number) => void; onPrevious: () => void; onNext: () => void }) {
+  return <div className="table-footer resource-pagination search-pagination"><span>Page {pageIndex + 1} · Showing {response.items.length} result{response.items.length === 1 ? '' : 's'}{response.hasMore ? ' / more available' : ''}</span><div className="pagination-controls"><label>Rows <select value={pageSize} onChange={(event) => onPageSize(Number(event.target.value))}>{SEARCH_PAGE_SIZES.map((size) => <option value={size} key={size}>{size}</option>)}</select></label><button type="button" className="secondary-button" onClick={onPrevious} disabled={pageIndex === 0 || loading}><ChevronLeft size={14} /> Previous</button><button type="button" className="secondary-button" onClick={onNext} disabled={!response.hasMore || !response.nextCursor || loading}>Next <ChevronRight size={14} /></button></div><span><span className="table-footer-dot" /> Read {response.pageCount}/{response.pageBudget} API pages for this result page</span></div>
 }
 
 /** Renders bounded safe summaries with canonical full-GVR navigation. */
@@ -1324,11 +1385,11 @@ function savedViewStateLabel(state: SavedViewState | 'checking'): string {
 }
 
 /** Converts one source state into the explicit label shown in the source ledger. */
-function searchSourceStateLabel(state: SearchSource['state']): string {
+function searchSourceStateLabel(state: SearchSource['state'], hasMore = false): string {
   if (state === 'permission-denied') return 'RBAC denied'
   if (state === 'unavailable') return 'Unavailable'
   if (state === 'error') return 'Read error'
-  if (state === 'empty') return 'No matches'
+  if (state === 'empty') return hasMore ? 'More available' : 'No matches'
   return 'Read'
 }
 

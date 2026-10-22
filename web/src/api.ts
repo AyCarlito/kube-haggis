@@ -82,6 +82,12 @@ export interface ResourceListQuery {
   continueToken?: string
 }
 
+/** Describes one bounded page request for the global search cursor. */
+export interface GlobalSearchPageQuery {
+  pageSize?: number
+  cursor?: string
+}
+
 /** Builds a backend API URL with encoded query parameters. */
 export function apiUrl(path: string, params: Record<string, string | undefined> = {}): string {
   const search = new URLSearchParams()
@@ -159,8 +165,8 @@ export function fetchResourceCatalog(context: string, refresh = false): Promise<
   return fetchJson<ResourceCatalogResponse>(apiUrl('/api/discovery', { context, refresh: refresh ? 'true' : undefined }))
 }
 
-/** Runs one explicitly submitted bounded global search against the active catalog. */
-export function fetchGlobalSearch(context: string, query: SearchQuery, signal?: AbortSignal): Promise<SearchResponse> {
+/** Runs one explicitly submitted paginated global search request against the active catalog. */
+export function fetchGlobalSearch(context: string, query: SearchQuery, page: GlobalSearchPageQuery = {}, signal?: AbortSignal): Promise<SearchResponse> {
   return fetchJson<SearchResponse>(
     apiUrl('/api/search', {
       context,
@@ -171,6 +177,8 @@ export function fetchGlobalSearch(context: string, query: SearchQuery, signal?: 
       namespace: query.namespace,
       name: query.name,
       labelSelector: query.labelSelector,
+      pageSize: page.pageSize === undefined ? undefined : String(page.pageSize),
+      cursor: page.cursor,
     }),
     { signal },
   )

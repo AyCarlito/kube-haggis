@@ -247,6 +247,8 @@ Provide a bounded cross-resource search workflow for operators working across na
 
 - Search discovered resources by API group, kind, namespace, name, and labels.
 - Clearly identify partial results, loading states, and RBAC limitations.
+- Expose bounded continuation pages across selected sources so free-text name matches are not limited to the first list page.
+- Bind opaque search cursors to the active context, discovery revision, and normalized filters; expire them safely.
 - Preserve search, scope, and filter state in deep-linkable URLs.
 - Allow locally persisted saved views for common resource, namespace, and label-selector combinations.
 - Do not issue an unbounded request to every discovered resource on every keystroke; use debouncing, bounded fan-out, or a controlled cache.

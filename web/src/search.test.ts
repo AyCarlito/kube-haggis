@@ -9,6 +9,8 @@ import {
   searchQueryEquals,
   searchResourceOptions,
   searchResultResourcePath,
+  SEARCH_DEFAULT_PAGE_SIZE,
+  SEARCH_PAGE_SIZES,
 } from './search'
 import {
   createSavedSearchView,
@@ -33,6 +35,7 @@ export function runSearchModelTests(): void {
     { group: 'apps', version: 'v1', resource: 'deployments', kind: 'Deployment', namespaced: true, scope: 'Namespaced', verbs: ['list'] },
   ]
   const query = parseSearchQuery('?context=test&namespace=team-a&q=api&group=apps&kind=Deployment&resource=deployments&name=api&labelSelector=app%3Dapi')
+  assertSearchModel(SEARCH_DEFAULT_PAGE_SIZE === 100 && SEARCH_PAGE_SIZES.join(',') === '25,50,100', 'global search page-size contract changed unexpectedly')
   assertSearchModel(query.namespace === 'team-a' && query.query === 'api' && query.group === 'apps' && query.kind === 'Deployment' && query.resource === 'deployments' && query.name === 'api' && query.labelSelector === 'app=api', 'search query parsing lost a deep-link filter')
   assertSearchModel(hasSearchFilters(query), 'explicit search filters were not detected')
   assertSearchModel(searchQueryEquals(query, parseSearchQuery(searchHref('test', query).slice(searchHref('test', query).indexOf('?')))), 'search URL round-trip changed filter state')

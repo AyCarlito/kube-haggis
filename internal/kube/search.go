@@ -27,18 +27,19 @@ const (
 	searchStateUnavailable      = "unavailable"
 	searchStateError            = "error"
 
-	searchRequestTimeout = 8 * time.Second
-	searchSourceBudget   = 24
-	searchConcurrency    = 6
-	searchSourceLimit    = 25
-	searchResultLimit    = 200
-	searchFilterMax      = 256
-	searchLabelMax       = 24
-	searchLabelKeyMax    = 128
-	searchLabelValueMax  = 256
+	searchRequestTimeout  = 8 * time.Second
+	searchSourceBudget    = 24
+	searchConcurrency     = 6
+	searchListPageSize    = 100
+	searchPageBudget      = 24
+	searchDefaultPageSize = 100
+	searchFilterMax       = 256
+	searchLabelMax        = 24
+	searchLabelKeyMax     = 128
+	searchLabelValueMax   = 256
 )
 
-// SearchRequest contains the bounded filters accepted by the global search endpoint.
+// SearchRequest contains the bounded filters and page controls accepted by the global search endpoint.
 type SearchRequest struct {
 	Query         string
 	Group         string
@@ -47,6 +48,8 @@ type SearchRequest struct {
 	Namespace     string
 	Name          string
 	LabelSelector string
+	PageSize      int
+	Cursor        string
 }
 
 // SearchResult contains only the GVR coordinates and safe summary fields needed for navigation.
@@ -75,33 +78,39 @@ type SearchSource struct {
 	Namespaced  bool   `json:"namespaced"`
 	State       string `json:"state"`
 	ResultCount int    `json:"resultCount"`
+	HasMore     bool   `json:"hasMore,omitempty"`
 	Truncated   bool   `json:"truncated,omitempty"`
 	Issue       string `json:"issue,omitempty"`
 }
 
-// SearchResponse contains bounded cross-resource results, source states, and safe catalog health.
+// SearchResponse contains one bounded cross-resource result page, cursor state, and safe catalog health.
 type SearchResponse struct {
-	Context     string           `json:"context"`
-	Revision    uint64           `json:"revision"`
-	State       string           `json:"state"`
-	Items       []SearchResult   `json:"items"`
-	Sources     []SearchSource   `json:"sources"`
-	Issues      []DiscoveryIssue `json:"issues,omitempty"`
-	Partial     bool             `json:"partial"`
-	Truncated   bool             `json:"truncated"`
-	CallCount   int              `json:"callCount"`
-	CallBudget  int              `json:"callBudget"`
-	ResultLimit int              `json:"resultLimit"`
+	Context    string           `json:"context"`
+	Revision   uint64           `json:"revision"`
+	State      string           `json:"state"`
+	Items      []SearchResult   `json:"items"`
+	Sources    []SearchSource   `json:"sources"`
+	Issues     []DiscoveryIssue `json:"issues,omitempty"`
+	Partial    bool             `json:"partial"`
+	Truncated  bool             `json:"truncated"`
+	CallCount  int              `json:"callCount"`
+	CallBudget int              `json:"callBudget"`
+	PageSize   int              `json:"pageSize"`
+	PageCount  int              `json:"pageCount"`
+	PageBudget int              `json:"pageBudget"`
+	HasMore    bool             `json:"hasMore"`
+	NextCursor string           `json:"nextCursor,omitempty"`
 }
 
-// searchSourceResult keeps source-local summaries private until the global result cap is applied.
+// searchSourceResult keeps source-local summaries private for bounded source fan-out tests.
 type searchSourceResult struct {
 	source SearchSource
 	items  []SearchResult
 	called bool
+	pages  int
 }
 
-// Search executes one bounded, read-only search across the revision-scoped discovery catalog.
+// Search executes one bounded page of a read-only search across the revision-scoped discovery catalog.
 func (s *Service) Search(ctx context.Context, contextName string, request SearchRequest) (SearchResponse, error) {
 	normalized, err := normalizeSearchRequest(request)
 	if err != nil {
@@ -114,15 +123,26 @@ func (s *Service) Search(ctx context.Context, contextName string, request Search
 	if err != nil {
 		return SearchResponse{}, err
 	}
+	if normalized.Cursor != "" {
+		state, found := s.loadSearchCursor(normalized.Cursor)
+		if !found {
+			return SearchResponse{}, fmt.Errorf("search cursor is expired or invalid")
+		}
+		if state.Context != resolvedContext || state.Revision != revision || !searchRequestsEqual(state.Request, normalized) {
+			return SearchResponse{}, fmt.Errorf("search cursor is stale")
+		}
+		return s.advanceSearchCursor(searchContext, dynamicClient, state)
+	}
 	catalog, discoveryErr := s.cachedDiscoveryCatalog(searchContext, resolvedContext, revision, dynamicClient, discoveryClient)
 	response := SearchResponse{
-		Context:     resolvedContext,
-		Revision:    revision,
-		Issues:      cloneDiscoveryIssues(catalog.Issues),
-		CallBudget:  searchSourceBudget,
-		ResultLimit: searchResultLimit,
-		Items:       make([]SearchResult, 0),
-		Sources:     make([]SearchSource, 0),
+		Context:    resolvedContext,
+		Revision:   revision,
+		Issues:     cloneDiscoveryIssues(catalog.Issues),
+		CallBudget: searchSourceBudget,
+		PageSize:   normalized.PageSize,
+		PageBudget: searchPageBudget,
+		Items:      make([]SearchResult, 0),
+		Sources:    make([]SearchSource, 0),
 	}
 	if discoveryErr != nil && (errors.Is(discoveryErr, context.Canceled) || errors.Is(discoveryErr, context.DeadlineExceeded)) {
 		response.State = searchStateUnavailable
@@ -133,26 +153,8 @@ func (s *Service) Search(ctx context.Context, contextName string, request Search
 
 	definitions := searchDefinitions(catalog.Items, normalized)
 	definitions, definitionsTruncated := boundSearchDefinitions(definitions)
-	response.Truncated = definitionsTruncated
-
-	results := searchDiscoveredSources(searchContext, dynamicClient, definitions, normalized)
-	response.CallCount = 0
-	for _, result := range results {
-		if result.called {
-			response.CallCount++
-		}
-	}
-	results, itemsTruncated := boundSearchResults(results, searchResultLimit)
-	response.Truncated = response.Truncated || itemsTruncated
-	response.Sources = make([]SearchSource, 0, len(results))
-	for _, result := range results {
-		result.source.ResultCount = len(result.items)
-		response.Sources = append(response.Sources, result.source)
-		response.Items = append(response.Items, result.items...)
-	}
-	response.State = aggregateSearchState(response.Sources, catalog.State, response.Issues, response.Truncated, len(response.Items))
-	response.Partial = response.State == searchStatePartial
-	return response, nil
+	state := newSearchCursorState(resolvedContext, revision, normalized, catalog, definitions, definitionsTruncated)
+	return s.advanceSearchCursor(searchContext, dynamicClient, state)
 }
 
 // normalizeSearchRequest trims and validates the browser-controlled search filters.
@@ -164,13 +166,20 @@ func normalizeSearchRequest(request SearchRequest) (SearchRequest, error) {
 	request.Namespace = strings.TrimSpace(request.Namespace)
 	request.Name = strings.TrimSpace(request.Name)
 	request.LabelSelector = strings.TrimSpace(request.LabelSelector)
+	request.Cursor = strings.TrimSpace(request.Cursor)
+	if request.PageSize == 0 {
+		request.PageSize = searchDefaultPageSize
+	}
 	if request.Namespace == "" {
 		request.Namespace = "all"
 	}
-	for _, value := range []string{request.Query, request.Group, request.Kind, request.Resource, request.Namespace, request.Name, request.LabelSelector} {
+	for _, value := range []string{request.Query, request.Group, request.Kind, request.Resource, request.Namespace, request.Name, request.LabelSelector, request.Cursor} {
 		if len(value) > searchFilterMax || strings.ContainsAny(value, "\x00\r\n") {
 			return SearchRequest{}, fmt.Errorf("search filter is invalid")
 		}
+	}
+	if request.PageSize != 25 && request.PageSize != 50 && request.PageSize != 100 {
+		return SearchRequest{}, fmt.Errorf("search filter is invalid")
 	}
 	if request.LabelSelector != "" {
 		if _, err := labels.Parse(request.LabelSelector); err != nil {
@@ -235,6 +244,7 @@ func searchDiscoveredSources(ctx context.Context, client dynamic.Interface, defi
 	}
 	semaphore := make(chan struct{}, searchConcurrency)
 	results := make(chan searchSourceResult, len(definitions))
+	pagesPerSource := searchPagesPerSource(len(definitions))
 	var waitGroup sync.WaitGroup
 	for _, definition := range definitions {
 		definition := definition
@@ -257,7 +267,7 @@ func searchDiscoveredSources(ctx context.Context, client dynamic.Interface, defi
 				}}
 				return
 			}
-			results <- searchSourceForDefinition(ctx, client, definition, request)
+			results <- searchSourceForDefinition(ctx, client, definition, request, pagesPerSource)
 		}()
 	}
 	waitGroup.Wait()
@@ -269,8 +279,20 @@ func searchDiscoveredSources(ctx context.Context, client dynamic.Interface, defi
 	return collected
 }
 
-// searchSourceForDefinition lists one exact catalog definition and returns a safe source outcome.
-func searchSourceForDefinition(ctx context.Context, client dynamic.Interface, definition ResourceDefinition, request SearchRequest) searchSourceResult {
+// searchPagesPerSource divides the fixed page budget across the selected resource sources.
+func searchPagesPerSource(sourceCount int) int {
+	if sourceCount <= 0 {
+		return searchPageBudget
+	}
+	pages := searchPageBudget / sourceCount
+	if pages < 1 {
+		return 1
+	}
+	return pages
+}
+
+// searchSourceForDefinition lists one exact catalog definition across bounded pages and returns a safe source outcome.
+func searchSourceForDefinition(ctx context.Context, client dynamic.Interface, definition ResourceDefinition, request SearchRequest, pageBudget int) searchSourceResult {
 	source := SearchSource{
 		Group:      definition.Group,
 		Version:    definition.Version,
@@ -286,32 +308,41 @@ func searchSourceForDefinition(ctx context.Context, client dynamic.Interface, de
 		return searchSourceResult{source: source}
 	}
 
-	options := metav1.ListOptions{
-		LabelSelector: request.LabelSelector,
+	if pageBudget < 1 {
+		pageBudget = 1
 	}
+	options := metav1.ListOptions{LabelSelector: request.LabelSelector, Limit: searchListPageSize}
 	if request.Name != "" {
 		options.FieldSelector = fields.OneTermEqualSelector("metadata.name", request.Name).String()
 	}
-	options.Limit = searchSourceLimit
 	gvr := schema.GroupVersionResource{Group: definition.Group, Version: definition.Version, Resource: definition.Resource}
-	items, err := listResource(ctx, client, gvr, request.Namespace, definition.Namespaced, options)
-	if err != nil {
-		source.State, source.Issue = classifySearchSourceError(definition, err)
-		return searchSourceResult{source: source, called: true}
-	}
-
-	result := searchSourceResult{source: source, called: true, items: make([]SearchResult, 0, len(items.Items))}
-	for index := range items.Items {
-		candidate := summarizeSearchResource(&items.Items[index], definition)
-		if searchResultMatchesQuery(candidate, request.Query) {
-			result.items = append(result.items, candidate)
+	result := searchSourceResult{source: source, called: true, items: make([]SearchResult, 0)}
+	for page := 0; page < pageBudget; page++ {
+		items, err := listResource(ctx, client, gvr, request.Namespace, definition.Namespaced, options)
+		result.pages++
+		if err != nil {
+			result.source.State, result.source.Issue = classifySearchSourceError(definition, err)
+			return result
+		}
+		for index := range items.Items {
+			candidate := summarizeSearchResource(&items.Items[index], definition)
+			if searchResultMatchesQuery(candidate, request.Query) {
+				result.items = append(result.items, candidate)
+			}
+		}
+		continuation := items.GetContinue()
+		if continuation == "" {
+			break
+		}
+		options.Continue = continuation
+		if page == pageBudget-1 {
+			result.source.Truncated = true
 		}
 	}
 	result.source.State = searchStateEmpty
 	if len(result.items) > 0 {
 		result.source.State = searchStateAvailable
 	}
-	result.source.Truncated = items.GetContinue() != "" || len(items.Items) >= searchSourceLimit
 	return result
 }
 
@@ -394,43 +425,6 @@ func searchDefinitionCoordinate(definition ResourceDefinition) string {
 	return definition.Group + "/" + definition.Version + "/" + definition.Resource
 }
 
-// boundSearchResults sorts source outcomes and applies the global result cap deterministically.
-func boundSearchResults(results []searchSourceResult, limit int) ([]searchSourceResult, bool) {
-	sort.Slice(results, func(left, right int) bool {
-		return searchSourceCoordinate(results[left].source) < searchSourceCoordinate(results[right].source)
-	})
-	truncated := false
-	remaining := limit
-	for index := range results {
-		items := results[index].items
-		sort.Slice(items, func(left, right int) bool {
-			if items[left].Namespace != items[right].Namespace {
-				return items[left].Namespace < items[right].Namespace
-			}
-			return items[left].Name < items[right].Name
-		})
-		if len(items) > remaining {
-			results[index].items = items[:maxInt(remaining, 0)]
-			results[index].source.Truncated = true
-			truncated = true
-		} else {
-			results[index].items = items
-		}
-		remaining -= len(results[index].items)
-		if remaining <= 0 && index < len(results)-1 {
-			for rest := index + 1; rest < len(results); rest++ {
-				if len(results[rest].items) > 0 {
-					results[rest].items = nil
-					results[rest].source.Truncated = true
-					truncated = true
-				}
-			}
-			break
-		}
-	}
-	return results, truncated
-}
-
 // aggregateSearchState derives the public state without treating a partial source as a total failure.
 func aggregateSearchState(sources []SearchSource, catalogState string, issues []DiscoveryIssue, truncated bool, itemCount int) string {
 	hasSourceFailure := false
@@ -486,12 +480,4 @@ func aggregateSearchState(sources []SearchSource, catalogState string, issues []
 		}
 	}
 	return searchStateEmpty
-}
-
-// searchSourceCoordinate formats source identity for deterministic ordering.
-func searchSourceCoordinate(source SearchSource) string {
-	if source.Group == "" {
-		return source.Version + "/" + source.Resource
-	}
-	return source.Group + "/" + source.Version + "/" + source.Resource
 }

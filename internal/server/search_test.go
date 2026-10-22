@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -77,7 +79,7 @@ func TestSearchHandlerReturnsBoundedPartialGVRResults(t *testing.T) {
 	defer server.Close()
 
 	handler := (&Server{kube: kube.NewService(writeServerAPIKubeconfig(t, server.URL))}).Handler()
-	request := httptest.NewRequest(http.MethodGet, "/api/search?context=test&namespace=team-a&query=api&name=api&labelSelector=app%3Dapi", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/search?context=test&namespace=team-a&query=api&name=api&labelSelector=app%3Dapi&pageSize=25", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -87,7 +89,7 @@ func TestSearchHandlerReturnsBoundedPartialGVRResults(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode search response: %v", err)
 	}
-	if payload.State != "partial" || !payload.Partial || len(payload.Items) != 1 || payload.CallCount != 2 || payload.CallBudget != 24 {
+	if payload.State != "partial" || !payload.Partial || len(payload.Items) != 1 || payload.CallCount != 2 || payload.CallBudget != 24 || payload.PageSize != 25 || payload.PageCount != 2 || payload.PageBudget != 24 {
 		t.Fatalf("search did not expose bounded partial state: %+v", payload)
 	}
 	item := payload.Items[0]
@@ -116,6 +118,84 @@ func TestSearchHandlerReturnsBoundedPartialGVRResults(t *testing.T) {
 	if invalid.Code != http.StatusBadRequest || strings.Contains(invalid.Body.String(), "private-value") || !strings.Contains(invalid.Body.String(), "Search filters are invalid") {
 		t.Fatalf("invalid search filter was not safely rejected: status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
+	expired := httptest.NewRecorder()
+	handler.ServeHTTP(expired, httptest.NewRequest(http.MethodGet, "/api/search?context=test&cursor=invalid-cursor", nil))
+	if expired.Code != http.StatusConflict || !strings.Contains(expired.Body.String(), "rerun the search") {
+		t.Fatalf("invalid search cursor was not safely rejected: status=%d body=%s", expired.Code, expired.Body.String())
+	}
+}
+
+// TestSearchHandlerReturnsNextCursorForAdditionalSourcePages verifies the HTTP cursor contract across Kubernetes list pages.
+func TestSearchHandlerReturnsNextCursorForAdditionalSourcePages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writeJSON := func(value interface{}) {
+			writer.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(writer).Encode(value); err != nil {
+				t.Errorf("encode paginated search response: %v", err)
+			}
+		}
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(&metav1.APIVersions{Versions: []string{"v1"}})
+		case "/api/v1":
+			writeJSON(&metav1.APIResourceList{GroupVersion: "v1", APIResources: []metav1.APIResource{{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: []string{"list"}}}})
+		case "/apis":
+			writeJSON(&metav1.APIGroupList{})
+		case "/apis/apiextensions.k8s.io/v1/customresourcedefinitions":
+			writeJSON(&unstructured.UnstructuredList{Object: map[string]interface{}{"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinitionList", "metadata": map[string]interface{}{}}})
+		case "/api/v1/pods":
+			if request.URL.Query().Get("continue") == "next-page" {
+				writeJSON(&unstructured.UnstructuredList{Object: map[string]interface{}{"apiVersion": "v1", "kind": "PodList", "metadata": map[string]interface{}{}}, Items: []unstructured.Unstructured{{Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata":   map[string]interface{}{"name": "operator-100", "namespace": "team-a"},
+				}}}})
+				return
+			}
+			items := make([]unstructured.Unstructured, 100)
+			for index := range items {
+				items[index] = unstructured.Unstructured{Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata":   map[string]interface{}{"name": "operator-" + strconv.Itoa(index), "namespace": "team-a"},
+				}}
+			}
+			list := &unstructured.UnstructuredList{Object: map[string]interface{}{"apiVersion": "v1", "kind": "PodList", "metadata": map[string]interface{}{}}, Items: items}
+			list.SetContinue("next-page")
+			writeJSON(list)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	handler := (&Server{kube: kube.NewService(writeServerAPIKubeconfig(t, server.URL))}).Handler()
+	firstRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(firstRecorder, httptest.NewRequest(http.MethodGet, "/api/search?context=test&kind=Pod&query=operator&pageSize=100", nil))
+	if firstRecorder.Code != http.StatusOK {
+		t.Fatalf("first paginated search failed: status=%d body=%s", firstRecorder.Code, firstRecorder.Body.String())
+	}
+	var first kube.SearchResponse
+	if err := json.NewDecoder(firstRecorder.Body).Decode(&first); err != nil {
+		t.Fatalf("decode first paginated search: %v", err)
+	}
+	if len(first.Items) != 100 || !first.HasMore || first.NextCursor == "" || first.PageCount != 1 {
+		t.Fatalf("first paginated search did not expose the next cursor: %+v", first)
+	}
+
+	secondRecorder := httptest.NewRecorder()
+	secondPath := "/api/search?context=test&kind=Pod&query=operator&pageSize=100&cursor=" + url.QueryEscape(first.NextCursor)
+	handler.ServeHTTP(secondRecorder, httptest.NewRequest(http.MethodGet, secondPath, nil))
+	if secondRecorder.Code != http.StatusOK {
+		t.Fatalf("second paginated search failed: status=%d body=%s", secondRecorder.Code, secondRecorder.Body.String())
+	}
+	var second kube.SearchResponse
+	if err := json.NewDecoder(secondRecorder.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second paginated search: %v", err)
+	}
+	if len(second.Items) != 1 || second.Items[0].Name != "operator-100" || second.HasMore || second.NextCursor != "" {
+		t.Fatalf("second paginated search did not consume the cursor: %+v", second)
+	}
 }
 
 // TestWriteSearchErrorAddsSafeCorrelationMetadata verifies fixed search failures carry request diagnostics.
@@ -130,6 +210,7 @@ func TestWriteSearchErrorAddsSafeCorrelationMetadata(t *testing.T) {
 	}{
 		{name: "backend", err: errors.New("search provider private-search-token failed"), status: http.StatusBadGateway, category: "dependency-unavailable", retry: "retry", requestID: "search-backend-7"},
 		{name: "validation", err: errors.New("search filter private-search-token is invalid"), status: http.StatusBadRequest, category: "validation", retry: "check-and-retry", requestID: "search-filter-8"},
+		{name: "cursor", err: errors.New("search cursor is stale"), status: http.StatusConflict, category: "conflict", retry: "refresh-and-review", requestID: "search-cursor-9"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler := (&Server{}).withLogging(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
