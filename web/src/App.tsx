@@ -99,6 +99,7 @@ import { parseSchemaInput, projectSchemaIdentityFields, validateSchemaScalarValu
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
 import { parseWorkloadReplicaInput, workloadReplicaInput, WORKLOAD_REPLICA_VALIDATION_MESSAGE } from './workload'
 import { MetricSample } from './metricSample'
+import { resourceRefreshFailed, resourceRefreshIntent, resourceRefreshSucceeded } from './resourceDetailRefresh'
 import { contextBootstrapState, NoContextState } from './bootstrap'
 import type {
   AuditEntry,
@@ -2488,6 +2489,11 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const [tab, setTab] = useState('overview')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [refreshLoading, setRefreshLoading] = useState(false)
+  const [refreshConfirmationOpen, setRefreshConfirmationOpen] = useState(false)
+  const [refreshEpoch, setRefreshEpoch] = useState(0)
+  const [deleteReviewPending, setDeleteReviewPending] = useState(false)
+  const [operationReviewPending, setOperationReviewPending] = useState(false)
   const [reviewReady, setReviewReady] = useState(false)
   const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [conflict, setConflict] = useState<ResourceConflictResponse | null>(null)
@@ -2498,12 +2504,20 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const schemaCandidate = !isSecret
   const [resourceSchema, setResourceSchema] = useState<ResourceSchemaResponse | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(false)
+  const refreshInFlightRef = useRef(false)
+  const refreshRequestIDRef = useRef(0)
 
   useEffect(() => {
     let active = true
+    const requestID = ++refreshRequestIDRef.current
     setConflict(null)
     setConflictReviewed(false)
     setDraftKept(false)
+    setRefreshConfirmationOpen(false)
+    setRefreshLoading(false)
+    refreshInFlightRef.current = false
+    setDeleteReviewPending(false)
+    setOperationReviewPending(false)
     setReviewReady(false)
     setReviewToken(undefined)
     setTab(isNew && schemaCandidate ? 'form' : 'overview')
@@ -2534,6 +2548,10 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       .catch((loadError: Error) => active && setError(loadError.message))
     return () => {
       active = false
+      if (refreshRequestIDRef.current === requestID) {
+        refreshRequestIDRef.current += 1
+        refreshInFlightRef.current = false
+      }
     }
   }, [context, definition.group, definition.version, definition.resource, definition.kind, definition.namespaced, namespace, name, isNew, isSecret])
 
@@ -2715,20 +2733,75 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
      setError('Current resource version carried into the draft. Review changes again before applying.')
    }
 
-   /** Refreshes the complete Pod after an operational subresource changes it. */
-   async function refreshObject() {
-     setReviewReady(false)
-     setReviewToken(undefined)
-     const refreshed = await fetchResource(context, definition, namespace, name)
-    const editorObject = sanitizeEditorObject(refreshed)
-    const text = stringify(isSecret ? redactSecret(editorObject) : editorObject)
-    setObject(refreshed)
-    setYamlText(text)
-    setOriginalYaml(text)
-    setReviewReady(false)
-    setReviewToken(undefined)
-    setError('')
-  }
+    /** Clears review and conflict state after an accepted detail refresh. */
+    function invalidateRefreshPreparation() {
+      setReviewReady(false)
+      setReviewToken(undefined)
+      setConflict(null)
+      setConflictReviewed(false)
+      setDraftKept(false)
+    }
+
+    /** Commits a refreshed object into the editor while preserving the active detail tab. */
+    function commitRefreshedObject(refreshed: ResourceObject) {
+      const editorObject = sanitizeEditorObject(refreshed)
+      const text = stringify(isSecret ? redactSecret(editorObject) : editorObject)
+      const outcome = resourceRefreshSucceeded(refreshed)
+      setObject(outcome.object)
+      setYamlText(text)
+      setOriginalYaml(text)
+      setError(outcome.error)
+      if (isSecret) setSecretsRevealed(false)
+    }
+
+    /** Fetches the exact active resource and retains the last object when the read fails. */
+    async function runResourceRefresh(): Promise<void> {
+      if (isNew || refreshInFlightRef.current) return
+      const requestID = refreshRequestIDRef.current
+      refreshInFlightRef.current = true
+      setRefreshLoading(true)
+      setRefreshConfirmationOpen(false)
+      setRefreshEpoch((value) => value + 1)
+      invalidateRefreshPreparation()
+      setError('')
+      try {
+        const refreshed = await fetchResource(context, definition, namespace, name)
+        if (requestID !== refreshRequestIDRef.current) return
+        commitRefreshedObject(refreshed)
+      } catch (refreshError) {
+        if (requestID !== refreshRequestIDRef.current) return
+        const outcome = resourceRefreshFailed(object, refreshError)
+        setError(outcome.error)
+      } finally {
+        if (requestID === refreshRequestIDRef.current) {
+          refreshInFlightRef.current = false
+          setRefreshLoading(false)
+        }
+      }
+    }
+
+    /** Requests a detail refresh and pauses for confirmation when local mutation state would be replaced. */
+    function requestResourceRefresh() {
+      if (isNew || refreshLoading || saving || refreshConfirmationOpen) return
+      const dirty = yamlText !== originalYaml
+      const reviewPending = Boolean(reviewReady || reviewToken || conflict || deleteReviewPending || operationReviewPending)
+      if (resourceRefreshIntent(dirty, reviewPending) === 'confirm') {
+        setRefreshConfirmationOpen(true)
+        return
+      }
+      void runResourceRefresh()
+    }
+
+    /** Refreshes the detail after an operational subresource changes it without discarding local work. */
+    async function refreshObject() {
+      const dirty = yamlText !== originalYaml
+      const reviewPending = Boolean(reviewReady || reviewToken || conflict)
+      if (resourceRefreshIntent(dirty, reviewPending) === 'confirm') {
+        setRefreshConfirmationOpen(true)
+        throw new Error('Refresh confirmation is required before replacing the local draft.')
+      }
+      await runResourceRefresh()
+    }
 
   /** Replaces the generic YAML editor document with one changed through the schema form. */
   function updateFormObject(nextObject: ResourceObject) {
@@ -2757,23 +2830,24 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
 
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
-     <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving || Boolean(conflict)} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
-     {definition.customResourceCapabilities && <CustomResourceCapabilityPanel capabilities={definition.customResourceCapabilities} />}
-     {!isNew && <DeleteReviewPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} />}
-     <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
+      <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span>{!isNew && <button type="button" className="secondary-button" disabled={refreshLoading || saving || refreshConfirmationOpen} onClick={requestResourceRefresh} aria-label="Refresh resource" title="Read the current resource from Kubernetes">{refreshLoading ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />} {refreshLoading ? 'Refreshing' : 'Refresh'}</button>}<button type="button" className="secondary-button" disabled={!writeEnabled || !dirty || saving || refreshLoading || refreshConfirmationOpen || Boolean(conflict)} onClick={() => void reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
+      {definition.customResourceCapabilities && <CustomResourceCapabilityPanel capabilities={definition.customResourceCapabilities} />}
+      {!isNew && <DeleteReviewPanel key={`delete-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} onReviewPending={setDeleteReviewPending} />}
+      {refreshConfirmationOpen && <section className="detail-refresh-confirmation" role="alertdialog" aria-label="Confirm resource refresh"><div><strong>Replace local draft?</strong><span>Refreshing replaces the unsaved YAML or form changes and clears any pending review. The current route and detail tab will stay open.</span></div><div><button type="button" className="secondary-button" onClick={() => setRefreshConfirmationOpen(false)} disabled={refreshLoading}>Keep local draft</button><button type="button" className="primary-button" onClick={() => void runResourceRefresh()} disabled={refreshLoading}>{refreshLoading ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />} {refreshLoading ? 'Refreshing' : 'Refresh and replace draft'}</button></div></section>}
+      <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
      {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
         {conflict && <ConflictResolutionPanel conflict={conflict} currentYaml={conflictCurrentYaml} isSecret={isSecret} draftKept={draftKept} reviewed={conflictReviewed} onReviewed={setConflictReviewed} onKeepDraft={keepConflictDraft} onReload={reloadConflictObject} onExport={exportConflictDraft} onPrepareRetry={prepareConflictRetry} />}
            {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel detail-panel-wide"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div></div>}
           {tab === 'read-pack' && isOperationalReadPackResource(definition) && <OperationalReadPackView context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} revision={revision} reloadEpoch={reloadEpoch} />}
-          {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
-          {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
-          {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
+           {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel key={`workload-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
+           {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel key={`node-${refreshEpoch}`} context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
+           {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel key={`pvc-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
        {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); setReviewReady(false); setReviewToken(undefined); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); setReviewReady(false); setReviewToken(undefined); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(event.target.value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
       {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
-      {tab === 'debug' && definition.resource === 'pods' && !isNew && <PodDebugPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+       {tab === 'debug' && definition.resource === 'pods' && !isNew && <PodDebugPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
       {tab === 'files' && definition.resource === 'pods' && !isNew && <PodFileCopyPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
       {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} revision={revision} reloadEpoch={reloadEpoch} onOpenEvent={onOpenEvent} />}
       {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
@@ -3237,7 +3311,7 @@ function parseResourceObject(value: string): ResourceObject | null {
 }
 
 /** Renders a version-aware dry-run and exact-name confirmation flow for one delete. */
-function DeleteReviewPanel({ context, namespace, definition, name, resourceVersion, writeEnabled, onDeleted }: { context: string; namespace: string; definition: ResourceDefinition; name: string; resourceVersion: string; writeEnabled: boolean; onDeleted: () => void }) {
+function DeleteReviewPanel({ context, namespace, definition, name, resourceVersion, writeEnabled, onDeleted, onReviewPending }: { context: string; namespace: string; definition: ResourceDefinition; name: string; resourceVersion: string; writeEnabled: boolean; onDeleted: () => void; onReviewPending: (pending: boolean) => void }) {
   const [review, setReview] = useState<ResourceDeleteResponse | null>(null)
   const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
@@ -3252,6 +3326,11 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
     setConfirmationText('')
     if (!writeEnabled) setError('')
   }, [context, namespace, definition.group, definition.version, definition.resource, name, resourceVersion, writeEnabled])
+
+  useEffect(() => {
+    onReviewPending(Boolean(review && reviewToken))
+    return () => onReviewPending(false)
+  }, [review, reviewToken, onReviewPending])
 
   /** Runs the server-side Kubernetes dry-run before exposing final delete controls. */
   async function reviewDelete() {
@@ -3466,7 +3545,7 @@ type WorkloadActionOption = {
 }
 
 /** Renders a two-step dry-run and confirmation form for built-in workloads. */
-function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
+function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, reloadEpoch, onRefresh, onReviewPending }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void>; onReviewPending: (pending: boolean) => void }) {
   const options = workloadActionOptions(definition.resource)
   const [action, setAction] = useState<WorkloadAction>(options[0]?.action || 'restart')
   const [replicas, setReplicas] = useState(workloadReplicaInput(object))
@@ -3507,6 +3586,11 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     setReviewToken(undefined)
     setConfirmed(false)
   }, [context, writeEnabled, reloadEpoch])
+
+  useEffect(() => {
+    onReviewPending(Boolean(review && reviewToken))
+    return () => onReviewPending(false)
+  }, [review, reviewToken, onReviewPending])
 
   /** Clears a review so the operator can change the requested action. */
   function editAction() {
@@ -3662,7 +3746,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
 }
 
 /** Renders a two-step PVC resize and VolumeSnapshot workflow with capability states. */
-function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
+function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, reloadEpoch, onRefresh, onReviewPending }: { context: string; namespace: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void>; onReviewPending: (pending: boolean) => void }) {
   const [info, setInfo] = useState<PVCOperationInfo | null>(null)
   const [action, setAction] = useState<PVCAction>('resize')
   const [storage, setStorage] = useState(pvcRequestedStorage(object))
@@ -3704,6 +3788,11 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, re
     setReviewToken(undefined)
     setConfirmed(false)
   }, [context, writeEnabled, reloadEpoch])
+
+  useEffect(() => {
+    onReviewPending(Boolean(review && reviewToken))
+    return () => onReviewPending(false)
+  }, [review, reviewToken, onReviewPending])
 
   /** Clears an older review when the operator changes the native PVC operation. */
   function changeAction(value: PVCAction) {
@@ -3859,7 +3948,7 @@ type NodeActionOption = {
 }
 
 /** Renders a two-step Node operation form with drain impact review and strong confirmation. */
-function NodeOperationsPanel({ context, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
+function NodeOperationsPanel({ context, name, object, writeEnabled, reloadEpoch, onRefresh, onReviewPending }: { context: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void>; onReviewPending: (pending: boolean) => void }) {
   const options = nodeActionOptions()
   const taints = nodeTaints(object)
   const [action, setAction] = useState<NodeAction>('cordon')
@@ -3895,6 +3984,11 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, reloadEpoch,
     setConfirmed(false)
     setConfirmationText('')
   }, [context, writeEnabled, reloadEpoch])
+
+  useEffect(() => {
+    onReviewPending(Boolean(review && reviewToken))
+    return () => onReviewPending(false)
+  }, [review, reviewToken, onReviewPending])
 
   /** Clears a review so the operator can change the Node operation. */
   function editNodeAction() {
