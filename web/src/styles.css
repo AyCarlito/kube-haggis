@@ -958,3 +958,100 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
   .event-meta { grid-column: 2; flex-direction: row; align-items: center; justify-content: flex-start; }
 }
 .detail-panel-wide { grid-column: 1 / -1; }
+
+/* U13: keep collection controls readable while allowing the toolbar to reflow. */
+.table-toolbar {
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.table-toolbar > .search-field {
+  flex: 1 1 15rem;
+  min-width: min(100%, 220px);
+  max-width: 340px;
+}
+
+.table-toolbar > .filter-field {
+  flex: 1 1 12rem;
+  width: auto;
+  min-width: min(100%, 180px);
+  order: 0;
+}
+
+.table-toolbar > .resource-control {
+  flex: 1 1 148px;
+  min-width: 148px;
+  height: auto;
+}
+
+.table-toolbar > .resource-control > span {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.table-toolbar > .resource-control select {
+  min-width: 0;
+  padding-right: 22px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-toolbar > .sort-direction {
+  flex: 0 0 var(--control-height);
+}
+
+.table-toolbar > .column-menu {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.table-toolbar > .toolbar-action {
+  flex: 0 0 var(--control-height);
+}
+
+.table-toolbar > .primary-button {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .table-toolbar > .search-field {
+    flex: 1 1 calc(100% - var(--control-height-narrow) - 8px);
+    min-width: 0;
+    max-width: none;
+  }
+
+  .table-toolbar > .filter-field {
+    flex: 1 1 100%;
+    min-width: 100%;
+  }
+
+  .table-toolbar > .resource-control {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 138px;
+  }
+
+  .table-toolbar > .sort-direction {
+    flex-basis: var(--control-height-narrow);
+    margin-left: 0;
+  }
+
+  .table-toolbar > .column-menu {
+    flex: 1 1 calc(100% - var(--control-height-narrow) - 8px);
+    min-width: 0;
+  }
+
+  .table-toolbar > .toolbar-action {
+    flex-basis: var(--control-height-narrow);
+    margin-left: 0;
+  }
+
+  .table-toolbar > .primary-button {
+    display: inline-flex;
+    flex: 1 1 100%;
+    width: 100%;
+    justify-content: center;
+  }
+}
