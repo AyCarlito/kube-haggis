@@ -42,7 +42,7 @@ import {
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { parse, stringify } from 'yaml'
 import {
   ApiError,
@@ -75,6 +75,7 @@ import {
   reloadContexts as reloadKubeconfig,
   responseApiError,
   resourceConflictFromError,
+  setClientWriteModeEnabled,
   terminalUrl,
   watchUrl,
 } from './api'
@@ -101,6 +102,7 @@ import { parseWorkloadReplicaInput, workloadReplicaInput, WORKLOAD_REPLICA_VALID
 import { MetricSample } from './metricSample'
 import { resourceRefreshFailed, resourceRefreshIntent, resourceRefreshSucceeded } from './resourceDetailRefresh'
 import { contextBootstrapState, NoContextState } from './bootstrap'
+import { initialWriteModeState, isDashboardRoute, isWriteModeEnabled, reduceWriteMode, type WriteModeAction, type WriteModeState } from './writeMode'
 import type {
   AuditEntry,
   AuditResponse,
@@ -276,13 +278,32 @@ export default function App() {
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [catalogError, setCatalogError] = useState('')
   const [catalogRefreshNonce, setCatalogRefreshNonce] = useState(0)
-  const [writeEnabled, setWriteEnabled] = useState(false)
+  const [writeMode, setWriteMode] = useState<WriteModeState>(() => initialWriteModeState())
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [contextLoading, setContextLoading] = useState(true)
   const [contextRequestError, setContextRequestError] = useState('')
   const [kubeconfigReloadEpoch, setKubeconfigReloadEpoch] = useState(0)
   const contextRequestID = useRef(0)
   const contextLoadingRef = useRef(true)
+
+  /** Applies one write-mode lifecycle event and synchronizes the client mutation guard immediately. */
+  function transitionWriteMode(action: WriteModeAction, nextRoute = route): void {
+    const nextState = reduceWriteMode(writeMode, action)
+    setWriteMode(nextState)
+    setClientWriteModeEnabled(
+      isWriteModeEnabled(nextState) &&
+      nextState.context === selectedContext &&
+      Boolean(activeContext) &&
+      bootstrapState === 'ready' &&
+      !contextLoading &&
+      !isDashboardRoute(nextRoute),
+    )
+  }
+
+  useEffect(() => {
+    setClientWriteModeEnabled(false)
+    return () => setClientWriteModeEnabled(false)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -300,7 +321,9 @@ export default function App() {
         if (initial) {
           const search = new URLSearchParams(window.location.search)
           const fromUrl = search.get('context')
-          setSelectedContext(fromUrl || response.currentContext)
+          const initialContext = fromUrl || response.currentContext
+          setSelectedContext(initialContext)
+          transitionWriteMode({ type: 'bootstrap-success', context: initialContext })
         }
       } catch (error) {
         if (!active || requestID !== contextRequestID.current) return
@@ -333,7 +356,6 @@ export default function App() {
     let active = true
     const routeNamespace = new URLSearchParams(window.location.search).get('namespace')
     setSelectedNamespace(routeNamespace || readNamespace(selectedContext))
-    setWriteEnabled(false)
     setCatalog(null)
     setDefinitions([])
     setCatalogLoading(true)
@@ -367,11 +389,17 @@ export default function App() {
     contextLoadingRef.current = true
     setContextLoading(true)
     setContextRequestError('')
+    setClientWriteModeEnabled(false)
     try {
       const response = await reloadKubeconfig()
       if (requestID !== contextRequestID.current) return
       setContexts(response)
       setContextRequestError(response.error || response.reloadError || '')
+      if (writeMode.status === 'loading') {
+        const recoveredContext = selectedContext || response.currentContext
+        if (!selectedContext && recoveredContext) setSelectedContext(recoveredContext)
+        transitionWriteMode({ type: 'bootstrap-success', context: recoveredContext })
+      }
     } catch (error) {
       if (requestID !== contextRequestID.current) return
       setContextRequestError((error as Error).message)
@@ -388,19 +416,30 @@ export default function App() {
     setCatalogRefreshNonce((value) => value + 1)
   }
 
-  /** Navigates to a route while preserving the selected context and namespace. */
-  function navigate(path: string, resource?: string, name?: string, resourceNamespace?: string) {
-    const nextPath = path || '/'
-    const params = new URLSearchParams()
-    if (selectedContext) params.set('context', selectedContext)
-    params.set('namespace', resourceNamespace || selectedNamespace)
-    window.history.pushState({}, '', `${nextPath}?${params.toString()}`)
-    setRoute(readRoute())
+  /** Navigates within the shell while preserving scope and applying dashboard reset semantics. */
+  function navigate(path: string, _resource?: string, _name?: string, resourceNamespace?: string) {
+    const destination = new URL(path || '/', window.location.origin)
+    const params = destination.searchParams
+    if (selectedContext && !params.has('context')) params.set('context', selectedContext)
+    if (!params.has('namespace')) params.set('namespace', resourceNamespace || selectedNamespace)
+    const search = params.toString()
+    const nextRoute = parseResourceRoute(destination.pathname, search ? `?${search}` : '')
+    const nextContext = params.get('context') || ''
+    if (params.has('context') && nextContext !== selectedContext) {
+      transitionWriteMode({ type: 'context-change', context: nextContext }, nextRoute)
+      setSelectedContext(nextContext)
+      setSelectedNamespace(nextRoute.namespace || readNamespace(nextContext))
+    } else {
+      transitionWriteMode({ type: 'navigate', route: nextRoute }, nextRoute)
+    }
+    window.history.pushState({}, '', `${destination.pathname}${search ? `?${search}` : ''}`)
+    setRoute(nextRoute)
     setMobileMenuOpen(false)
   }
 
   /** Changes the active kubeconfig context and starts it in read-only mode. */
   function changeContext(context: string) {
+    transitionWriteMode({ type: 'context-change', context })
     setSelectedContext(context)
     const namespace = readNamespace(context)
     setSelectedNamespace(namespace)
@@ -408,6 +447,7 @@ export default function App() {
     params.set('context', context)
     params.set('namespace', namespace)
     window.history.replaceState({}, '', `${window.location.pathname}?${params.toString()}`)
+    setRoute(readRoute())
   }
 
   /** Changes and persists the namespace scope for the active context. */
@@ -420,19 +460,55 @@ export default function App() {
   }
 
   useEffect(() => {
-    /** Updates the React route when browser history navigation occurs. */
+    /** Updates the React route and applies reset boundaries when browser history navigation occurs. */
     function handlePopState() {
-      setRoute(readRoute())
+      const nextRoute = readRoute()
+      const nextContext = new URLSearchParams(window.location.search).get('context')
+      if (nextContext && nextContext !== selectedContext) {
+        transitionWriteMode({ type: 'context-change', context: nextContext }, nextRoute)
+        setSelectedContext(nextContext)
+        setSelectedNamespace(nextRoute.namespace || readNamespace(nextContext))
+      } else {
+        transitionWriteMode({ type: 'navigate', route: nextRoute }, nextRoute)
+      }
+      setRoute(nextRoute)
     }
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
-  }, [])
+  }, [contextLoading, contexts, route, selectedContext, writeMode])
+
+  useEffect(() => {
+    /** Keeps internal route links in the single-page shell so in-memory safety state survives navigation. */
+    function handleInternalLink(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      const target = event.target
+      const anchor = target instanceof Element ? target.closest('a') : null
+      if (!anchor || anchor.target === '_blank' || anchor.hasAttribute('download')) return
+      const destination = new URL(anchor.href, window.location.href)
+      if (destination.origin !== window.location.origin || destination.pathname.startsWith('/api')) return
+      if (destination.href === window.location.href) return
+      event.preventDefault()
+      navigate(`${destination.pathname}${destination.search}`)
+    }
+    window.addEventListener('click', handleInternalLink)
+    return () => window.removeEventListener('click', handleInternalLink)
+  }, [contextLoading, contexts, route, selectedContext, selectedNamespace, writeMode])
 
   const activeDefinition = route.resource ? resolveCatalogDefinition(route, definitions) : undefined
   const ambiguousShortRoute = route.resource ? isAmbiguousCatalogRoute(route, definitions) : false
   const activeContext = contexts?.contexts.find((item) => item.name === selectedContext)
   const validResourceName = route.name && route.name !== 'undefined' && route.name !== 'null' ? route.name : undefined
   const bootstrapState = contextBootstrapState({ response: contexts, selectedContext, loading: contextLoading })
+  const writeEnabled = isWriteModeEnabled(writeMode) && writeMode.context === selectedContext && Boolean(activeContext) && bootstrapState === 'ready' && !contextLoading && !isDashboardRoute(route)
+
+  useLayoutEffect(() => {
+    setClientWriteModeEnabled(writeEnabled)
+  }, [writeEnabled])
+
+  useEffect(() => {
+    if (!isWriteModeEnabled(writeMode)) return
+    if (writeMode.context !== selectedContext || !activeContext || isDashboardRoute(route)) transitionWriteMode({ type: 'reset' })
+  }, [activeContext, route, selectedContext, writeMode])
   const content = bootstrapState === 'loading' ? (
     <LoadingState label="Reading local kubeconfig" />
   ) : !contexts ? (
@@ -546,8 +622,8 @@ export default function App() {
             <NamespacePicker context={selectedContext} value={selectedNamespace} revision={contextRevision} onChange={changeNamespace} />
             <button
               className={`write-switch ${writeEnabled ? 'write-switch-on' : ''}`}
-              onClick={() => setWriteEnabled((enabled) => !enabled)}
-              disabled={!selectedContext}
+              onClick={() => transitionWriteMode(isWriteModeEnabled(writeMode) ? { type: 'reset' } : { type: 'enable', context: selectedContext, route })}
+              disabled={!selectedContext || !activeContext || contextLoading || bootstrapState !== 'ready'}
             >
               <span className="write-switch-light" />
               {writeEnabled ? 'Write mode on' : 'Read-only'}

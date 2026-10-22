@@ -29,6 +29,8 @@ import type {
   WorkloadActionResponse,
 } from './types'
 
+let clientWriteModeActive = false
+
 /** Represents a safe HTTP API failure with its status and structured payload. */
 export class ApiError extends Error {
   readonly status: number
@@ -46,6 +48,20 @@ export class ApiError extends Error {
     this.requestId = requestId
     this.retry = retry
   }
+}
+
+/** Updates the in-memory client mutation guard owned by the application shell. */
+export function setClientWriteModeEnabled(enabled: boolean): void {
+  clientWriteModeActive = enabled
+}
+
+/** Builds mutation headers only while the application shell has explicitly enabled write mode. */
+function writeRequestHeaders(contentType?: string): Record<string, string> {
+  if (!clientWriteModeActive) {
+    const message = 'write mode is not enabled for this request'
+    throw new ApiError(message, 403, { error: message }, undefined, 'check-and-retry')
+  }
+  return contentType ? { 'Content-Type': contentType, 'X-KubeHaggis-Write': 'enabled' } : { 'X-KubeHaggis-Write': 'enabled' }
 }
 
 /** Returns a bounded safe error string from a backend JSON payload. */
@@ -332,7 +348,7 @@ export function applyResource(
     }),
     {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/apply-patch+yaml', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/apply-patch+yaml'),
       body,
     },
     reviewToken,
@@ -367,7 +383,7 @@ export function deleteResource(
     }),
     {
       method: 'DELETE',
-      headers: { 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders(),
     },
     reviewToken,
   )
@@ -395,7 +411,7 @@ export function deleteResources(
     }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify({ items, dryRun, confirmed, confirmation }),
     },
     reviewToken,
@@ -422,7 +438,7 @@ export function applyWorkloadAction(
     }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify(request),
     },
     reviewToken,
@@ -440,7 +456,7 @@ export function applyPVCAction(context: string, namespace: string, name: string,
     apiUrl('/api/pvc/action', { context, namespace, name }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify(request),
     },
     reviewToken,
@@ -453,7 +469,7 @@ export function applyNodeAction(context: string, name: string, request: NodeActi
     apiUrl('/api/node/action', { context, name }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify(request),
     },
     reviewToken,
@@ -497,7 +513,7 @@ export function launchEphemeralContainer(context: string, namespace: string, pod
     apiUrl('/api/pod/debug', { context, namespace, pod }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify(request),
     },
   )
@@ -531,7 +547,7 @@ export function uploadPodFile(context: string, namespace: string, pod: string, c
     apiUrl('/api/pod/copy', { context, namespace, pod }),
     {
       method: 'POST',
-      headers: { 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders(),
       body: form,
     },
   )
