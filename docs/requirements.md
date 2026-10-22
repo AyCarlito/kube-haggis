@@ -99,7 +99,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Do not add application-level login in the first release.
 - Use the selected kubeconfig identity and Kubernetes RBAC as the authorization authority.
 - Start in read-only mode.
-- Maintain write mode independently per cluster context and reset it on context switch unless explicitly enabled again.
+- Keep write mode sticky across non-dashboard views within the active context, but reset it to read-only when the dashboard is opened, when the active context changes, and when a new application session first loads kubeconfig. Do not restore write mode from a URL or browser-persisted state.
 - Allow interactive Pod `exec` and `attach` sessions in read-only mode; Kubernetes RBAC remains the authorization authority for those sessions.
 - Allow Pod port-forward sessions in read-only mode; bind local endpoints to loopback and rely on Kubernetes RBAC for authorization.
 - Require write mode for ephemeral debug-container creation and file uploads; allow bounded file downloads in read-only mode under Kubernetes RBAC.
@@ -423,3 +423,54 @@ Replace the Event related-resource reverse-owner action with a direct relationsh
 - Limit descendant list requests to the supported child group/version/resource identities and the safe namespace scope for the current object. Filter returned objects by their `metadata.ownerReferences` rather than treating same-name or label-matching objects as owned.
 - Do not infer a generic descendant relationship for arbitrary CRDs or offer `Load owned descendants` when no supported child relationship exists. Show direct owners and other explicit relationships without performing an unrelated reverse scan.
 - Keep supported descendant loading optional, bounded, and explicitly partial when a supported child API is unavailable, forbidden, times out, or reaches its limit. Report one relationship-level limitation for the affected supported child query rather than exposing a list of unrelated resource read errors.
+
+### U12. Explicit no-context bootstrap state (Planned)
+
+Distinguish initial kubeconfig loading from the intentional state where no Kubernetes context is selected.
+
+- Show `Reading local kubeconfig` only while the initial kubeconfig bootstrap is actually in progress. Do not leave a spinner or loading message visible after bootstrap has completed.
+- When the context selector is set to `No context`, or when kubeconfig has loaded without an active context, show a clear `Select a context` state with an instruction or action that directs the operator to choose a context from the context switcher.
+- Treat `No context` as an explicit, stable application state rather than as a loading or network failure state. The context dropdown, navigation shell, and state explanation must remain usable.
+- Do not start context-dependent discovery, resource reads, watches, or mutations while no context is selected. Do not show blank panels that could be mistaken for successful empty results.
+- Keep no-context, missing-kubeconfig, invalid-kubeconfig, and permission-denied states distinguishable, with an appropriate recovery or retry action for each state.
+- Cover the transition from bootstrap loading to no context, selected context, missing kubeconfig, and kubeconfig error with deterministic UI tests.
+
+### U13. Resource collection control layout (Planned)
+
+Keep the resource collection toolbar readable at desktop and narrower responsive widths.
+
+- Give the Status and Sort controls enough minimum width for their labels, current values, and disclosure indicators to remain readable. They must not be visibly compressed, clipped, or overlapped by neighboring controls.
+- Lay out the search, label selector, Status, Sort, Visible columns, refresh, and mutation controls so they can wrap or reflow before text becomes unreadable or controls overflow the collection view.
+- Preserve consistent control height, spacing, focus treatment, and touch targets while retaining the dense field-console visual language.
+- Verify the collection toolbar at the normal desktop width, browser zoom through 200%, and the existing narrow responsive breakpoint without horizontal clipping of essential controls.
+
+### U14. Dismissible visible-columns menu (Planned)
+
+Make the resource collection's Visible columns menu behave as a conventional dismissible popover.
+
+- Close the Visible columns menu when the operator clicks or taps outside its trigger and menu surface.
+- Keep the menu open while the operator interacts with its checkboxes or other controls inside the menu, and update the selected-column state without requiring an unrelated reopen.
+- Close the menu with `Escape` and when its trigger is toggled, while preserving an accessible expanded/collapsed state and returning focus to the trigger when appropriate.
+- Ensure an open menu does not permanently intercept clicks intended for the resource collection or the rest of the page.
+
+### U15. Resource detail refresh action (Planned)
+
+Provide an explicit way to refresh the object shown by a Resource Detail view.
+
+- Add a clearly labeled Refresh action in the Resource Detail action row, positioned beside the Review changes action when that action is available.
+- Refresh the exact active context, group/version/resource, namespace, and object name without changing the route or active detail tab.
+- Show an explicit loading state while the refresh is in progress, prevent duplicate refresh submissions, and report unavailable, forbidden, conflict, and network failures without replacing the last known object unnecessarily.
+- Do not require write mode to refresh a resource. Preserve the existing live-watch and freshness-state semantics rather than treating a manual refresh as a write operation.
+- Never silently discard an unsaved YAML or form draft. Require an explicit confirmation before replacing a local draft with the refreshed object, and invalidate any stale review handle or pending mutation preparation after the refresh is accepted.
+- Add deterministic coverage for a successful refresh, a failed refresh that retains the last known object, and a refresh attempted while local changes or a review are pending.
+
+### U16. Sticky write mode with explicit reset boundaries (Planned)
+
+Keep write-mode selection stable during ordinary navigation while retaining deliberate safety resets.
+
+- Initialize the application in read-only mode while kubeconfig is loading and set the mode to read-only on the first successful kubeconfig load for a new application session. Never restore a previous write-mode choice from a URL or browser-persisted state.
+- After the operator explicitly enables write mode, preserve that setting while navigating among non-dashboard views, including resource collections, Resource Detail views, operational views, search results, and other deep-linked resource routes in the active context.
+- Opening the dashboard must reset write mode to read-only before the dashboard is usable, whether the dashboard is reached through navigation, a deep link, browser history, or a context change.
+- Switching the active kubeconfig context must reset write mode to read-only. A later context selection must require an explicit enable action even if that context had previously been used in write mode.
+- Keep the frontend indicator and backend write-mode guard synchronized after every navigation and reset. A view transition must not briefly expose write-only controls based on stale state.
+- Add deterministic coverage for initial bootstrap, enable-and-navigate, dashboard reset, context-switch reset, browser-history navigation, and attempted writes after each reset boundary.
