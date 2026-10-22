@@ -99,6 +99,7 @@ import { parseSchemaInput, projectSchemaIdentityFields, validateSchemaScalarValu
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
 import { parseWorkloadReplicaInput, workloadReplicaInput, WORKLOAD_REPLICA_VALIDATION_MESSAGE } from './workload'
 import { MetricSample } from './metricSample'
+import { contextBootstrapState, NoContextState } from './bootstrap'
 import type {
   AuditEntry,
   AuditResponse,
@@ -430,8 +431,13 @@ export default function App() {
   const ambiguousShortRoute = route.resource ? isAmbiguousCatalogRoute(route, definitions) : false
   const activeContext = contexts?.contexts.find((item) => item.name === selectedContext)
   const validResourceName = route.name && route.name !== 'undefined' && route.name !== 'null' ? route.name : undefined
-  const content = !contexts || (contexts.contexts.length > 0 && !selectedContext) ? (
+  const bootstrapState = contextBootstrapState({ response: contexts, selectedContext, loading: contextLoading })
+  const content = bootstrapState === 'loading' ? (
     <LoadingState label="Reading local kubeconfig" />
+  ) : !contexts ? (
+    <LoadingState label="Reading local kubeconfig" />
+  ) : bootstrapState === 'no-context' ? (
+    <NoContextState />
   ) : route.view === 'diagnostics' ? (
     <DiagnosticsPage context={selectedContext} revision={contextRevision} />
   ) : route.view === 'history' ? (
@@ -440,7 +446,7 @@ export default function App() {
     <GlobalSearchPage context={selectedContext} namespace={selectedNamespace} revision={contextRevision} searchKey={route.search || ''} definitions={definitions} catalog={catalog} catalogLoading={catalogLoading} onNamespace={changeNamespace} onOpen={(result) => navigate(searchResultResourcePath(result), result.resource, result.name, result.namespace || undefined)} />
   ) : route.view === 'catalog' ? (
     <ResourceCatalogPage catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} onOpen={(definition) => navigate(catalogResourcePath(definition), definition.resource)} />
-  ) : contexts.error || contexts.contexts.length === 0 ? (
+  ) : bootstrapState === 'setup' ? (
     <SetupState error={contexts.error} />
   ) : route.view === 'workloads' ? (
     <WorkloadsPage context={selectedContext} namespace={selectedNamespace} definitions={definitions} catalogLoading={catalogLoading} catalogError={catalogError} />
