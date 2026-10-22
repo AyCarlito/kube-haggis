@@ -1,5 +1,4 @@
 import React from 'react'
-import { Server } from 'lucide-react'
 import type { ContextsResponse } from './types'
 
 /** Identifies the top-level state of kubeconfig bootstrap and context selection. */
@@ -25,7 +24,7 @@ export function NoContextState() {
   return (
     <div className="state-page">
       <div className="state-card">
-        <span className="state-icon"><Server size={22} /></span>
+        <img src="/haggis.svg" alt="KubeHaggis" className="state-mark" />
         <span className="eyebrow"><span className="eyebrow-mark" /> Context required</span>
         <h1>Select a context</h1>
         <p>Choose a context from the switcher above to begin reading cluster data. No discovery or Kubernetes resource reads start until a context is selected.</p>

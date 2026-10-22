@@ -30,7 +30,7 @@ export function runBootstrapModelTests(): void {
   assertBootstrap(contextBootstrapState(noContextSnapshot) === 'no-context', 'completed bootstrap with no selected context did not become stable no-context')
 
   const noContextMarkup = renderToStaticMarkup(<NoContextState />)
-  assertBootstrap(noContextMarkup.includes('Select a context') && noContextMarkup.includes('switcher above'), 'no-context state did not direct the operator to the context switcher')
+  assertBootstrap(noContextMarkup.includes('Select a context') && noContextMarkup.includes('switcher above') && noContextMarkup.includes('src="/haggis.svg"'), 'no-context state did not direct the operator to the context switcher with KubeHaggis branding')
   assertBootstrap(!noContextMarkup.includes('Reading local kubeconfig') && !noContextMarkup.includes('spin'), 'no-context state retained bootstrap loading presentation')
 
   assertBootstrap(contextBootstrapState({ response: loadedContexts('field'), selectedContext: 'field', loading: false }) === 'ready', 'selected context did not preserve the ready bootstrap state')
