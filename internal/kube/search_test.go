@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +34,7 @@ func TestSearchSourceUsesExactGVRAndServerSelectors(t *testing.T) {
 		Namespace:     "team-a",
 		Name:          "api",
 		LabelSelector: "app=api",
-	})
+	}, 1)
 	if result.source.State != searchStateAvailable || len(result.items) != 1 || result.items[0].Group != "apps" || result.items[0].Version != "v1" || result.items[0].Resource != "deployments" {
 		t.Fatalf("search source lost exact GVR or result: %+v", result)
 	}
@@ -54,6 +55,100 @@ func TestSearchSourceUsesExactGVRAndServerSelectors(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "private-value") || strings.Contains(string(encoded), "spec") {
 		t.Fatalf("search result exposed an object body: %s", encoded)
+	}
+}
+
+// TestSearchSourcePaginatesFreeTextMatches verifies a later list page can satisfy a free-text object-name query.
+func TestSearchSourcePaginatesFreeTextMatches(t *testing.T) {
+	client := newResourceListDynamicClient()
+	page := 0
+	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		page++
+		if page == 1 {
+			items := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{{Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "Pod",
+				"metadata":   map[string]interface{}{"name": "controller", "namespace": "team-a"},
+			}}}}
+			items.SetContinue("page-2")
+			return true, items, nil
+		}
+		return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata":   map[string]interface{}{"name": "operator-controller", "namespace": "team-a"},
+		}}}}, nil
+	})
+
+	result := searchSourceForDefinition(context.Background(), client, ResourceDefinition{
+		Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true, Scope: "Namespaced", Verbs: []string{"list"},
+	}, SearchRequest{Namespace: "all", Query: "operator"}, 2)
+	if page != 2 || result.source.State != searchStateAvailable || len(result.items) != 1 || result.items[0].Name != "operator-controller" {
+		t.Fatalf("search did not follow a continuation page for a free-text match: pages=%d result=%+v", page, result)
+	}
+	if result.source.Truncated {
+		t.Fatalf("completed continuation pages were incorrectly marked truncated: %+v", result.source)
+	}
+}
+
+// TestSearchSourceMarksPageBudgetTruncation verifies an unfinished continuation is surfaced as partial coverage.
+func TestSearchSourceMarksPageBudgetTruncation(t *testing.T) {
+	client := newResourceListDynamicClient()
+	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		items := &unstructured.UnstructuredList{}
+		items.SetContinue("more")
+		return true, items, nil
+	})
+
+	result := searchSourceForDefinition(context.Background(), client, ResourceDefinition{
+		Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true, Scope: "Namespaced", Verbs: []string{"list"},
+	}, SearchRequest{Namespace: "all", Query: "operator"}, 2)
+	if result.pages != 2 || !result.source.Truncated {
+		t.Fatalf("page budget was not surfaced: %+v", result)
+	}
+}
+
+// TestAdvanceSearchCursorReturnsSubsequentPages verifies pending summaries and Kubernetes continuation state survive page boundaries.
+func TestAdvanceSearchCursorReturnsSubsequentPages(t *testing.T) {
+	client := newResourceListDynamicClient()
+	page := 0
+	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		page++
+		if page == 1 {
+			items := make([]unstructured.Unstructured, 25)
+			for index := range items {
+				items[index] = unstructured.Unstructured{Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata":   map[string]interface{}{"name": fmt.Sprintf("operator-%02d", index), "namespace": "team-a"},
+				}}
+			}
+			list := &unstructured.UnstructuredList{Items: items}
+			list.SetContinue("page-2")
+			return true, list, nil
+		}
+		return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata":   map[string]interface{}{"name": "operator-25", "namespace": "team-a"},
+		}}}}, nil
+	})
+
+	service := NewService("")
+	state := newSearchCursorState("test", 1, SearchRequest{Namespace: "all", Query: "operator", PageSize: 25}, ResourceCatalog{State: searchStateAvailable}, []ResourceDefinition{{
+		Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true, Scope: "Namespaced", Verbs: []string{"list"},
+	}}, false)
+	first, err := service.advanceSearchCursor(context.Background(), client, state)
+	if err != nil || len(first.Items) != 25 || len(first.Sources) != 1 || first.Sources[0].ResultCount != 25 || !first.HasMore || first.NextCursor == "" || first.PageCount != 1 {
+		t.Fatalf("first cursor page was not bounded correctly: response=%+v err=%v", first, err)
+	}
+	nextState, found := service.loadSearchCursor(first.NextCursor)
+	if !found {
+		t.Fatal("first response did not retain its opaque cursor state")
+	}
+	second, err := service.advanceSearchCursor(context.Background(), client, nextState)
+	if err != nil || len(second.Items) != 1 || second.Items[0].Name != "operator-25" || second.HasMore || second.NextCursor != "" || second.PageCount != 1 {
+		t.Fatalf("second cursor page was not complete: response=%+v err=%v", second, err)
 	}
 }
 
@@ -167,21 +262,6 @@ func TestBoundSearchDefinitionsHonorsSourceBudget(t *testing.T) {
 	}
 }
 
-// TestBoundSearchResultsHonorsGlobalLimit verifies deterministic result truncation across sources.
-func TestBoundSearchResultsHonorsGlobalLimit(t *testing.T) {
-	results := []searchSourceResult{
-		{source: SearchSource{Group: "apps", Version: "v1", Resource: "deployments"}, items: []SearchResult{{Name: "b"}, {Name: "a"}, {Name: "c"}}},
-		{source: SearchSource{Group: "", Version: "v1", Resource: "pods"}, items: []SearchResult{{Name: "pod"}, {Name: "pod-2"}}},
-	}
-	bounded, truncated := boundSearchResults(results, 4)
-	if !truncated || len(bounded[0].items)+len(bounded[1].items) != 4 || !bounded[1].source.Truncated {
-		t.Fatalf("global result cap was not applied: truncated=%t results=%+v", truncated, bounded)
-	}
-	if bounded[0].items[0].Name != "a" {
-		t.Fatalf("source results were not deterministically sorted: %+v", bounded[0].items)
-	}
-}
-
 // TestNormalizeSearchRequestRejectsUnsafeFilters verifies invalid label selectors do not reach Kubernetes.
 func TestNormalizeSearchRequestRejectsUnsafeFilters(t *testing.T) {
 	if _, err := normalizeSearchRequest(SearchRequest{LabelSelector: "app in ("}); err == nil || !strings.Contains(err.Error(), "label selector") {
@@ -192,5 +272,8 @@ func TestNormalizeSearchRequestRejectsUnsafeFilters(t *testing.T) {
 	}
 	if _, err := normalizeSearchRequest(SearchRequest{Name: "unsafe/name"}); err == nil {
 		t.Fatal("unsafe metadata.name field selector was accepted")
+	}
+	if _, err := normalizeSearchRequest(SearchRequest{PageSize: 30}); err == nil {
+		t.Fatal("unsupported search page size was accepted")
 	}
 }

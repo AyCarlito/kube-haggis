@@ -42,9 +42,10 @@ import {
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { parse, stringify } from 'yaml'
 import {
+  ApiError,
   applyResource,
   applyNodeAction,
   applyPVCAction,
@@ -74,6 +75,7 @@ import {
   reloadContexts as reloadKubeconfig,
   responseApiError,
   resourceConflictFromError,
+  setClientWriteModeEnabled,
   terminalUrl,
   watchUrl,
 } from './api'
@@ -89,7 +91,7 @@ import {
   resolveCatalogDefinition,
 } from './catalog'
 import { overviewEventDetailPath, overviewEventsPath, overviewMetricDestination, overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
-import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchGroupOptions, searchHref, searchKindOptions, searchQueryEquals, searchResourceOptions, searchResultKey, searchResultResourcePath, searchDefinitionCandidates } from './search'
+import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchGroupOptions, searchHref, searchKindOptions, searchQueryEquals, searchResourceOptions, searchResultKey, searchResultResourcePath, searchDefinitionCandidates, SEARCH_DEFAULT_PAGE_SIZE, SEARCH_PAGE_SIZES } from './search'
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
@@ -98,6 +100,9 @@ import { parseSchemaInput, projectSchemaIdentityFields, validateSchemaScalarValu
 import { ReliableWatchController, initialWatchSnapshot, type FreshnessState, type WatchSnapshot } from './watch'
 import { parseWorkloadReplicaInput, workloadReplicaInput, WORKLOAD_REPLICA_VALIDATION_MESSAGE } from './workload'
 import { MetricSample } from './metricSample'
+import { resourceRefreshFailed, resourceRefreshIntent, resourceRefreshSucceeded } from './resourceDetailRefresh'
+import { contextBootstrapState, NoContextState } from './bootstrap'
+import { initialWriteModeState, isDashboardRoute, isWriteModeEnabled, reduceWriteMode, type WriteModeAction, type WriteModeState } from './writeMode'
 import type {
   AuditEntry,
   AuditResponse,
@@ -273,13 +278,32 @@ export default function App() {
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [catalogError, setCatalogError] = useState('')
   const [catalogRefreshNonce, setCatalogRefreshNonce] = useState(0)
-  const [writeEnabled, setWriteEnabled] = useState(false)
+  const [writeMode, setWriteMode] = useState<WriteModeState>(() => initialWriteModeState())
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [contextLoading, setContextLoading] = useState(true)
   const [contextRequestError, setContextRequestError] = useState('')
   const [kubeconfigReloadEpoch, setKubeconfigReloadEpoch] = useState(0)
   const contextRequestID = useRef(0)
   const contextLoadingRef = useRef(true)
+
+  /** Applies one write-mode lifecycle event and synchronizes the client mutation guard immediately. */
+  function transitionWriteMode(action: WriteModeAction, nextRoute = route): void {
+    const nextState = reduceWriteMode(writeMode, action)
+    setWriteMode(nextState)
+    setClientWriteModeEnabled(
+      isWriteModeEnabled(nextState) &&
+      nextState.context === selectedContext &&
+      Boolean(activeContext) &&
+      bootstrapState === 'ready' &&
+      !contextLoading &&
+      !isDashboardRoute(nextRoute),
+    )
+  }
+
+  useEffect(() => {
+    setClientWriteModeEnabled(false)
+    return () => setClientWriteModeEnabled(false)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -297,7 +321,9 @@ export default function App() {
         if (initial) {
           const search = new URLSearchParams(window.location.search)
           const fromUrl = search.get('context')
-          setSelectedContext(fromUrl || response.currentContext)
+          const initialContext = fromUrl || response.currentContext
+          setSelectedContext(initialContext)
+          transitionWriteMode({ type: 'bootstrap-success', context: initialContext })
         }
       } catch (error) {
         if (!active || requestID !== contextRequestID.current) return
@@ -330,7 +356,6 @@ export default function App() {
     let active = true
     const routeNamespace = new URLSearchParams(window.location.search).get('namespace')
     setSelectedNamespace(routeNamespace || readNamespace(selectedContext))
-    setWriteEnabled(false)
     setCatalog(null)
     setDefinitions([])
     setCatalogLoading(true)
@@ -364,11 +389,17 @@ export default function App() {
     contextLoadingRef.current = true
     setContextLoading(true)
     setContextRequestError('')
+    setClientWriteModeEnabled(false)
     try {
       const response = await reloadKubeconfig()
       if (requestID !== contextRequestID.current) return
       setContexts(response)
       setContextRequestError(response.error || response.reloadError || '')
+      if (writeMode.status === 'loading') {
+        const recoveredContext = selectedContext || response.currentContext
+        if (!selectedContext && recoveredContext) setSelectedContext(recoveredContext)
+        transitionWriteMode({ type: 'bootstrap-success', context: recoveredContext })
+      }
     } catch (error) {
       if (requestID !== contextRequestID.current) return
       setContextRequestError((error as Error).message)
@@ -385,19 +416,30 @@ export default function App() {
     setCatalogRefreshNonce((value) => value + 1)
   }
 
-  /** Navigates to a route while preserving the selected context and namespace. */
-  function navigate(path: string, resource?: string, name?: string, resourceNamespace?: string) {
-    const nextPath = path || '/'
-    const params = new URLSearchParams()
-    if (selectedContext) params.set('context', selectedContext)
-    params.set('namespace', resourceNamespace || selectedNamespace)
-    window.history.pushState({}, '', `${nextPath}?${params.toString()}`)
-    setRoute(readRoute())
+  /** Navigates within the shell while preserving scope and applying dashboard reset semantics. */
+  function navigate(path: string, _resource?: string, _name?: string, resourceNamespace?: string) {
+    const destination = new URL(path || '/', window.location.origin)
+    const params = destination.searchParams
+    if (selectedContext && !params.has('context')) params.set('context', selectedContext)
+    if (!params.has('namespace')) params.set('namespace', resourceNamespace || selectedNamespace)
+    const search = params.toString()
+    const nextRoute = parseResourceRoute(destination.pathname, search ? `?${search}` : '')
+    const nextContext = params.get('context') || ''
+    if (params.has('context') && nextContext !== selectedContext) {
+      transitionWriteMode({ type: 'context-change', context: nextContext }, nextRoute)
+      setSelectedContext(nextContext)
+      setSelectedNamespace(nextRoute.namespace || readNamespace(nextContext))
+    } else {
+      transitionWriteMode({ type: 'navigate', route: nextRoute }, nextRoute)
+    }
+    window.history.pushState({}, '', `${destination.pathname}${search ? `?${search}` : ''}`)
+    setRoute(nextRoute)
     setMobileMenuOpen(false)
   }
 
   /** Changes the active kubeconfig context and starts it in read-only mode. */
   function changeContext(context: string) {
+    transitionWriteMode({ type: 'context-change', context })
     setSelectedContext(context)
     const namespace = readNamespace(context)
     setSelectedNamespace(namespace)
@@ -405,6 +447,7 @@ export default function App() {
     params.set('context', context)
     params.set('namespace', namespace)
     window.history.replaceState({}, '', `${window.location.pathname}?${params.toString()}`)
+    setRoute(readRoute())
   }
 
   /** Changes and persists the namespace scope for the active context. */
@@ -417,20 +460,61 @@ export default function App() {
   }
 
   useEffect(() => {
-    /** Updates the React route when browser history navigation occurs. */
+    /** Updates the React route and applies reset boundaries when browser history navigation occurs. */
     function handlePopState() {
-      setRoute(readRoute())
+      const nextRoute = readRoute()
+      const nextContext = new URLSearchParams(window.location.search).get('context')
+      if (nextContext && nextContext !== selectedContext) {
+        transitionWriteMode({ type: 'context-change', context: nextContext }, nextRoute)
+        setSelectedContext(nextContext)
+        setSelectedNamespace(nextRoute.namespace || readNamespace(nextContext))
+      } else {
+        transitionWriteMode({ type: 'navigate', route: nextRoute }, nextRoute)
+      }
+      setRoute(nextRoute)
     }
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
-  }, [])
+  }, [contextLoading, contexts, route, selectedContext, writeMode])
+
+  useEffect(() => {
+    /** Keeps internal route links in the single-page shell so in-memory safety state survives navigation. */
+    function handleInternalLink(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      const target = event.target
+      const anchor = target instanceof Element ? target.closest('a') : null
+      if (!anchor || anchor.target === '_blank' || anchor.hasAttribute('download')) return
+      const destination = new URL(anchor.href, window.location.href)
+      if (destination.origin !== window.location.origin || destination.pathname.startsWith('/api')) return
+      if (destination.href === window.location.href) return
+      event.preventDefault()
+      navigate(`${destination.pathname}${destination.search}`)
+    }
+    window.addEventListener('click', handleInternalLink)
+    return () => window.removeEventListener('click', handleInternalLink)
+  }, [contextLoading, contexts, route, selectedContext, selectedNamespace, writeMode])
 
   const activeDefinition = route.resource ? resolveCatalogDefinition(route, definitions) : undefined
   const ambiguousShortRoute = route.resource ? isAmbiguousCatalogRoute(route, definitions) : false
   const activeContext = contexts?.contexts.find((item) => item.name === selectedContext)
   const validResourceName = route.name && route.name !== 'undefined' && route.name !== 'null' ? route.name : undefined
-  const content = !contexts || (contexts.contexts.length > 0 && !selectedContext) ? (
+  const bootstrapState = contextBootstrapState({ response: contexts, selectedContext, loading: contextLoading })
+  const writeEnabled = isWriteModeEnabled(writeMode) && writeMode.context === selectedContext && Boolean(activeContext) && bootstrapState === 'ready' && !contextLoading && !isDashboardRoute(route)
+
+  useLayoutEffect(() => {
+    setClientWriteModeEnabled(writeEnabled)
+  }, [writeEnabled])
+
+  useEffect(() => {
+    if (!isWriteModeEnabled(writeMode)) return
+    if (writeMode.context !== selectedContext || !activeContext || isDashboardRoute(route)) transitionWriteMode({ type: 'reset' })
+  }, [activeContext, route, selectedContext, writeMode])
+  const content = bootstrapState === 'loading' ? (
     <LoadingState label="Reading local kubeconfig" />
+  ) : !contexts ? (
+    <LoadingState label="Reading local kubeconfig" />
+  ) : bootstrapState === 'no-context' ? (
+    <NoContextState />
   ) : route.view === 'diagnostics' ? (
     <DiagnosticsPage context={selectedContext} revision={contextRevision} />
   ) : route.view === 'history' ? (
@@ -439,7 +523,7 @@ export default function App() {
     <GlobalSearchPage context={selectedContext} namespace={selectedNamespace} revision={contextRevision} searchKey={route.search || ''} definitions={definitions} catalog={catalog} catalogLoading={catalogLoading} onNamespace={changeNamespace} onOpen={(result) => navigate(searchResultResourcePath(result), result.resource, result.name, result.namespace || undefined)} />
   ) : route.view === 'catalog' ? (
     <ResourceCatalogPage catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} onOpen={(definition) => navigate(catalogResourcePath(definition), definition.resource)} />
-  ) : contexts.error || contexts.contexts.length === 0 ? (
+  ) : bootstrapState === 'setup' ? (
     <SetupState error={contexts.error} />
   ) : route.view === 'workloads' ? (
     <WorkloadsPage context={selectedContext} namespace={selectedNamespace} definitions={definitions} catalogLoading={catalogLoading} catalogError={catalogError} />
@@ -538,8 +622,8 @@ export default function App() {
             <NamespacePicker context={selectedContext} value={selectedNamespace} revision={contextRevision} onChange={changeNamespace} />
             <button
               className={`write-switch ${writeEnabled ? 'write-switch-on' : ''}`}
-              onClick={() => setWriteEnabled((enabled) => !enabled)}
-              disabled={!selectedContext}
+              onClick={() => transitionWriteMode(isWriteModeEnabled(writeMode) ? { type: 'reset' } : { type: 'enable', context: selectedContext, route })}
+              disabled={!selectedContext || !activeContext || contextLoading || bootstrapState !== 'ready'}
             >
               <span className="write-switch-light" />
               {writeEnabled ? 'Write mode on' : 'Read-only'}
@@ -1087,6 +1171,9 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
   const [response, setResponse] = useState<SearchResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [pageSize, setPageSize] = useState(SEARCH_DEFAULT_PAGE_SIZE)
+  const [pageIndex, setPageIndex] = useState(0)
+  const [cursorHistory, setCursorHistory] = useState<string[]>([''])
   const [savedViews, setSavedViews] = useState<SavedSearchView[]>(() => {
     const storage = browserSavedViewStorage()
     return storage ? loadSavedSearchViews(storage) : []
@@ -1094,6 +1181,15 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
   const [viewName, setViewName] = useState('')
   const [viewNotice, setViewNotice] = useState('')
   const searchAbortRef = useRef<AbortController | null>(null)
+  const searchCursorScopeRef = useRef('')
+  const currentCursor = cursorHistory[pageIndex] || ''
+  const searchScope = `${context}\u001f${revision}\u001f${namespace}\u001f${JSON.stringify(submittedQuery)}\u001f${pageSize}`
+
+  /** Resets the visible result page and its opaque cursor history. */
+  function resetPagination() {
+    setPageIndex(0)
+    setCursorHistory([''])
+  }
 
   useEffect(() => {
     const nextQuery = parseSearchQuery(searchKey)
@@ -1109,6 +1205,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setLoading(false)
     setError('')
     setViewNotice('')
+    resetPagination()
   }, [searchKey])
 
   useEffect(() => {
@@ -1118,6 +1215,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setSubmittedQuery((current) => current && current.namespace === namespace ? current : null)
     setResponse(null)
     setError('')
+    resetPagination()
   }, [namespace])
 
   useEffect(() => {
@@ -1125,11 +1223,21 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
       setLoading(false)
       return
     }
+    if (searchCursorScopeRef.current !== searchScope) {
+      searchCursorScopeRef.current = searchScope
+      if (currentCursor) {
+        searchAbortRef.current?.abort()
+        setResponse(null)
+        setLoading(false)
+        resetPagination()
+        return
+      }
+    }
     const controller = new AbortController()
     searchAbortRef.current = controller
     setLoading(true)
     setError('')
-    fetchGlobalSearch(context, submittedQuery, controller.signal)
+    fetchGlobalSearch(context, submittedQuery, { pageSize, cursor: currentCursor }, controller.signal)
       .then((nextResponse) => {
         if (controller.signal.aborted) return
         setResponse(nextResponse)
@@ -1137,6 +1245,11 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
       .catch((loadError: unknown) => {
         if (controller.signal.aborted || (loadError as Error).name === 'AbortError') return
         setResponse(null)
+        if (loadError instanceof ApiError && loadError.status === 409) {
+          resetPagination()
+          setError('This search page expired or the active context changed. Run the search again.')
+          return
+        }
         setError('Global search could not be completed. Kubernetes error details are hidden by the local server; retry the search.')
       })
       .finally(() => !controller.signal.aborted && setLoading(false))
@@ -1144,7 +1257,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
       controller.abort()
       if (searchAbortRef.current === controller) searchAbortRef.current = null
     }
-  }, [context, revision, submittedQuery])
+  }, [context, revision, namespace, submittedQuery, pageSize, currentCursor, searchScope])
 
   /** Updates one filter and immediately records the deep-linkable URL without issuing a request. */
   function updateQuery(field: keyof SearchQuery, value: string) {
@@ -1159,6 +1272,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setViewNotice('')
     setError('')
     setResponse(null)
+    resetPagination()
     setSubmittedQuery({ ...query })
   }
 
@@ -1170,7 +1284,30 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     setResponse(null)
     setError('')
     setViewNotice('')
+    resetPagination()
     window.history.replaceState({}, '', searchHref(context, next))
+  }
+
+  /** Changes the result page size and restarts the submitted search from its first cursor. */
+  function changePageSize(nextPageSize: number) {
+    setPageSize(nextPageSize)
+    resetPagination()
+    setResponse(null)
+  }
+
+  /** Advances to the next global search page using only the returned opaque cursor. */
+  function nextSearchPage() {
+    if (!response?.hasMore || !response.nextCursor || loading) return
+    setResponse(null)
+    setCursorHistory((current) => [...current.slice(0, pageIndex + 1), response.nextCursor as string])
+    setPageIndex((current) => current + 1)
+  }
+
+  /** Returns to a previously requested global search page. */
+  function previousSearchPage() {
+    if (pageIndex === 0 || loading) return
+    setResponse(null)
+    setPageIndex((current) => Math.max(0, current - 1))
   }
 
   /** Stores the current filters only when the active context and catalog are available. */
@@ -1204,6 +1341,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
     }
     const next = normalizeSearchQuery(view.query)
     setQuery(next)
+    resetPagination()
     setSubmittedQuery(next)
     if (next.namespace !== namespace) onNamespace(next.namespace)
     window.history.replaceState({}, '', searchHref(context, next))
@@ -1246,7 +1384,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
       <div className="search-layout">
         <main className="search-main">
           <section className="search-form-panel panel">
-            <div className="search-form-heading"><div><span className="panel-eyebrow">Operator query</span><h2>Set the field coordinates</h2><p>Typing changes only the URL. Submit deliberately to scan at most 24 sources and 200 summaries.</p></div><span className="search-budget-chip"><Search size={13} /> 24 sources / 6 concurrent</span></div>
+            <div className="search-form-heading"><div><span className="panel-eyebrow">Operator query</span><h2>Set the field coordinates</h2><p>Typing changes only the URL. Submit deliberately to scan at most 24 sources per page; use the result pager for more summaries.</p></div><span className="search-budget-chip"><Search size={13} /> 24 sources / 6 concurrent / paginated</span></div>
             <form className="search-form" onSubmit={(event) => { event.preventDefault(); submitSearch() }}>
               <label className="search-primary-field"><Search size={17} /><span className="sr-only">Search text</span><input value={query.query} onChange={(event) => updateQuery('query', event.target.value)} placeholder="Search kind, resource, namespace, or object name" /><kbd>submit</kbd></label>
               <div className="search-filter-grid">
@@ -1268,7 +1406,8 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
           {loading && response && <div className="search-refresh-strip"><LoaderCircle size={14} className="spin" /> Refreshing this submitted search; the previous bounded result remains visible.</div>}
           {response && <SearchSourcesPanel sources={response.sources} issues={response.issues} />}
           {response && response.items.length > 0 && <SearchResultTable items={response.items} onOpen={onOpen} />}
-          {response && !response.items.length && !loading && <SearchNoResults response={response} />}
+          {response && <SearchPagination response={response} pageIndex={pageIndex} pageSize={pageSize} loading={loading} onPageSize={changePageSize} onPrevious={previousSearchPage} onNext={nextSearchPage} />}
+          {response && !response.items.length && !response.hasMore && !loading && <SearchNoResults response={response} />}
           {!response && !loading && <div className="search-landing panel"><span className="search-landing-mark"><BookmarkPlus size={21} /></span><strong>Ready for a deliberate scan</strong><span>Use a name, kind, resource, namespace, or label selector, then run the search. No Kubernetes list calls happen while you type.</span></div>}
         </main>
 
@@ -1291,15 +1430,20 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
 /** Renders the aggregate search state without exposing backend Kubernetes error text. */
 function SearchResponseNotice({ response }: { response: SearchResponse }) {
   if (response.state === 'available' && !response.truncated && !response.issues?.length) return null
-  const title = response.state === 'partial' ? 'Partial result set' : response.state === 'permission-denied' ? 'Search access is restricted' : response.state === 'unavailable' ? 'Some search APIs are unavailable' : response.state === 'error' ? 'Search sources returned errors' : 'Search returned no matches'
-  const detail = response.state === 'partial' ? `${response.items.length} safe result${response.items.length === 1 ? '' : 's'} returned. ${response.truncated ? 'The fixed source or result cap was reached. ' : ''}Review source states below before treating this as complete.` : response.state === 'permission-denied' ? 'Kubernetes RBAC denied every source that was queried. No raw API error body is shown.' : response.state === 'unavailable' ? 'One or more Kubernetes APIs did not respond or are not currently served. Retry when the cluster recovers.' : response.state === 'error' ? 'One or more source reads failed. Successful sources remain visible and each issue is classified below.' : 'The bounded scan completed without a matching object.'
+  const title = response.state === 'partial' ? 'Partial result set' : response.state === 'permission-denied' ? 'Search access is restricted' : response.state === 'unavailable' ? 'Some search APIs are unavailable' : response.state === 'error' ? 'Search sources returned errors' : response.hasMore && !response.items.length ? 'More search pages available' : 'Search returned no matches'
+  const detail = response.state === 'partial' ? `${response.items.length} safe result${response.items.length === 1 ? '' : 's'} returned. ${response.truncated ? 'The fixed source or page scan budget was reached. ' : ''}Review source states below before treating this as complete.` : response.state === 'permission-denied' ? 'Kubernetes RBAC denied every source that was queried. No raw API error body is shown.' : response.state === 'unavailable' ? 'One or more Kubernetes APIs did not respond or are not currently served. Retry when the cluster recovers.' : response.state === 'error' ? 'One or more source reads failed. Successful sources remain visible and each issue is classified below.' : response.hasMore ? 'This page did not contain a matching object, but more source pages remain. Use Next to continue the scan.' : 'The bounded scan completed without a matching object.'
   return <div className={`search-response-notice search-response-notice-${response.state}`} role="status"><span className="search-response-icon">{response.state === 'partial' ? <AlertTriangle size={16} /> : response.state === 'permission-denied' ? <LockKeyhole size={16} /> : response.state === 'available' ? <RefreshCw size={16} /> : <AlertTriangle size={16} />}</span><div><strong>{title}</strong><span>{detail}</span>{response.issues?.slice(0, 3).map((issue, index) => <code key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}>{issue.message}</code>)}</div></div>
 }
 
 /** Renders per-source RBAC, unavailable, empty, and error outcomes for one search. */
 function SearchSourcesPanel({ sources, issues }: { sources: SearchSource[]; issues?: SearchResponse['issues'] }) {
   if (!sources.length && !issues?.length) return null
-  return <section className="search-sources panel"><div className="search-sources-heading"><div><span className="panel-eyebrow">Source ledger</span><h2>Where the result came from</h2></div><span>{sources.length} queried</span></div>{issues?.length ? <div className="search-catalog-issues">{issues.map((issue, index) => <div key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={13} /><span>{issue.message}</span></div>)}</div> : null}<div className="search-source-list">{sources.map((source) => <div className={`search-source-row search-source-row-${source.state}`} key={`${source.group}/${source.version}/${source.resource}`}><span className="search-source-dot" /><div><strong>{source.kind || source.resource}</strong><code>{source.group ? `${source.group}/${source.version}` : source.version} / {source.resource}</code></div><span className="search-source-result-count">{source.resultCount} result{source.resultCount === 1 ? '' : 's'}</span><span className="search-source-state">{searchSourceStateLabel(source.state)}</span>{source.issue && <span className="search-source-issue">{source.issue}</span>}</div>)}</div></section>
+  return <section className="search-sources panel"><div className="search-sources-heading"><div><span className="panel-eyebrow">Source ledger</span><h2>Where the result came from</h2></div><span>{sources.length} queried</span></div>{issues?.length ? <div className="search-catalog-issues">{issues.map((issue, index) => <div key={`${issue.group || 'core'}-${issue.version || 'unknown'}-${index}`}><AlertTriangle size={13} /><span>{issue.message}</span></div>)}</div> : null}<div className="search-source-list">{sources.map((source) => <div className={`search-source-row search-source-row-${source.state}`} key={`${source.group}/${source.version}/${source.resource}`}><span className="search-source-dot" /><div><strong>{source.kind || source.resource}</strong><code>{source.group ? `${source.group}/${source.version}` : source.version} / {source.resource}</code></div><span className="search-source-result-count">{source.resultCount} result{source.resultCount === 1 ? '' : 's'}</span><span className="search-source-state">{searchSourceStateLabel(source.state, source.hasMore)}</span>{source.issue && <span className="search-source-issue">{source.issue}</span>}</div>)}</div></section>
+}
+
+/** Renders page-size and opaque-cursor navigation for one global search response. */
+function SearchPagination({ response, pageIndex, pageSize, loading, onPageSize, onPrevious, onNext }: { response: SearchResponse; pageIndex: number; pageSize: number; loading: boolean; onPageSize: (pageSize: number) => void; onPrevious: () => void; onNext: () => void }) {
+  return <div className="table-footer resource-pagination search-pagination"><span>Page {pageIndex + 1} · Showing {response.items.length} result{response.items.length === 1 ? '' : 's'}{response.hasMore ? ' / more available' : ''}</span><div className="pagination-controls"><label>Rows <select value={pageSize} onChange={(event) => onPageSize(Number(event.target.value))}>{SEARCH_PAGE_SIZES.map((size) => <option value={size} key={size}>{size}</option>)}</select></label><button type="button" className="secondary-button" onClick={onPrevious} disabled={pageIndex === 0 || loading}><ChevronLeft size={14} /> Previous</button><button type="button" className="secondary-button" onClick={onNext} disabled={!response.hasMore || !response.nextCursor || loading}>Next <ChevronRight size={14} /></button></div><span><span className="table-footer-dot" /> Read {response.pageCount}/{response.pageBudget} API pages for this result page</span></div>
 }
 
 /** Renders bounded safe summaries with canonical full-GVR navigation. */
@@ -1324,11 +1468,11 @@ function savedViewStateLabel(state: SavedViewState | 'checking'): string {
 }
 
 /** Converts one source state into the explicit label shown in the source ledger. */
-function searchSourceStateLabel(state: SearchSource['state']): string {
+function searchSourceStateLabel(state: SearchSource['state'], hasMore = false): string {
   if (state === 'permission-denied') return 'RBAC denied'
   if (state === 'unavailable') return 'Unavailable'
   if (state === 'error') return 'Read error'
-  if (state === 'empty') return 'No matches'
+  if (state === 'empty') return hasMore ? 'More available' : 'No matches'
   return 'Read'
 }
 
@@ -1938,6 +2082,8 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
   const [sortDirection, setSortDirection] = useState<ResourceSortDirection>('asc')
   const [visibleColumns, setVisibleColumns] = useState<ResourceColumnKey[]>(defaultResourceColumns)
   const [columnsOpen, setColumnsOpen] = useState(false)
+  const columnsMenuRef = useRef<HTMLDivElement | null>(null)
+  const columnsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const [pageSize, setPageSize] = useState(100)
   const [pagination, setPagination] = useState<ResourcePaginationState>({ queryKey: '', pageIndex: 0, tokens: [''] })
   const [watchSnapshot, setWatchSnapshot] = useState<WatchSnapshot>(() => initialWatchSnapshot())
@@ -1955,6 +2101,32 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
   const paginationMatchesQuery = pagination.queryKey === listQueryKey
   const pageIndex = paginationMatchesQuery ? pagination.pageIndex : 0
   const continueToken = paginationMatchesQuery ? pagination.tokens[pageIndex] || '' : ''
+
+  useEffect(() => {
+    if (!columnsOpen) return
+
+    /** Closes the columns menu when pointer input starts outside its surface. */
+    function handleColumnsPointerDown(event: PointerEvent) {
+      const target = event.target
+      if (target instanceof Node && columnsMenuRef.current?.contains(target)) return
+      setColumnsOpen(false)
+    }
+
+    /** Closes the columns menu on Escape and returns focus to its trigger. */
+    function handleColumnsKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setColumnsOpen(false)
+      columnsTriggerRef.current?.focus()
+    }
+
+    document.addEventListener('pointerdown', handleColumnsPointerDown)
+    document.addEventListener('keydown', handleColumnsKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handleColumnsPointerDown)
+      document.removeEventListener('keydown', handleColumnsKeyDown)
+    }
+  }, [columnsOpen])
 
   useEffect(() => {
     setPagination({ queryKey: listQueryKey, pageIndex: 0, tokens: [''] })
@@ -2235,9 +2407,9 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
         <label className="resource-control"><span>Status <em>local page</em></span><select value={statusFilter} onChange={(event) => changeStatusFilter(event.target.value)}><option value="all">All statuses</option>{statusOptions.map((status) => <option value={status} key={status}>{status}</option>)}</select></label>
         <label className="resource-control"><span>Sort <em>local page</em></span><select value={sortKey} onChange={(event) => changeSortKey(event.target.value as ResourceSortKey)}><option value="name">Name</option><option value="namespace">Namespace</option><option value="status">Status</option><option value="ready">Ready</option><option value="age">Age</option></select></label>
         <button type="button" className="icon-button sort-direction" onClick={toggleSortDirection} aria-label={`Sort ${sortDirection === 'asc' ? 'descending' : 'ascending'}`} title={`Sort ${sortDirection === 'asc' ? 'descending' : 'ascending'}`}>{sortDirection === 'asc' ? <ArrowUp size={15} /> : <ArrowDown size={15} />}</button>
-        <div className="column-menu">
-          <button type="button" className="secondary-button column-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Settings2 size={14} /> Columns <span>{visibleColumnDefinitions.length}/{resourceColumnDefinitions.length}</span></button>
-          {columnsOpen && <div className="column-menu-panel"><strong>Visible columns</strong>{resourceColumnDefinitions.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} disabled={column.required} onChange={(event) => toggleColumn(column, event.target.checked)} /><span>{column.label}</span>{column.required && <em>required</em>}</label>)}<small>Columns change this browser view only.</small></div>}
+        <div ref={columnsMenuRef} className="column-menu">
+          <button ref={columnsTriggerRef} type="button" className="secondary-button column-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen} aria-controls="visible-columns-menu"><Settings2 size={14} /> Columns <span>{visibleColumnDefinitions.length}/{resourceColumnDefinitions.length}</span></button>
+          {columnsOpen && <div id="visible-columns-menu" className="column-menu-panel"><strong>Visible columns</strong>{resourceColumnDefinitions.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} disabled={column.required} onChange={(event) => toggleColumn(column, event.target.checked)} /><span>{column.label}</span>{column.required && <em>required</em>}</label>)}<small>Columns change this browser view only.</small></div>}
         </div>
         <button className="icon-button toolbar-action" onClick={() => setRefreshNonce((value) => value + 1)} aria-label="Refresh resources"><RefreshCw size={16} /></button>
         <button className="primary-button" disabled={!writeEnabled} onClick={onCreate} title={writeEnabled ? `Create a ${definition.kind}` : 'Enable write mode to create resources'}><span>+</span> New {definition.kind}</button>
@@ -2393,6 +2565,11 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const [tab, setTab] = useState('overview')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [refreshLoading, setRefreshLoading] = useState(false)
+  const [refreshConfirmationOpen, setRefreshConfirmationOpen] = useState(false)
+  const [refreshEpoch, setRefreshEpoch] = useState(0)
+  const [deleteReviewPending, setDeleteReviewPending] = useState(false)
+  const [operationReviewPending, setOperationReviewPending] = useState(false)
   const [reviewReady, setReviewReady] = useState(false)
   const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [conflict, setConflict] = useState<ResourceConflictResponse | null>(null)
@@ -2403,12 +2580,20 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const schemaCandidate = !isSecret
   const [resourceSchema, setResourceSchema] = useState<ResourceSchemaResponse | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(false)
+  const refreshInFlightRef = useRef(false)
+  const refreshRequestIDRef = useRef(0)
 
   useEffect(() => {
     let active = true
+    const requestID = ++refreshRequestIDRef.current
     setConflict(null)
     setConflictReviewed(false)
     setDraftKept(false)
+    setRefreshConfirmationOpen(false)
+    setRefreshLoading(false)
+    refreshInFlightRef.current = false
+    setDeleteReviewPending(false)
+    setOperationReviewPending(false)
     setReviewReady(false)
     setReviewToken(undefined)
     setTab(isNew && schemaCandidate ? 'form' : 'overview')
@@ -2439,6 +2624,10 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       .catch((loadError: Error) => active && setError(loadError.message))
     return () => {
       active = false
+      if (refreshRequestIDRef.current === requestID) {
+        refreshRequestIDRef.current += 1
+        refreshInFlightRef.current = false
+      }
     }
   }, [context, definition.group, definition.version, definition.resource, definition.kind, definition.namespaced, namespace, name, isNew, isSecret])
 
@@ -2620,20 +2809,75 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
      setError('Current resource version carried into the draft. Review changes again before applying.')
    }
 
-   /** Refreshes the complete Pod after an operational subresource changes it. */
-   async function refreshObject() {
-     setReviewReady(false)
-     setReviewToken(undefined)
-     const refreshed = await fetchResource(context, definition, namespace, name)
-    const editorObject = sanitizeEditorObject(refreshed)
-    const text = stringify(isSecret ? redactSecret(editorObject) : editorObject)
-    setObject(refreshed)
-    setYamlText(text)
-    setOriginalYaml(text)
-    setReviewReady(false)
-    setReviewToken(undefined)
-    setError('')
-  }
+    /** Clears review and conflict state after an accepted detail refresh. */
+    function invalidateRefreshPreparation() {
+      setReviewReady(false)
+      setReviewToken(undefined)
+      setConflict(null)
+      setConflictReviewed(false)
+      setDraftKept(false)
+    }
+
+    /** Commits a refreshed object into the editor while preserving the active detail tab. */
+    function commitRefreshedObject(refreshed: ResourceObject) {
+      const editorObject = sanitizeEditorObject(refreshed)
+      const text = stringify(isSecret ? redactSecret(editorObject) : editorObject)
+      const outcome = resourceRefreshSucceeded(refreshed)
+      setObject(outcome.object)
+      setYamlText(text)
+      setOriginalYaml(text)
+      setError(outcome.error)
+      if (isSecret) setSecretsRevealed(false)
+    }
+
+    /** Fetches the exact active resource and retains the last object when the read fails. */
+    async function runResourceRefresh(): Promise<void> {
+      if (isNew || refreshInFlightRef.current) return
+      const requestID = refreshRequestIDRef.current
+      refreshInFlightRef.current = true
+      setRefreshLoading(true)
+      setRefreshConfirmationOpen(false)
+      setRefreshEpoch((value) => value + 1)
+      invalidateRefreshPreparation()
+      setError('')
+      try {
+        const refreshed = await fetchResource(context, definition, namespace, name)
+        if (requestID !== refreshRequestIDRef.current) return
+        commitRefreshedObject(refreshed)
+      } catch (refreshError) {
+        if (requestID !== refreshRequestIDRef.current) return
+        const outcome = resourceRefreshFailed(object, refreshError)
+        setError(outcome.error)
+      } finally {
+        if (requestID === refreshRequestIDRef.current) {
+          refreshInFlightRef.current = false
+          setRefreshLoading(false)
+        }
+      }
+    }
+
+    /** Requests a detail refresh and pauses for confirmation when local mutation state would be replaced. */
+    function requestResourceRefresh() {
+      if (isNew || refreshLoading || saving || refreshConfirmationOpen) return
+      const dirty = yamlText !== originalYaml
+      const reviewPending = Boolean(reviewReady || reviewToken || conflict || deleteReviewPending || operationReviewPending)
+      if (resourceRefreshIntent(dirty, reviewPending) === 'confirm') {
+        setRefreshConfirmationOpen(true)
+        return
+      }
+      void runResourceRefresh()
+    }
+
+    /** Refreshes the detail after an operational subresource changes it without discarding local work. */
+    async function refreshObject() {
+      const dirty = yamlText !== originalYaml
+      const reviewPending = Boolean(reviewReady || reviewToken || conflict)
+      if (resourceRefreshIntent(dirty, reviewPending) === 'confirm') {
+        setRefreshConfirmationOpen(true)
+        throw new Error('Refresh confirmation is required before replacing the local draft.')
+      }
+      await runResourceRefresh()
+    }
 
   /** Replaces the generic YAML editor document with one changed through the schema form. */
   function updateFormObject(nextObject: ResourceObject) {
@@ -2662,23 +2906,24 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
 
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
-     <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span><button className="secondary-button" disabled={!writeEnabled || !dirty || saving || Boolean(conflict)} onClick={reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
-     {definition.customResourceCapabilities && <CustomResourceCapabilityPanel capabilities={definition.customResourceCapabilities} />}
-     {!isNew && <DeleteReviewPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} />}
-     <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
+      <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span>{!isNew && <button type="button" className="secondary-button" disabled={refreshLoading || saving || refreshConfirmationOpen} onClick={requestResourceRefresh} aria-label="Refresh resource" title="Read the current resource from Kubernetes">{refreshLoading ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />} {refreshLoading ? 'Refreshing' : 'Refresh'}</button>}<button type="button" className="secondary-button" disabled={!writeEnabled || !dirty || saving || refreshLoading || refreshConfirmationOpen || Boolean(conflict)} onClick={() => void reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
+      {definition.customResourceCapabilities && <CustomResourceCapabilityPanel capabilities={definition.customResourceCapabilities} />}
+      {!isNew && <DeleteReviewPanel key={`delete-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} onReviewPending={setDeleteReviewPending} />}
+      {refreshConfirmationOpen && <section className="detail-refresh-confirmation" role="alertdialog" aria-label="Confirm resource refresh"><div><strong>Replace local draft?</strong><span>Refreshing replaces the unsaved YAML or form changes and clears any pending review. The current route and detail tab will stay open.</span></div><div><button type="button" className="secondary-button" onClick={() => setRefreshConfirmationOpen(false)} disabled={refreshLoading}>Keep local draft</button><button type="button" className="primary-button" onClick={() => void runResourceRefresh()} disabled={refreshLoading}>{refreshLoading ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />} {refreshLoading ? 'Refreshing' : 'Refresh and replace draft'}</button></div></section>}
+      <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item} className={tab === item ? 'detail-tab active' : 'detail-tab'} onClick={() => { if (item === 'form') syncObjectFromYaml(); setTab(item) }}>{item === 'yaml' ? 'YAML editor' : item === 'form' ? 'Schema form' : titleCase(item)}</button>)}</div>
      {error && <div className="inline-error page-error"><AlertTriangle size={15} />{error}</div>}
         {conflict && <ConflictResolutionPanel conflict={conflict} currentYaml={conflictCurrentYaml} isSecret={isSecret} draftKept={draftKept} reviewed={conflictReviewed} onReviewed={setConflictReviewed} onKeepDraft={keepConflictDraft} onReload={reloadConflictObject} onExport={exportConflictDraft} onPrepareRetry={prepareConflictRetry} />}
            {tab === 'overview' && <div className="detail-grid"><div className="panel detail-panel detail-panel-wide"><PanelHeading eyebrow="Identity" title="Resource coordinates" action="Stable object" tone="good" /><div className="identity-list"><IdentityRow label="Kind" value={definition.kind} /><IdentityRow label="Namespace" value={namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace} /><IdentityRow label="UID" value={String(object.metadata && (object.metadata as Record<string, unknown>).uid || '—')} mono /><IdentityRow label="Resource version" value={String(object.metadata && (object.metadata as Record<string, unknown>).resourceVersion || '—')} mono /></div></div></div>}
           {tab === 'read-pack' && isOperationalReadPackResource(definition) && <OperationalReadPackView context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} revision={revision} reloadEpoch={reloadEpoch} />}
-          {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
-          {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
-          {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} />}
+           {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel key={`workload-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
+           {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel key={`node-${refreshEpoch}`} context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
+           {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel key={`pvc-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
        {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); setReviewReady(false); setReviewToken(undefined); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); setReviewReady(false); setReviewToken(undefined); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<textarea className="yaml-editor" value={yamlText} onChange={(event) => { setYamlText(event.target.value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(event.target.value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} spellCheck={false} aria-label="Resource YAML" /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
       {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
-      {tab === 'debug' && definition.resource === 'pods' && !isNew && <PodDebugPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
+       {tab === 'debug' && definition.resource === 'pods' && !isNew && <PodDebugPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
       {tab === 'files' && definition.resource === 'pods' && !isNew && <PodFileCopyPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
       {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} revision={revision} reloadEpoch={reloadEpoch} onOpenEvent={onOpenEvent} />}
       {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
@@ -3142,7 +3387,7 @@ function parseResourceObject(value: string): ResourceObject | null {
 }
 
 /** Renders a version-aware dry-run and exact-name confirmation flow for one delete. */
-function DeleteReviewPanel({ context, namespace, definition, name, resourceVersion, writeEnabled, onDeleted }: { context: string; namespace: string; definition: ResourceDefinition; name: string; resourceVersion: string; writeEnabled: boolean; onDeleted: () => void }) {
+function DeleteReviewPanel({ context, namespace, definition, name, resourceVersion, writeEnabled, onDeleted, onReviewPending }: { context: string; namespace: string; definition: ResourceDefinition; name: string; resourceVersion: string; writeEnabled: boolean; onDeleted: () => void; onReviewPending: (pending: boolean) => void }) {
   const [review, setReview] = useState<ResourceDeleteResponse | null>(null)
   const [reviewToken, setReviewToken] = useState<string | undefined>()
   const [confirmed, setConfirmed] = useState(false)
@@ -3157,6 +3402,11 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
     setConfirmationText('')
     if (!writeEnabled) setError('')
   }, [context, namespace, definition.group, definition.version, definition.resource, name, resourceVersion, writeEnabled])
+
+  useEffect(() => {
+    onReviewPending(Boolean(review && reviewToken))
+    return () => onReviewPending(false)
+  }, [review, reviewToken, onReviewPending])
 
   /** Runs the server-side Kubernetes dry-run before exposing final delete controls. */
   async function reviewDelete() {
@@ -3371,7 +3621,7 @@ type WorkloadActionOption = {
 }
 
 /** Renders a two-step dry-run and confirmation form for built-in workloads. */
-function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
+function WorkloadActionsPanel({ context, namespace, definition, name, object, writeEnabled, reloadEpoch, onRefresh, onReviewPending }: { context: string; namespace: string; definition: ResourceDefinition; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void>; onReviewPending: (pending: boolean) => void }) {
   const options = workloadActionOptions(definition.resource)
   const [action, setAction] = useState<WorkloadAction>(options[0]?.action || 'restart')
   const [replicas, setReplicas] = useState(workloadReplicaInput(object))
@@ -3412,6 +3662,11 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
     setReviewToken(undefined)
     setConfirmed(false)
   }, [context, writeEnabled, reloadEpoch])
+
+  useEffect(() => {
+    onReviewPending(Boolean(review && reviewToken))
+    return () => onReviewPending(false)
+  }, [review, reviewToken, onReviewPending])
 
   /** Clears a review so the operator can change the requested action. */
   function editAction() {
@@ -3567,7 +3822,7 @@ function WorkloadActionsPanel({ context, namespace, definition, name, object, wr
 }
 
 /** Renders a two-step PVC resize and VolumeSnapshot workflow with capability states. */
-function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; namespace: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
+function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, reloadEpoch, onRefresh, onReviewPending }: { context: string; namespace: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void>; onReviewPending: (pending: boolean) => void }) {
   const [info, setInfo] = useState<PVCOperationInfo | null>(null)
   const [action, setAction] = useState<PVCAction>('resize')
   const [storage, setStorage] = useState(pvcRequestedStorage(object))
@@ -3609,6 +3864,11 @@ function PVCOperationsPanel({ context, namespace, name, object, writeEnabled, re
     setReviewToken(undefined)
     setConfirmed(false)
   }, [context, writeEnabled, reloadEpoch])
+
+  useEffect(() => {
+    onReviewPending(Boolean(review && reviewToken))
+    return () => onReviewPending(false)
+  }, [review, reviewToken, onReviewPending])
 
   /** Clears an older review when the operator changes the native PVC operation. */
   function changeAction(value: PVCAction) {
@@ -3764,7 +4024,7 @@ type NodeActionOption = {
 }
 
 /** Renders a two-step Node operation form with drain impact review and strong confirmation. */
-function NodeOperationsPanel({ context, name, object, writeEnabled, reloadEpoch, onRefresh }: { context: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void> }) {
+function NodeOperationsPanel({ context, name, object, writeEnabled, reloadEpoch, onRefresh, onReviewPending }: { context: string; name: string; object: ResourceObject; writeEnabled: boolean; reloadEpoch: number; onRefresh: () => Promise<void>; onReviewPending: (pending: boolean) => void }) {
   const options = nodeActionOptions()
   const taints = nodeTaints(object)
   const [action, setAction] = useState<NodeAction>('cordon')
@@ -3800,6 +4060,11 @@ function NodeOperationsPanel({ context, name, object, writeEnabled, reloadEpoch,
     setConfirmed(false)
     setConfirmationText('')
   }, [context, writeEnabled, reloadEpoch])
+
+  useEffect(() => {
+    onReviewPending(Boolean(review && reviewToken))
+    return () => onReviewPending(false)
+  }, [review, reviewToken, onReviewPending])
 
   /** Clears a review so the operator can change the Node operation. */
   function editNodeAction() {

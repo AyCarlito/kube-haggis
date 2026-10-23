@@ -241,6 +241,8 @@ func (s *Server) handleSearch(writer http.ResponseWriter, request *http.Request)
 		Namespace:     query.Get("namespace"),
 		Name:          query.Get("name"),
 		LabelSelector: query.Get("labelSelector"),
+		PageSize:      parseLimit(query.Get("pageSize"), 0, 100),
+		Cursor:        query.Get("cursor"),
 	})
 	if err != nil {
 		writeSearchError(writer, err)
@@ -947,7 +949,12 @@ func writeSearchError(writer http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	category := "dependency-unavailable"
 	message := "Global search is unavailable; retry the search."
-	if strings.Contains(strings.ToLower(err.Error()), "search filter") || strings.Contains(strings.ToLower(err.Error()), "label selector") {
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "search cursor is stale") || strings.Contains(lower, "search cursor is expired") {
+		status = http.StatusConflict
+		category = "conflict"
+		message = "This global search page expired or no longer matches the active context; rerun the search."
+	} else if strings.Contains(lower, "search filter") || strings.Contains(lower, "label selector") {
 		status = http.StatusBadRequest
 		category = "validation"
 		message = "Search filters are invalid; check the label selector and filter lengths."

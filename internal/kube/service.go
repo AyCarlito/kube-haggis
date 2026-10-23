@@ -285,6 +285,8 @@ type Service struct {
 	discoveryGenerations     map[discoveryCacheKey]uint64
 	resourceSchemaCache      map[resourceSchemaCacheKey]ResourceSchema
 	resourceSchemaCacheOrder []resourceSchemaCacheKey
+	searchCursorMu           sync.Mutex
+	searchCursors            map[string]searchCursorEntry
 }
 
 const (
@@ -304,6 +306,7 @@ func NewService(kubeconfigPath string) *Service {
 		discoveryFlights:     make(map[discoveryCacheKey]*discoveryFlight),
 		discoveryGenerations: make(map[discoveryCacheKey]uint64),
 		resourceSchemaCache:  make(map[resourceSchemaCacheKey]ResourceSchema),
+		searchCursors:        make(map[string]searchCursorEntry),
 	}
 }
 

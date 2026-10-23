@@ -29,6 +29,8 @@ import type {
   WorkloadActionResponse,
 } from './types'
 
+let clientWriteModeActive = false
+
 /** Represents a safe HTTP API failure with its status and structured payload. */
 export class ApiError extends Error {
   readonly status: number
@@ -46,6 +48,20 @@ export class ApiError extends Error {
     this.requestId = requestId
     this.retry = retry
   }
+}
+
+/** Updates the in-memory client mutation guard owned by the application shell. */
+export function setClientWriteModeEnabled(enabled: boolean): void {
+  clientWriteModeActive = enabled
+}
+
+/** Builds mutation headers only while the application shell has explicitly enabled write mode. */
+function writeRequestHeaders(contentType?: string): Record<string, string> {
+  if (!clientWriteModeActive) {
+    const message = 'write mode is not enabled for this request'
+    throw new ApiError(message, 403, { error: message }, undefined, 'check-and-retry')
+  }
+  return contentType ? { 'Content-Type': contentType, 'X-KubeHaggis-Write': 'enabled' } : { 'X-KubeHaggis-Write': 'enabled' }
 }
 
 /** Returns a bounded safe error string from a backend JSON payload. */
@@ -80,6 +96,12 @@ export interface MutationResponse<T> {
 export interface ResourceListQuery {
   limit?: number
   continueToken?: string
+}
+
+/** Describes one bounded page request for the global search cursor. */
+export interface GlobalSearchPageQuery {
+  pageSize?: number
+  cursor?: string
 }
 
 /** Builds a backend API URL with encoded query parameters. */
@@ -159,8 +181,8 @@ export function fetchResourceCatalog(context: string, refresh = false): Promise<
   return fetchJson<ResourceCatalogResponse>(apiUrl('/api/discovery', { context, refresh: refresh ? 'true' : undefined }))
 }
 
-/** Runs one explicitly submitted bounded global search against the active catalog. */
-export function fetchGlobalSearch(context: string, query: SearchQuery, signal?: AbortSignal): Promise<SearchResponse> {
+/** Runs one explicitly submitted paginated global search request against the active catalog. */
+export function fetchGlobalSearch(context: string, query: SearchQuery, page: GlobalSearchPageQuery = {}, signal?: AbortSignal): Promise<SearchResponse> {
   return fetchJson<SearchResponse>(
     apiUrl('/api/search', {
       context,
@@ -171,6 +193,8 @@ export function fetchGlobalSearch(context: string, query: SearchQuery, signal?: 
       namespace: query.namespace,
       name: query.name,
       labelSelector: query.labelSelector,
+      pageSize: page.pageSize === undefined ? undefined : String(page.pageSize),
+      cursor: page.cursor,
     }),
     { signal },
   )
@@ -324,7 +348,7 @@ export function applyResource(
     }),
     {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/apply-patch+yaml', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/apply-patch+yaml'),
       body,
     },
     reviewToken,
@@ -359,7 +383,7 @@ export function deleteResource(
     }),
     {
       method: 'DELETE',
-      headers: { 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders(),
     },
     reviewToken,
   )
@@ -387,7 +411,7 @@ export function deleteResources(
     }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify({ items, dryRun, confirmed, confirmation }),
     },
     reviewToken,
@@ -414,7 +438,7 @@ export function applyWorkloadAction(
     }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify(request),
     },
     reviewToken,
@@ -432,7 +456,7 @@ export function applyPVCAction(context: string, namespace: string, name: string,
     apiUrl('/api/pvc/action', { context, namespace, name }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify(request),
     },
     reviewToken,
@@ -445,7 +469,7 @@ export function applyNodeAction(context: string, name: string, request: NodeActi
     apiUrl('/api/node/action', { context, name }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify(request),
     },
     reviewToken,
@@ -489,7 +513,7 @@ export function launchEphemeralContainer(context: string, namespace: string, pod
     apiUrl('/api/pod/debug', { context, namespace, pod }),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders('application/json'),
       body: JSON.stringify(request),
     },
   )
@@ -523,7 +547,7 @@ export function uploadPodFile(context: string, namespace: string, pod: string, c
     apiUrl('/api/pod/copy', { context, namespace, pod }),
     {
       method: 'POST',
-      headers: { 'X-KubeHaggis-Write': 'enabled' },
+      headers: writeRequestHeaders(),
       body: form,
     },
   )

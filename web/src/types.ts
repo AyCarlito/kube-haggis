@@ -337,6 +337,7 @@ export interface SearchSource {
   namespaced: boolean
   state: SearchSourceState
   resultCount: number
+  hasMore?: boolean
   truncated?: boolean
   issue?: string
 }
@@ -351,9 +352,13 @@ export interface SearchResponse {
   issues?: DiscoveryIssue[]
   partial: boolean
   truncated: boolean
+  pageSize: number
   callCount: number
   callBudget: number
-  resultLimit: number
+  pageCount: number
+  pageBudget: number
+  hasMore: boolean
+  nextCursor?: string
 }
 
 /** Describes a validated locally persisted search view and its compatibility guard. */

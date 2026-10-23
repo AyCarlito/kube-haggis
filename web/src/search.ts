@@ -4,6 +4,12 @@ import type { ResourceDefinition, SearchQuery, SearchResult } from './types'
 /** Caps each browser-controlled search filter at the backend's safe query size. */
 export const SEARCH_FILTER_MAX = 256
 
+/** Defines the user-visible result page sizes supported by global search. */
+export const SEARCH_PAGE_SIZES = [25, 50, 100] as const
+
+/** Defines the default number of global search results requested per page. */
+export const SEARCH_DEFAULT_PAGE_SIZE = 100
+
 /** Describes one finite API-group choice derived from the loaded discovery catalog. */
 export interface SearchGroupOption {
   value: string
