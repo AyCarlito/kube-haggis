@@ -474,3 +474,30 @@ Keep write-mode selection stable during ordinary navigation while retaining deli
 - Switching the active kubeconfig context must reset write mode to read-only. A later context selection must require an explicit enable action even if that context had previously been used in write mode.
 - Keep the frontend indicator and backend write-mode guard synchronized after every navigation and reset. A view transition must not briefly expose write-only controls based on stale state.
 - Add deterministic coverage for initial bootstrap, enable-and-navigate, dashboard reset, context-switch reset, browser-history navigation, and attempted writes after each reset boundary.
+
+### U17. Foldable YAML editor structure (Planned)
+
+Make large YAML documents easier to inspect without removing the complete editable YAML fallback.
+
+- Provide syntax-aware fold controls inside the YAML editor itself. An operator must be able to click a mapping key or expandable sequence item to collapse and expand its nested children.
+- Support nested mappings and sequences, including mappings inside sequence items and sequences inside mappings. Scalar-only entries must not expose misleading fold controls.
+- Treat folding as presentation state only. Collapsing or expanding a section must never modify serialized YAML, indentation, values, ordering, the local draft, the current selection, or the resource mutation payload.
+- Keep the fold affordance keyboard-accessible and visibly associated with the key or sequence item it controls. Preserve the existing editor focus and editing behavior when sections are toggled.
+- Continue rendering a usable editor while YAML is incomplete or temporarily invalid during typing. Fold only structures that can be identified safely and retain the full raw text when parsing cannot provide a reliable tree.
+- Keep Secret masking and server-owned/read-only field treatment unchanged. Collapsed previews and fold metadata must not expose masked Secret values or add hidden values to logs, diffs, reviews, or mutation requests.
+- Bound folding work for large documents and cancel stale parsing when the resource, draft, or detail view changes. Do not make folding dependent on another Kubernetes request.
+- Add deterministic coverage for nested mappings, nested sequences, independent nested fold state, malformed in-progress YAML, keyboard access, and preservation of the serialized draft.
+
+### U18. Live YAML draft diff view (Planned)
+
+Give operators a readable, read-only comparison between the local resource draft and the latest synchronized cluster snapshot while editing.
+
+- Provide an explicit, accessible toggle from the YAML editor to show or hide a live diff. The diff must update as the local draft changes, without requiring a server-side review or write mode.
+- Compare the current local draft against the last synchronized cluster snapshot: the object loaded or refreshed from Kubernetes. Replace that baseline only after a successful apply or an accepted refresh; a failed refresh must retain the existing baseline.
+- Use a line-level YAML diff that preserves the operator's draft text and identifies additions, removals, and changed lines with clear visual treatment and readable line context.
+- Use a side-by-side before/after presentation at desktop widths and a readable unified presentation at narrow responsive widths. Do not require horizontal scrolling to understand essential changes on smaller screens.
+- Keep the diff read-only and preserve the YAML editor's local draft, active tab, caret/selection where supported, and review state while switching between editor and diff views. A diff is explanatory and must not be treated as a dry-run review or mutation authorization.
+- Show an explicit clean state when the draft matches the synchronized snapshot and an explicit bounded state when the draft is incomplete or invalid. Do not replace the editor or discard text because a diff cannot be fully parsed.
+- Apply the existing sanitization and redaction rules before generating the diff. Never expose Secret values in a generated diff; masked values must remain masked even when the local Secret draft differs from the synchronized snapshot. Do not include diff contents in logs, diagnostics, or audit history.
+- Keep diff computation local to the browser and bounded for large YAML documents. Cancel or ignore stale diff work when the resource, baseline, draft, or detail view changes.
+- Add deterministic coverage for clean drafts, added/removed/changed nested YAML lines, live updates while editing, successful-apply and accepted-refresh baseline changes, failed-refresh baseline retention, malformed drafts, responsive presentation state, and Secret redaction.
