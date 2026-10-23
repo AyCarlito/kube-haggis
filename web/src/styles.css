@@ -1250,3 +1250,332 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
     left: 4px;
   }
 }
+
+/* U18: keep the explanatory draft comparison separate from the editable YAML surface. */
+.yaml-diff-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(135, 174, 182, .18);
+  border-radius: 7px;
+  color: var(--muted);
+  background: rgba(135, 174, 182, .045);
+}
+
+.yaml-diff-toggle-row .secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  height: 34px;
+  margin: 0;
+  padding: 0 11px;
+  white-space: nowrap;
+}
+
+.yaml-diff-toggle-row > span {
+  color: var(--muted-dark);
+  font: var(--type-meta)/var(--leading-copy) var(--mono);
+  text-align: right;
+}
+
+.yaml-diff-panel {
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(13, 17, 13, .96);
+}
+
+.yaml-diff-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px;
+  border-bottom: 1px solid var(--line);
+}
+
+.yaml-diff-heading > div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.yaml-diff-heading > div > strong {
+  color: var(--paper);
+  font-size: 12px;
+}
+
+.yaml-diff-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font: var(--type-meta)/var(--leading-compact) var(--mono);
+  text-transform: uppercase;
+}
+
+.yaml-diff-panel-clean .yaml-diff-status {
+  border-color: rgba(168, 189, 131, .25);
+  color: var(--moss);
+  background: rgba(168, 189, 131, .07);
+}
+
+.yaml-diff-panel-changed .yaml-diff-status {
+  border-color: rgba(215, 123, 77, .28);
+  color: var(--copper-bright);
+  background: rgba(215, 123, 77, .08);
+}
+
+.yaml-diff-panel-invalid .yaml-diff-status,
+.yaml-diff-panel-bounded .yaml-diff-status,
+.yaml-diff-panel-unavailable .yaml-diff-status {
+  border-color: rgba(230, 182, 111, .25);
+  color: var(--gold);
+  background: rgba(230, 182, 111, .06);
+}
+
+.yaml-diff-copy {
+  padding: 12px 15px 0;
+  color: var(--muted-dark);
+  font: var(--type-meta)/var(--leading-copy) var(--mono);
+}
+
+.yaml-diff-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 15px 15px;
+  padding: 13px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+  color: var(--muted);
+  background: rgba(11, 14, 11, .5);
+}
+
+.yaml-diff-state-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(135, 174, 182, .22);
+  border-radius: 7px;
+  color: var(--blue);
+  background: rgba(135, 174, 182, .07);
+}
+
+.yaml-diff-panel-clean .yaml-diff-state-icon {
+  border-color: rgba(168, 189, 131, .25);
+  color: var(--moss);
+  background: rgba(168, 189, 131, .07);
+}
+
+.yaml-diff-panel-invalid .yaml-diff-state-icon,
+.yaml-diff-panel-bounded .yaml-diff-state-icon,
+.yaml-diff-panel-unavailable .yaml-diff-state-icon {
+  border-color: rgba(230, 182, 111, .25);
+  color: var(--gold);
+  background: rgba(230, 182, 111, .07);
+}
+
+.yaml-diff-state > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.yaml-diff-state strong {
+  color: var(--paper);
+  font-size: 11px;
+}
+
+.yaml-diff-state span:last-child {
+  font: var(--type-meta)/var(--leading-copy) var(--mono);
+}
+
+.yaml-diff-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 15px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font: var(--type-meta)/var(--leading-copy) var(--mono);
+}
+
+.yaml-diff-summary span:first-child {
+  color: #d6c198;
+}
+
+.yaml-diff-summary span:last-child {
+  color: var(--muted-dark);
+  white-space: nowrap;
+}
+
+.yaml-diff-desktop {
+  overflow: hidden;
+  background: #0b0e0b;
+}
+
+.yaml-diff-column-heading,
+.yaml-diff-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.yaml-diff-column-heading {
+  border-bottom: 1px solid var(--line);
+  color: var(--muted-dark);
+  font: var(--type-label)/1.3 var(--mono);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+.yaml-diff-column-heading span {
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.yaml-diff-column-heading span + span {
+  border-left: 1px solid var(--line);
+}
+
+.yaml-diff-row {
+  min-width: 0;
+  border-bottom: 1px solid rgba(226, 224, 204, .06);
+}
+
+.yaml-diff-row:last-child {
+  border-bottom: 0;
+}
+
+.yaml-diff-cell {
+  display: grid;
+  grid-template-columns: 3.3rem minmax(0, 1fr);
+  gap: 9px;
+  min-width: 0;
+  padding: 5px 12px;
+  color: #b8c7b0;
+  font: var(--type-meta)/1.55 var(--mono);
+}
+
+.yaml-diff-cell + .yaml-diff-cell {
+  border-left: 1px solid var(--line);
+}
+
+.yaml-diff-cell code,
+.yaml-diff-unified-line code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.yaml-diff-line-number {
+  color: var(--muted-dark);
+  text-align: right;
+  user-select: none;
+}
+
+.yaml-diff-row-added .yaml-diff-cell:last-child,
+.yaml-diff-unified-added {
+  color: #c0d39c;
+  background: rgba(91, 119, 74, .18);
+}
+
+.yaml-diff-row-removed .yaml-diff-cell:first-child,
+.yaml-diff-unified-removed {
+  color: #ddb789;
+  background: rgba(126, 75, 44, .18);
+}
+
+.yaml-diff-row-changed .yaml-diff-cell:first-child {
+  color: #ddb789;
+  background: rgba(126, 75, 44, .18);
+}
+
+.yaml-diff-row-changed .yaml-diff-cell:last-child {
+  color: #c0d39c;
+  background: rgba(91, 119, 74, .18);
+}
+
+.yaml-diff-unified {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .yaml-diff-toggle-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .yaml-diff-toggle-row .secondary-button {
+    width: 100%;
+  }
+
+  .yaml-diff-toggle-row > span {
+    text-align: left;
+  }
+
+  .yaml-diff-heading,
+  .yaml-diff-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .yaml-diff-status {
+    align-self: flex-start;
+  }
+
+  .yaml-diff-summary span:last-child {
+    white-space: normal;
+  }
+
+  .yaml-diff-desktop {
+    display: none;
+  }
+
+  .yaml-diff-unified {
+    display: block;
+    overflow: hidden;
+    background: #0b0e0b;
+  }
+
+  .yaml-diff-unified-line {
+    display: grid;
+    grid-template-columns: 1.4rem 3rem minmax(0, 1fr);
+    gap: 7px;
+    min-width: 0;
+    padding: 5px 10px;
+    color: #b8c7b0;
+    font: var(--type-meta)/1.55 var(--mono);
+    border-bottom: 1px solid rgba(226, 224, 204, .06);
+  }
+
+  .yaml-diff-unified-change {
+    border-bottom: 1px solid rgba(226, 224, 204, .06);
+  }
+
+  .yaml-diff-unified-change .yaml-diff-unified-line {
+    border-bottom: 0;
+  }
+
+  .yaml-diff-sign {
+    color: var(--muted-dark);
+    font-weight: 700;
+    text-align: center;
+  }
+}
