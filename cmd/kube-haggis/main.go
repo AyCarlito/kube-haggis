@@ -19,6 +19,7 @@ func main() {
 	kubeconfig := flag.String("kubeconfig", "", "optional explicit kubeconfig path")
 	webDir := flag.String("web-dir", "web/dist", "built frontend directory")
 	auditPath := flag.String("audit-db", defaultAuditPath(), "local SQLite mutation history path")
+	networkDebugImage := flag.String("network-debug-image", kube.DefaultNetworkDebugImage, "network capture debug image reference; defaults to the pinned netshoot image")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -30,7 +31,7 @@ func main() {
 	if auditStore != nil {
 		defer auditStore.Close()
 	}
-	handler := server.New(kubernetes, *webDir, logger, auditStore).Handler()
+	handler := server.New(kubernetes, *webDir, *networkDebugImage, logger, auditStore).Handler()
 	logger.Info("starting KubeHaggis", "address", *address, "webDir", *webDir)
 	if err := http.ListenAndServe(*address, handler); err != nil {
 		logger.Error("server stopped", "error", err)

@@ -34,6 +34,7 @@ type EphemeralContainerRequest struct {
 	Image               string
 	Command             []string
 	TargetContainerName string
+	Capabilities        []corev1.Capability
 }
 
 // podCopyPath contains the normalized remote directory and file name for tar.
@@ -76,14 +77,18 @@ func (s *Service) AddEphemeralContainer(ctx context.Context, contextName, namesp
 		}
 	}
 
-	pod.Spec.EphemeralContainers = append(pod.Spec.EphemeralContainers, corev1.EphemeralContainer{
+	container := corev1.EphemeralContainer{
 		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
 			Name:    request.Name,
 			Image:   request.Image,
 			Command: append([]string(nil), request.Command...),
 		},
 		TargetContainerName: request.TargetContainerName,
-	})
+	}
+	if len(request.Capabilities) > 0 {
+		container.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: append([]corev1.Capability(nil), request.Capabilities...)}}
+	}
+	pod.Spec.EphemeralContainers = append(pod.Spec.EphemeralContainers, container)
 	updated, err := pods.UpdateEphemeralContainers(ctx, pod.Name, pod, metav1.UpdateOptions{FieldManager: "kube-haggis"})
 	if err != nil {
 		return nil, describeEphemeralContainerUpdateError(err)

@@ -2,7 +2,9 @@ import {
   hasSearchFilters,
   normalizeSearchQuery,
   parseSearchQuery,
+  searchGroupInputValue,
   searchGroupOptions,
+  searchGroupQueryValue,
   searchDefinitionFingerprint,
   searchHref,
   searchKindOptions,
@@ -63,6 +65,8 @@ export function runSearchModelTests(): void {
   const autocompleteGroups = searchGroupOptions(autocompleteDefinitions)
   assertSearchModel(autocompleteGroups[0].value === 'core' && autocompleteGroups[0].label === 'Core API', 'core API group did not retain its internal value and clear label')
   assertSearchModel(autocompleteGroups.some((option) => option.value === 'apps' && option.label === 'apps') && autocompleteGroups.length === 3, 'API group suggestions were not derived deterministically from the catalog')
+  assertSearchModel(searchGroupInputValue('core') === 'Core API' && searchGroupInputValue('apps') === 'apps', 'API group input labels did not preserve friendly core text')
+  assertSearchModel(searchGroupQueryValue('Core API') === 'core' && searchGroupQueryValue('All groups') === '' && searchGroupQueryValue('apps') === 'apps', 'API group input text did not return canonical query values')
 
   const allKindOptions = searchKindOptions(autocompleteDefinitions, '')
   const widgetKindOption = allKindOptions.find((option) => option.value === 'Widget')

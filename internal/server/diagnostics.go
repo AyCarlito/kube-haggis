@@ -203,7 +203,7 @@ type diagnosticWatchStatus struct {
 	Active     bool
 }
 
-// diagnosticSession tracks an active native or watch stream without target identity.
+// diagnosticSession tracks an active native, network, or watch stream without target identity.
 type diagnosticSession struct {
 	Kind     string
 	Context  string
@@ -257,11 +257,12 @@ type diagnosticsAudit struct {
 	State string `json:"state"`
 }
 
-// diagnosticsSessions is the bounded count of active native and watch sessions.
+// diagnosticsSessions is the bounded count of active native, network, and watch sessions.
 type diagnosticsSessions struct {
 	Terminal    uint64 `json:"terminal"`
 	Logs        uint64 `json:"logs"`
 	PortForward uint64 `json:"portForward"`
+	Network     uint64 `json:"network"`
 	Watch       uint64 `json:"watch"`
 }
 
@@ -544,6 +545,7 @@ func (store *diagnosticsStore) snapshot(kubernetes kube.DiagnosticsSnapshot, aud
 		Terminal:    store.activeSessions["terminal"],
 		Logs:        store.activeSessions["logs"],
 		PortForward: store.activeSessions["port-forward"],
+		Network:     store.activeSessions["network"],
 		Watch:       store.activeSessions["watch"],
 	}
 	statuses := make(map[string]uint64, len(store.statusCounts))
@@ -976,7 +978,7 @@ func normalizeDiagnosticCategory(category string) string {
 // normalizeDiagnosticOperation restricts retained operations to the fixed telemetry vocabulary.
 func normalizeDiagnosticOperation(operation string) string {
 	switch operation {
-	case "api", "audit-read", "bulk-delete", "diagnostics", "discovery", "frontend", "health", "kubeconfig-read", "kubeconfig-reload", "logs", "port-forward", "resource-apply", "resource-delete", "resource-list", "resource-read", "terminal", "watch":
+	case "api", "audit-read", "bulk-delete", "diagnostics", "discovery", "frontend", "health", "kubeconfig-read", "kubeconfig-reload", "logs", "network", "port-forward", "resource-apply", "resource-delete", "resource-list", "resource-read", "terminal", "watch":
 		return operation
 	default:
 		return "api"
@@ -986,7 +988,7 @@ func normalizeDiagnosticOperation(operation string) string {
 // normalizeDiagnosticSessionKind restricts active session counters to known stream classes.
 func normalizeDiagnosticSessionKind(kind string) string {
 	switch kind {
-	case "logs", "port-forward", "terminal", "watch":
+	case "logs", "network", "port-forward", "terminal", "watch":
 		return kind
 	default:
 		return "other"
@@ -1018,6 +1020,9 @@ func safeErrorResponseMessage(err error, status int) string {
 	}
 	if strings.Contains(lowerMessage, "secret") || strings.Contains(lowerMessage, "token") || strings.Contains(lowerMessage, "credential") || strings.Contains(lowerMessage, "authorization") || strings.Contains(lowerMessage, "private") {
 		return "The request failed without exposing sensitive backend details"
+	}
+	if strings.Contains(lowerMessage, "network debug container") || strings.Contains(lowerMessage, "network capture") {
+		return boundedDiagnosticText(message, 512)
 	}
 	var statusError apierrors.APIStatus
 	if errors.As(err, &statusError) {

@@ -39,6 +39,7 @@ The current product scope and implementation status are maintained in `docs/requ
 - Mask Secret values by default outside the browser YAML editor. The browser YAML editor and its local diff may always show raw Secret values; do not add a separate editor-diff masking layer or reveal gate.
 - Never put Secret values in logs, diagnostics, audit history, error messages, URLs, backend-generated output, or mutation outcomes. Keep non-editor review and conflict surfaces redacted.
 - Use stronger confirmation for deletion, eviction, drain, namespace, and other destructive actions.
+- Treat live Pod network capture as a write-gated ephemeral-container operation; capture packet headers only, keep data session-local, and never persist payloads or traffic details.
 - Record redacted mutation outcomes in the local SQLite audit store.
 
 ## UI Direction

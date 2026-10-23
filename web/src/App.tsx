@@ -29,6 +29,7 @@ import {
   MoreHorizontal,
   Network,
   Pencil,
+  Radio,
   RefreshCw,
   Search,
   Server,
@@ -92,7 +93,7 @@ import {
   resolveCatalogDefinition,
 } from './catalog'
 import { overviewEventDetailPath, overviewEventsPath, overviewMetricDestination, overviewNavigationTargets, workloadNavigationTargets, type WorkloadNavigationTarget } from './overview'
-import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchGroupOptions, searchHref, searchKindOptions, searchQueryEquals, searchResourceOptions, searchResultKey, searchResultResourcePath, searchDefinitionCandidates, SEARCH_DEFAULT_PAGE_SIZE, SEARCH_PAGE_SIZES } from './search'
+import { hasSearchFilters, emptySearchQuery, normalizeSearchQuery, parseSearchQuery, searchGroupInputValue, searchGroupOptions, searchGroupQueryValue, searchHref, searchKindOptions, searchQueryEquals, searchResourceOptions, searchResultKey, searchResultResourcePath, searchDefinitionCandidates, SEARCH_DEFAULT_PAGE_SIZE, SEARCH_PAGE_SIZES } from './search'
 import { createSavedSearchView, isSavedSearchViewApplicable, loadSavedSearchViews, persistSavedSearchViews, removeSavedSearchView, savedSearchViewState, upsertSavedSearchView, type SavedViewState } from './savedViews'
 import { customResourceCapabilityLabel, printerColumnDisplay, schemaFallbackSummary, schemaStatusNotice } from './crd'
 import { isOperationalReadPackResource, operationalReadPackStateLabel } from './readPack'
@@ -106,6 +107,8 @@ import { contextBootstrapState, NoContextState } from './bootstrap'
 import { initialWriteModeState, isDashboardRoute, isWriteModeEnabled, reduceWriteMode, type WriteModeAction, type WriteModeState } from './writeMode'
 import { buildYamlDiff, createYamlDiffBaseline, createYamlDiffComputingModel, createYamlDiffUnavailableModel, updateYamlDiffBaseline, type YamlDiffBaseline, type YamlDiffModel } from './yamlDiff'
 import { YamlDiffWorkspace } from './yamlDiffWorkspaceView'
+import { NetworkCaptureView } from './networkCaptureView'
+import { SearchCombobox, type SearchComboboxOption } from './searchCombobox'
 import type {
   AuditEntry,
   AuditResponse,
@@ -1362,10 +1365,16 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
   const groupOptions = searchGroupOptions(definitions)
   const kindOptions = searchKindOptions(definitions, query.group)
   const resourceOptions = searchResourceOptions(definitions, query.group, query.kind)
+  const groupComboboxOptions: SearchComboboxOption[] = [{ value: '', label: 'All groups' }, ...groupOptions.map((group) => ({ value: searchGroupInputValue(group.value), label: group.label }))]
+  const kindComboboxOptions: SearchComboboxOption[] = kindOptions.map((option) => ({ value: option.value, label: option.value, detail: option.label.startsWith(`${option.value} (`) && option.label.endsWith(')') ? option.label.slice(option.value.length + 2, -1) : option.label === option.value ? undefined : option.label }))
+  const resourceComboboxOptions: SearchComboboxOption[] = resourceOptions.map((option) => ({ value: option.value, label: option.value, detail: option.label.startsWith(`${option.value} (`) && option.label.endsWith(')') ? option.label.slice(option.value.length + 2, -1) : option.label === option.value ? undefined : option.label }))
+  const groupMatchesCatalog = !query.group || searchDefinitionCandidates(definitions, { ...emptySearchQuery(namespace), group: query.group }).length > 0
   const kindMatchesCatalog = !query.kind || searchDefinitionCandidates(definitions, { ...emptySearchQuery(namespace), group: query.group, kind: query.kind }).length > 0
   const resourceMatchesCatalog = !query.resource || searchDefinitionCandidates(definitions, { ...emptySearchQuery(namespace), group: query.group, kind: query.kind, resource: query.resource }).length > 0
+  const groupNoMatch = Boolean(query.group && definitions.length && !groupMatchesCatalog)
   const kindNoMatch = Boolean(query.kind && definitions.length && !kindMatchesCatalog)
   const resourceNoMatch = Boolean(query.resource && definitions.length && !resourceMatchesCatalog)
+  const groupHint = catalogLoading && !definitions.length ? 'Catalog suggestions are loading.' : groupNoMatch ? 'No loaded API group matches. Your free-form value stays unchanged.' : groupOptions.length ? `${groupOptions.length} catalog suggestion${groupOptions.length === 1 ? '' : 's'}; custom groups remain allowed.` : definitions.length ? 'No API group suggestions. Custom groups remain allowed.' : 'No catalog suggestions loaded. Custom groups remain allowed.'
   const kindHint = catalogLoading && !definitions.length ? 'Catalog suggestions are loading.' : kindNoMatch ? 'No loaded Kind matches this API group. Your free-form value stays unchanged.' : kindOptions.length ? `${kindOptions.length} catalog suggestion${kindOptions.length === 1 ? '' : 's'}; group/version context is shown.` : definitions.length ? 'No Kind suggestions for this group. Custom kinds remain allowed.' : 'No catalog suggestions loaded. Custom kinds remain allowed.'
   const resourceHint = catalogLoading && !definitions.length ? 'Catalog suggestions are loading.' : resourceNoMatch ? 'No loaded Resource matches this API group and Kind. Your free-form value stays unchanged.' : resourceOptions.length ? `${resourceOptions.length} catalog suggestion${resourceOptions.length === 1 ? '' : 's'}; group/version/Kind context is shown.` : definitions.length ? 'No Resource suggestions match these filters. Custom resources remain allowed.' : 'No catalog suggestions loaded. Custom resources remain allowed.'
   return (
@@ -1391,9 +1400,9 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
             <form className="search-form" onSubmit={(event) => { event.preventDefault(); submitSearch() }}>
               <label className="search-primary-field"><Search size={17} /><span className="sr-only">Search text</span><input value={query.query} onChange={(event) => updateQuery('query', event.target.value)} placeholder="Search kind, resource, namespace, or object name" /><kbd>submit</kbd></label>
               <div className="search-filter-grid">
-                <label className="search-control"><span>API group</span><select value={query.group} onChange={(event) => updateQuery('group', event.target.value)}><option value="">All groups</option>{groupOptions.map((group) => <option value={group.value} key={group.value}>{group.label}</option>)}</select></label>
-                <label className={`search-control search-control-autocomplete${kindNoMatch ? ' search-control-invalid' : ''}`}><span>Kind</span><input list="global-search-kind-options" aria-describedby="global-search-kind-help" aria-autocomplete="list" autoComplete="off" value={query.kind} onChange={(event) => updateQuery('kind', event.target.value)} placeholder="Deployment" /><datalist id="global-search-kind-options">{kindOptions.map((option) => <option key={option.value} value={option.value} label={option.label} />)}</datalist><small id="global-search-kind-help" className={kindNoMatch ? 'search-control-hint search-control-hint-warning' : 'search-control-hint'} role="status">{kindHint}</small></label>
-                <label className={`search-control search-control-autocomplete${resourceNoMatch ? ' search-control-invalid' : ''}`}><span>Resource</span><input list="global-search-resource-options" aria-describedby="global-search-resource-help" aria-autocomplete="list" autoComplete="off" value={query.resource} onChange={(event) => updateQuery('resource', event.target.value)} placeholder="deployments" /><datalist id="global-search-resource-options">{resourceOptions.map((option) => <option key={option.value} value={option.value} label={option.label} />)}</datalist><small id="global-search-resource-help" className={resourceNoMatch ? 'search-control-hint search-control-hint-warning' : 'search-control-hint'} role="status">{resourceHint}</small></label>
+                <label className={`search-control search-control-autocomplete${groupNoMatch ? ' search-control-invalid' : ''}`}><span>API group</span><SearchCombobox id="global-search-group" label="API group" value={searchGroupInputValue(query.group)} options={groupComboboxOptions} placeholder="All groups" describedBy="global-search-group-help" onChange={(value) => updateQuery('group', searchGroupQueryValue(value))} /><small id="global-search-group-help" className={groupNoMatch ? 'search-control-hint search-control-hint-warning' : 'search-control-hint'} role="status">{groupHint}</small></label>
+                <label className={`search-control search-control-autocomplete${kindNoMatch ? ' search-control-invalid' : ''}`}><span>Kind</span><SearchCombobox id="global-search-kind" label="Kind" value={query.kind} options={kindComboboxOptions} placeholder="Deployment" describedBy="global-search-kind-help" onChange={(value) => updateQuery('kind', value)} /><small id="global-search-kind-help" className={kindNoMatch ? 'search-control-hint search-control-hint-warning' : 'search-control-hint'} role="status">{kindHint}</small></label>
+                <label className={`search-control search-control-autocomplete${resourceNoMatch ? ' search-control-invalid' : ''}`}><span>Resource</span><SearchCombobox id="global-search-resource" label="Resource" value={query.resource} options={resourceComboboxOptions} placeholder="deployments" describedBy="global-search-resource-help" onChange={(value) => updateQuery('resource', value)} /><small id="global-search-resource-help" className={resourceNoMatch ? 'search-control-hint search-control-hint-warning' : 'search-control-hint'} role="status">{resourceHint}</small></label>
                 <label className="search-control"><span>Namespace scope</span><input value={query.namespace === 'all' ? '' : query.namespace} onChange={(event) => updateQuery('namespace', event.target.value || 'all')} placeholder="all namespaces" /></label>
                 <label className="search-control"><span>Name / exact field selector</span><input value={query.name} onChange={(event) => updateQuery('name', event.target.value)} placeholder="api-server" /></label>
                 <label className="search-control search-control-wide"><span>Label selector / sent to Kubernetes</span><input value={query.labelSelector} onChange={(event) => updateQuery('labelSelector', event.target.value)} placeholder="app=api,track=stable" /></label>
@@ -1653,7 +1662,7 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
 
   const discoveryTone = diagnosticsStateTone(response.discovery.state)
   const dependencyReady = response.kubeconfig.state !== 'error' && response.context.state === 'available' && response.discovery.state === 'available' && response.audit.state === 'available'
-  const sessions = response.sessions ?? { terminal: 0, logs: 0, portForward: 0, watch: 0 }
+  const sessions = response.sessions ?? { terminal: 0, logs: 0, portForward: 0, network: 0, watch: 0 }
   const watches = response.watches ?? { active: 0, current: [], recent: [] }
   const requests = response.requests ?? { total: 0, errors: 0, averageDurationMilliseconds: 0, maxDurationMilliseconds: 0, statuses: {}, operations: {}, errorCategories: {} }
   const recentErrors = Array.isArray(response.recentErrors) ? [...response.recentErrors].reverse() : []
@@ -1686,7 +1695,7 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
         <DiagnosticsSummaryCard label="Kubeconfig" value={`r${response.kubeconfig.revision}`} detail={`${titleCase(response.kubeconfig.state)} / ${response.kubeconfig.source || 'unknown source'}`} tone={response.kubeconfig.state === 'error' ? 'warning' : 'good'} icon={<Database size={17} />} />
         <DiagnosticsSummaryCard label="Discovery cache" value={diagnosticsStateLabel(response.discovery.state)} detail={`${response.discovery.itemCount} resources / ${diagnosticsAgeLabel(response.discovery.ageSeconds)}`} tone={discoveryTone} icon={<Box size={17} />} />
         <DiagnosticsSummaryCard label="Audit store" value={diagnosticsStateLabel(response.audit.state)} detail="SQLite mutation history" tone={response.audit.state === 'available' ? 'good' : 'warning'} icon={<History size={17} />} />
-        <DiagnosticsSummaryCard label="Active sessions" value={String(diagnosticsSessionTotal(sessions))} detail={`${sessions.watch} watches / ${sessions.terminal + sessions.logs + sessions.portForward} native streams`} tone={diagnosticsSessionTotal(sessions) ? 'neutral' : 'good'} icon={<Activity size={17} />} />
+        <DiagnosticsSummaryCard label="Active sessions" value={String(diagnosticsSessionTotal(sessions))} detail={`${sessions.watch} watches / ${sessions.terminal + sessions.logs + sessions.portForward + sessions.network} native streams`} tone={diagnosticsSessionTotal(sessions) ? 'neutral' : 'good'} icon={<Activity size={17} />} />
       </section>
 
       <div className="diagnostics-grid">
@@ -1707,6 +1716,7 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
             <DiagnosticsSessionCard icon={<TerminalSquare size={16} />} label="Terminal" count={sessions.terminal} detail="Pod exec / attach" />
             <DiagnosticsSessionCard icon={<TerminalSquare size={16} />} label="Logs" count={sessions.logs} detail="Pod log streams" />
             <DiagnosticsSessionCard icon={<Network size={16} />} label="Port-forward" count={sessions.portForward} detail="Loopback forwards" />
+            <DiagnosticsSessionCard icon={<Radio size={16} />} label="Network" count={sessions.network} detail="Live Pod captures" />
             <DiagnosticsSessionCard icon={<Activity size={16} />} label="Watch" count={sessions.watch} detail="SSE Kubernetes watches" />
           </div>
           <div className="diagnostics-panel-note"><LockKeyhole size={14} /> Only counts and safe context/GVR lifecycle metadata are retained.</div>
@@ -1822,6 +1832,7 @@ function normalizeDiagnosticsResponse(value: unknown): DiagnosticsResponse {
       terminal: typeof sessions.terminal === 'number' && Number.isFinite(sessions.terminal) ? sessions.terminal : 0,
       logs: typeof sessions.logs === 'number' && Number.isFinite(sessions.logs) ? sessions.logs : 0,
       portForward: typeof sessions.portForward === 'number' && Number.isFinite(sessions.portForward) ? sessions.portForward : 0,
+      network: typeof sessions.network === 'number' && Number.isFinite(sessions.network) ? sessions.network : 0,
       watch: typeof sessions.watch === 'number' && Number.isFinite(sessions.watch) ? sessions.watch : 0,
     },
     audit: { state: typeof audit.state === 'string' ? audit.state : 'unavailable' },
@@ -1922,7 +1933,7 @@ function formatMilliseconds(value: number): string {
 
 /** Returns the total count of active diagnostics sessions. */
 function diagnosticsSessionTotal(sessions: DiagnosticsResponse['sessions']): number {
-  return sessions.terminal + sessions.logs + sessions.portForward + sessions.watch
+  return sessions.terminal + sessions.logs + sessions.portForward + sessions.network + sessions.watch
 }
 
 /** Converts a watch lifecycle event into safe operator-facing copy. */
@@ -2934,7 +2945,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
   const conflictCurrentYaml = conflict?.currentObject ? boundedConflictText(stringify(isSecret ? redactSecret(sanitizeEditorObject(conflict.currentObject)) : sanitizeEditorObject(conflict.currentObject))) : ''
-  const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
+  const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'network', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
   const schemaTabs = schemaCandidate ? [baseDetailTabs[0], 'form', ...baseDetailTabs.slice(1)] : baseDetailTabs
   const detailTabs = !isNew ? [schemaTabs[0], ...(isOperationalReadPackResource(definition) ? ['read-pack'] : []), ...((targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) ? ['operations'] : []), ...schemaTabs.slice(1)] : schemaTabs
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
@@ -2953,8 +2964,9 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
            {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel key={`workload-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
            {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel key={`node-${refreshEpoch}`} context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
            {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel key={`pvc-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
-     {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
-          {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div><span className={writeEnabled ? 'editor-editable' : 'editor-lock'}>{writeEnabled ? <><Pencil size={13} /> Editable</> : <><LockKeyhole size={13} /> Read-only / enable write mode to edit</>}</span>{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>Raw Secret values are visible in this browser-local editor. Other review and conflict surfaces remain redacted.</span></div>}<YamlDiffWorkspace key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} baseline={yamlDiffBaseline.text} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled} model={yamlDiffModel} diffOpen={yamlDiffOpen} onDiffOpenChange={setYamlDiffOpen} onChange={handleYamlDraftChange} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
+           {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
+           {tab === 'network' && definition.resource === 'pods' && !isNew && <NetworkCaptureView context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
+           {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div><span className={writeEnabled ? 'editor-editable' : 'editor-lock'}>{writeEnabled ? <><Pencil size={13} /> Editable</> : <><LockKeyhole size={13} /> Read-only / enable write mode to edit</>}</span>{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>Raw Secret values are visible in this browser-local editor. Other review and conflict surfaces remain redacted.</span></div>}<YamlDiffWorkspace key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} baseline={yamlDiffBaseline.text} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled} model={yamlDiffModel} diffOpen={yamlDiffOpen} onDiffOpenChange={setYamlDiffOpen} onChange={handleYamlDraftChange} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
        {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
