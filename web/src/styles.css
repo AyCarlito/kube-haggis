@@ -117,6 +117,7 @@
 .network-map-canvas .network-map-center { fill: var(--copper); stroke: rgba(240,154,98,.25); stroke-width: 2; }
 .network-map-canvas .network-map-center-label { fill: var(--ink-deep); font-size: 2.6px; font-weight: 700; }
 .network-map-canvas .network-map-pod-label { fill: var(--paper); font-size: 2.9px; }
+.network-map-canvas .network-map-pod-label-full { font-size: 2.65px; font-weight: 500; }
 .network-peer-card { min-height: 300px; }
 .network-section-heading > span { flex: 0 0 auto; margin-top: 2px; color: var(--muted-dark); }
 .network-peer-table-wrap { margin: 13px 15px 15px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }

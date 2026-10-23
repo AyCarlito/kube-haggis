@@ -210,7 +210,9 @@ function NetworkLineChart({ title, unit, points, series, expanded = false, onExp
 function NetworkPeerMap({ pod, peers, expanded = false, onExpand }: { pod: string; peers: NetworkPeerRow[]; expanded?: boolean; onExpand?: (event: MouseEvent<HTMLButtonElement>) => void }) {
   const nodes = Array.from(new Map(peers.map((peer) => [peer.peerLabel, peer])).values()).slice(0, expanded ? 30 : 10)
   const center = { x: 50, y: 50 }
-  return <section className={`network-map-card${expanded ? ' network-focus-card' : ''}`}><div className="network-section-heading">{expanded ? <div className="network-focus-card-meta"><span>local Pod view / top 30 logical peers</span><code className="network-map-pod-identity" title={pod}>{pod}</code></div> : <div><strong>Observed peer map</strong><span>local Pod view / top 10 logical peers</span></div>}<div className="network-section-actions"><Network size={15} />{onExpand && <button type="button" className="network-card-action" aria-label="Expand observed peer map" title="Expand observed peer map" onClick={onExpand}><Maximize2 size={14} /></button>}</div></div>{nodes.length ? <svg className="network-map-canvas" viewBox="0 0 100 100" role="img" aria-label={`Observed peers for Pod ${pod}`}>{nodes.map((peer, index) => { const angle = (Math.PI * 2 * index) / nodes.length - Math.PI / 2; const node = { x: 50 + Math.cos(angle) * 34, y: 50 + Math.sin(angle) * 34 }; return <g key={peer.key}><title>{peer.peerLabel}</title><line className={`network-map-edge network-map-edge-${peer.direction}`} x1={center.x} y1={center.y} x2={node.x} y2={node.y} /><circle className={`network-map-node network-map-node-${peer.direction}`} cx={node.x} cy={node.y} r={expanded ? '2.7' : '4'} /><text x={node.x} y={node.y + (node.y < 50 ? -7 : 10)} textAnchor="middle">{shortNetworkLabel(peer.peerLabel)}</text></g> })}<circle className="network-map-center" cx={center.x} cy={center.y} r="7" /><text className="network-map-center-label" x={center.x} y={center.y + 1} textAnchor="middle">Pod</text><text className="network-map-pod-label" x={center.x} y="65" textAnchor="middle">{shortNetworkLabel(pod)}</text></svg> : <div className="network-map-empty"><CircleDot size={19} /><strong>No peer packets yet</strong><span>Start traffic to or from this Pod while the capture is live.</span></div>}</section>
+  const podLabelLines = wrapNetworkMapLabel(pod, expanded ? 34 : 24)
+  const podLabelStartY = 65 - (podLabelLines.length - 1) * 1.5
+  return <section className={`network-map-card${expanded ? ' network-focus-card' : ''}`}><div className="network-section-heading">{expanded ? <div className="network-focus-card-meta"><span>local Pod view / top 30 logical peers</span><code className="network-map-pod-identity" title={pod}>{pod}</code></div> : <div><strong>Observed peer map</strong><span>local Pod view / top 10 logical peers</span><code className="network-map-pod-identity" title={pod}>{pod}</code></div>}<div className="network-section-actions"><Network size={15} />{onExpand && <button type="button" className="network-card-action" aria-label="Expand observed peer map" title="Expand observed peer map" onClick={onExpand}><Maximize2 size={14} /></button>}</div></div>{nodes.length ? <svg className="network-map-canvas" viewBox="0 0 100 100" role="img" aria-label={`Observed peers for Pod ${pod}`}>{nodes.map((peer, index) => { const angle = (Math.PI * 2 * index) / nodes.length - Math.PI / 2; const node = { x: 50 + Math.cos(angle) * 34, y: 50 + Math.sin(angle) * 34 }; return <g key={peer.key}><title>{peer.peerLabel}</title><line className={`network-map-edge network-map-edge-${peer.direction}`} x1={center.x} y1={center.y} x2={node.x} y2={node.y} /><circle className={`network-map-node network-map-node-${peer.direction}`} cx={node.x} cy={node.y} r={expanded ? '2.7' : '4'} /><text x={node.x} y={node.y + (node.y < 50 ? -7 : 10)} textAnchor="middle">{shortNetworkLabel(peer.peerLabel)}</text></g> })}<circle className="network-map-center" cx={center.x} cy={center.y} r="7" /><text className="network-map-center-label" x={center.x} y={center.y + 1} textAnchor="middle">Pod</text><text className="network-map-pod-label network-map-pod-label-full" x={center.x} y={podLabelStartY} textAnchor="middle"><title>{pod}</title>{podLabelLines.map((line, index) => <tspan key={`${line}-${index}`} x={center.x} dy={index === 0 ? 0 : 3}>{line}</tspan>)}</text></svg> : <div className="network-map-empty"><CircleDot size={19} /><strong>No peer packets yet</strong><span>Start traffic to or from this Pod while the capture is live.</span></div>}</section>
 }
 
 /** Renders the bounded peer table that complements the local SVG map. */
@@ -348,4 +350,18 @@ function formatChartValue(value: number, unit: string): string {
 function shortNetworkLabel(value: string): string {
   if (value.length <= 18) return value
   return `${value.slice(0, 7)}…${value.slice(-8)}`
+}
+
+/** Wraps a full Kubernetes name into readable SVG label lines without dropping characters. */
+function wrapNetworkMapLabel(value: string, maxCharacters: number): string[] {
+  const chunks: string[] = []
+  let remaining = value
+  while (remaining.length > maxCharacters) {
+    const boundary = remaining.lastIndexOf('-', maxCharacters)
+    const splitAt = boundary > Math.floor(maxCharacters * 0.55) ? boundary + 1 : maxCharacters
+    chunks.push(remaining.slice(0, splitAt))
+    remaining = remaining.slice(splitAt)
+  }
+  if (remaining) chunks.push(remaining)
+  return chunks.length ? chunks : ['Unnamed Pod']
 }
