@@ -1,7 +1,7 @@
 import * as monaco from 'monaco-editor/editor/editor.api'
 import EditorWorker from 'monaco-editor/editor/editor.worker?worker'
 import { configureMonacoYaml, type MonacoYaml } from 'monaco-yaml'
-import { AlertTriangle, Check, FileCode2, LoaderCircle, X } from 'lucide-react'
+import { AlertTriangle, Check, FileCode2, LoaderCircle, LockKeyhole, Pencil, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import YamlWorker from './yaml.worker?worker'
 import { yamlDiffHunks, type YamlDiffHunk, type YamlDiffModel } from './yamlDiff'
@@ -472,7 +472,7 @@ export function YamlMonacoEditor({ value, baseline, readOnly, scopeKey, model, c
       const original = monaco.editor.createModel(baseline, 'yaml', originalURI)
       const editor = monaco.editor.create(host, {
         ...yamlMonacoEditorOptions(readOnly),
-        ariaLabel: 'Editable local-draft YAML',
+        ariaLabel: readOnly ? 'Read-only local-draft YAML. Enable write mode to edit.' : 'Editable local-draft YAML',
         fontFamily: "'DM Mono', 'SFMono-Regular', Consolas, monospace",
         fontSize: 12,
         lineHeight: 19,
@@ -605,7 +605,7 @@ export function YamlMonacoEditor({ value, baseline, readOnly, scopeKey, model, c
         lineHeight: 19,
         lineNumbers: 'on',
         minimap: { enabled: false },
-        modifiedAriaLabel: 'Editable modified local-draft YAML',
+        modifiedAriaLabel: readOnly ? 'Read-only modified local-draft YAML. Enable write mode to edit.' : 'Editable modified local-draft YAML',
         originalAriaLabel: 'Read-only original cluster YAML',
         originalEditable: false,
         padding: { top: 14, bottom: 18 },
@@ -666,9 +666,11 @@ export function YamlMonacoEditor({ value, baseline, readOnly, scopeKey, model, c
   useEffect(() => {
     const mainEditor = mainEditorRef.current
     const diffEditor = diffEditorRef.current
-    mainEditor?.updateOptions({ readOnly, domReadOnly: readOnly })
+    const editorAriaLabel = readOnly ? 'Read-only local-draft YAML. Enable write mode to edit.' : 'Editable local-draft YAML'
+    const modifiedAriaLabel = readOnly ? 'Read-only modified local-draft YAML. Enable write mode to edit.' : 'Editable modified local-draft YAML'
+    mainEditor?.updateOptions({ ariaLabel: editorAriaLabel, readOnly, domReadOnly: readOnly })
     diffEditor?.updateOptions({ readOnly, domReadOnly: readOnly })
-    diffEditor?.getModifiedEditor().updateOptions({ readOnly, domReadOnly: readOnly })
+    diffEditor?.getModifiedEditor().updateOptions({ ariaLabel: modifiedAriaLabel, readOnly, domReadOnly: readOnly })
   }, [readOnly])
 
   useEffect(() => {
@@ -680,6 +682,7 @@ export function YamlMonacoEditor({ value, baseline, readOnly, scopeKey, model, c
   const editorClass = [
     'yaml-monaco-editor',
     `yaml-monaco-editor-${workspaceMode}`,
+    readOnly ? 'yaml-monaco-editor-readonly' : 'yaml-monaco-editor-editable',
     compareOpen ? 'yaml-monaco-editor-compare-open' : 'yaml-monaco-editor-compare-closed',
     nativeComparisonAvailable ? '' : 'yaml-monaco-editor-comparison-unavailable',
     comparisonError ? 'yaml-monaco-editor-comparison-error' : '',
@@ -689,20 +692,20 @@ export function YamlMonacoEditor({ value, baseline, readOnly, scopeKey, model, c
   const statusIcon = yamlMonacoDiffStatusIcon(model.status)
 
   return <div className={editorClass}>
-    <div ref={mainHostRef} className={`yaml-monaco-host yaml-monaco-main-host${initializationError ? ' yaml-monaco-host-blocked' : ''}`} aria-label="Editable local-draft YAML" />
+    <div ref={mainHostRef} className={`yaml-monaco-host yaml-monaco-main-host${initializationError ? ' yaml-monaco-host-blocked' : ''}`} aria-label={readOnly ? 'Read-only local-draft YAML. Enable write mode to edit.' : 'Editable local-draft YAML'} aria-readonly={readOnly} />
     {compareOpen && <button type="button" className="yaml-monaco-compare-scrim" onClick={closeComparison} aria-label="Close YAML comparison" tabIndex={-1} />}
-    {compareOpen && <section id={YAML_DIFF_WORKSPACE_PANE_ID} className="yaml-monaco-compare-pane" aria-label="Read-only original and editable modified YAML comparison" aria-live="polite">
+    {compareOpen && <section id={YAML_DIFF_WORKSPACE_PANE_ID} className="yaml-monaco-compare-pane" aria-label={`Native YAML comparison. Original cluster snapshot is read-only. Modified local draft is ${readOnly ? 'read-only' : 'editable'}.`} aria-live="polite">
       <div className="yaml-monaco-compare-heading">
-        <div>
-          <span className="eyebrow"><span className="eyebrow-mark" /> Native comparison</span>
-          <strong>Cluster snapshot / local draft</strong>
+        <div className="yaml-monaco-compare-pane-labels">
+          <span className="yaml-monaco-compare-pane-label"><span className="eyebrow"><span className="eyebrow-mark" /> Original</span><strong>Cluster snapshot</strong><span className="yaml-monaco-pane-status yaml-monaco-pane-status-readonly"><LockKeyhole size={12} /> Read-only</span></span>
+          <span className="yaml-monaco-compare-pane-label"><span className="eyebrow"><span className="eyebrow-mark" /> Modified</span><strong>Local draft</strong><span className={`yaml-monaco-pane-status ${readOnly ? 'yaml-monaco-pane-status-readonly' : 'yaml-monaco-pane-status-editable'}`}>{readOnly ? <LockKeyhole size={12} /> : <Pencil size={12} />} {readOnly ? 'Read-only' : 'Editable'}</span></span>
         </div>
         <div className="yaml-monaco-compare-actions">
           <span className={`yaml-diff-status yaml-diff-panel-${model.status}`}>{statusIcon}{statusLabel}</span>
           <button ref={compareCloseButtonRef} type="button" className="icon-button yaml-monaco-compare-close" onClick={closeComparison} aria-label="Close YAML comparison" title="Close YAML comparison"><X size={15} /></button>
         </div>
       </div>
-      <p className="yaml-monaco-compare-copy">The original pane is read-only. The modified pane is the local draft source of truth; server-side dry-run review still authorizes mutations.</p>
+      <p className="yaml-monaco-compare-copy">The original pane is read-only. The modified pane is {readOnly ? 'read-only until write mode is enabled' : 'editable and is the local draft source of truth'}; server-side dry-run review still authorizes mutations.</p>
       {comparisonError
         ? <div className="yaml-monaco-compare-state yaml-monaco-compare-state-error" role="alert"><AlertTriangle size={17} /><div><strong>Native comparison unavailable</strong><span>{comparisonError}</span></div></div>
         : !nativeComparisonAvailable
