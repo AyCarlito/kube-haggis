@@ -262,7 +262,7 @@ Ensure final mutations cannot bypass or reuse an unrelated client-side dry-run r
 - Bind the review to context, group/version/resource, namespace/name, expected resource version, action parameters, and a sanitized body hash where applicable.
 - Require the review handle for the final mutation and reject missing, expired, stale, or mismatched reviews.
 - Invalidate review state after resource refresh, context switch, write-mode reset, or draft/action changes.
-- Preserve existing Secret masking and redaction rules in reviews, diffs, conflicts, logs, and audit history.
+- Preserve Secret masking and redaction outside the explicitly revealed browser YAML editor and its local diff. Keep reviews, conflicts, logs, diagnostics, URLs, and audit history redacted.
 - Keep force deletion and automatic conflict overwrites unavailable unless separately approved by the requirements.
 
 ### F8. Local diagnostics and API health visibility (Implemented)
@@ -475,25 +475,28 @@ Keep write-mode selection stable during ordinary navigation while retaining deli
 - Keep the frontend indicator and backend write-mode guard synchronized after every navigation and reset. A view transition must not briefly expose write-only controls based on stale state.
 - Add deterministic coverage for initial bootstrap, enable-and-navigate, dashboard reset, context-switch reset, browser-history navigation, and attempted writes after each reset boundary.
 
-### U17. CodeMirror YAML editor and physical folding (Planned)
+### U17. Monaco YAML editor and native folding (Planned)
 
-Replace the current native-textarea folding workaround with a CodeMirror 6 YAML editor that matches the KubeHaggis field-console visual language.
+Replace the current CodeMirror editor and custom structural folding implementation with a Monaco YAML editor that matches the KubeHaggis field-console visual language.
 
-- Use CodeMirror folding so collapsed mapping and sequence children are physically removed from the rendered viewport while the complete YAML document, draft text, selection, undo history, and mutation payload remain unchanged.
-- Support nested mappings and sequences, keyboard-accessible fold controls, invalid/incomplete YAML fallback, bounded local parsing, and cancellation of stale parsing work.
-- Preserve existing YAML sanitization, Secret masking, schema-form synchronization, read-only behavior, review state, and resource navigation.
-- Theme the editor, gutters, syntax tokens, selections, widgets, and fold controls with the existing KubeHaggis colors, typography, focus treatment, and responsive layout.
-- Keep the editor browser-local and do not add a Kubernetes request for folding. Retain a usable raw YAML fallback if editor initialization or safe structural parsing is unavailable.
-- Deliver this requirement as the first implementation phase and cover nested folding, malformed drafts, keyboard access, draft preservation, and resource-detail integration with deterministic tests.
+- Use Monaco's native editor folding controls and commands for YAML mappings and sequences. Do not add a visual cover-up overlay or maintain a second application-specific folding parser.
+- Keep the complete YAML document, local draft, selection, undo history, and mutation payload unchanged when folding or unfolding content.
+- Support nested YAML, keyboard-accessible fold controls, invalid or incomplete YAML, bounded local editor work, and cancellation of stale editor initialization or language work.
+- Preserve existing YAML sanitization, default Secret masking, explicit reveal behavior, schema-form synchronization, read-only behavior, review state, and resource navigation.
+- Theme the Monaco editor, gutters, syntax tokens, selections, diagnostics, folding controls, and focus treatment with the existing KubeHaggis colors, typography, and responsive layout.
+- Keep the editor browser-local and do not add a Kubernetes request for folding. Retain a usable raw YAML fallback if Monaco initialization is unavailable.
+- Deliver this requirement as the first implementation phase and cover native folding, malformed drafts, keyboard access, draft preservation, and resource-detail integration with deterministic tests.
 
-### U18. Integrated live YAML diff workspace (Planned)
+### U18. Monaco side-by-side and inline YAML diff workspace (Planned)
 
-Combine the CodeMirror editor and the live draft diff in one workspace so operators can edit and inspect changes without scrolling to a separate panel.
+Use Monaco's diff editor to provide the editing and comparison workflows operators expect from a desktop code editor.
 
-- Show an editable local-draft pane and a read-only line-level diff against the last synchronized cluster snapshot in the same desktop workspace, with a resizable divider and an accessible live-diff toggle.
-- Update the diff locally as the draft changes. Replace the baseline only after a successful resource load, apply, accepted refresh, or accepted conflict reload; failed operations retain the previous baseline.
-- Use a narrow-screen diff drawer anchored to the current editor viewport rather than rendering a long diff below the editor. Preserve the editor, draft, caret/selection, fold state, active tab, and review state while opening or closing the diff.
-- Show clear clean, changed, incomplete/invalid, unavailable, computing, and bounded states. A diff is explanatory only and never replaces server-side dry-run review or mutation authorization.
-- Apply existing sanitization before rendering. Never expose Secret values, managed fields, diff contents, or raw draft text in logs, diagnostics, audit history, URLs, or generated output. Secret changes may be represented with safe redacted placeholders or change markers.
-- Keep diff computation bounded, browser-local, and safe against stale resource, draft, or baseline work. Preserve the complete YAML editor when a diff cannot be generated.
-- Deliver this requirement as the second implementation phase after U17 and cover live updates, baseline transitions, responsive drawer behavior, malformed drafts, clean/changed states, and Secret redaction with deterministic tests.
+- In side-by-side compare mode, show the last synchronized cluster snapshot in a read-only original pane on the left and the current local draft in an editable modified pane on the right.
+- Treat the Monaco modified model as the local draft source of truth. Recompute the diff as the operator edits it and propagate those edits to the existing review, schema-form, refresh, conflict, and mutation state.
+- In single-editor mode, show the editable local draft with change decorations in the gutter relative to the last accepted baseline. Clicking a change marker must reveal the corresponding inline diff without losing the draft, caret, selection, fold state, or review state.
+- Preserve the last accepted baseline across ordinary edits. Replace it only after a successful resource load, apply, accepted refresh, or accepted conflict reload; failed operations retain the previous baseline.
+- Use Monaco's native diff alignment, change indicators, folding, and split-view behavior on desktop. On narrow screens, use an inline comparison or anchored diff presentation rather than rendering a long static diff below the editor.
+- Show clear clean, changed, incomplete or invalid, unavailable, computing, and bounded states. A diff is explanatory only and never replaces server-side dry-run review or mutation authorization.
+- Allow the browser-local editor diff to show raw Secret values only while the operator has explicitly revealed them. Do not add a second masking transform inside the editor or diff. Keep managed fields, raw draft text, and Secret values out of logs, diagnostics, audit history, URLs, generated output, and non-editor review or conflict surfaces.
+- Keep diff computation browser-local, bounded, and safe against stale resource, draft, or baseline work. Preserve a complete editable YAML fallback when comparison cannot be generated.
+- Deliver this requirement as the second implementation phase after U17 and cover side-by-side editing, live updates, inline change markers, baseline transitions, responsive behavior, malformed drafts, clean or changed states, and explicit editor Secret reveal behavior with deterministic tests.

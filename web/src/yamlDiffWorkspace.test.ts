@@ -57,19 +57,15 @@ function testWorkspaceAccessibility(): void {
   assertYamlWorkspace(isYamlDiffWorkspaceEscapeKey('Escape') && !isYamlDiffWorkspaceEscapeKey('Enter'), 'workspace Escape handling did not distinguish the close key')
 }
 
-/** Exercises the workspace-facing model contract for accepted baselines and redacted Secret rows. */
+/** Exercises the workspace-facing model contract for accepted baselines and revealed Secret rows. */
 function testWorkspaceModelSafety(): void {
-  const baseline = createYamlDiffBaseline('apiVersion: v1\nkind: Secret\ndata:\n  token: old-secret\n', { apiVersion: 'v1', kind: 'Secret', data: { token: 'old-secret' } })
+  const baseline = createYamlDiffBaseline('apiVersion: v1\nkind: Secret\ndata:\n  token: old-secret\n')
   const failedRefresh = updateYamlDiffBaseline(baseline, createYamlDiffBaseline('data:\n  token: replacement\n'), false)
   const draft = 'apiVersion: v1\nkind: Secret\ndata:\n  token: new-secret\n'
-  const model = buildYamlDiff(failedRefresh.text, draft, {
-    secret: true,
-    baselineObject: failedRefresh.object,
-    draftObject: { apiVersion: 'v1', kind: 'Secret', data: { token: 'new-secret' } },
-  })
+  const model = buildYamlDiff(failedRefresh.text, draft)
   const rendered = JSON.stringify(model)
-  assertYamlWorkspace(model.status === 'changed' && rendered.includes('[redacted]'), 'workspace did not retain the safe Secret diff model')
-  assertYamlWorkspace(!rendered.includes('old-secret') && !rendered.includes('new-secret') && failedRefresh.text.includes('old-secret'), 'workspace model exposed Secret values or replaced a failed baseline')
+  assertYamlWorkspace(model.status === 'changed' && rendered.includes('old-secret') && rendered.includes('new-secret'), 'workspace did not retain the revealed Secret diff model')
+  assertYamlWorkspace(failedRefresh.text.includes('old-secret') && !failedRefresh.text.includes('replacement'), 'workspace model replaced a failed baseline')
 }
 
 /** Runs deterministic coverage for integrated YAML workspace presentation state. */

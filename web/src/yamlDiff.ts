@@ -6,7 +6,7 @@ export type YamlDiffStatus = 'clean' | 'changed' | 'invalid' | 'bounded' | 'unav
 /** Identifies the line-level relationship represented by one diff row. */
 export type YamlDiffRowKind = 'context' | 'added' | 'removed' | 'changed'
 
-/** Contains one redacted YAML line and its one-based source line number. */
+/** Contains one YAML line and its one-based source line number. */
 export interface YamlDiffLine {
   lineNumber: number
   text: string
@@ -39,14 +39,6 @@ export interface YamlDiffModel {
 /** Stores the last accepted cluster snapshot used by the live draft diff. */
 export interface YamlDiffBaseline {
   text: string
-  object?: unknown
-}
-
-/** Supplies optional Secret object snapshots for safe masked-value comparisons. */
-export interface YamlDiffBuildOptions {
-  secret?: boolean
-  baselineObject?: unknown
-  draftObject?: unknown
 }
 
 /** Selects the responsive diff layout breakpoint shared by the model and CSS. */
@@ -62,8 +54,8 @@ export const YAML_DIFF_MAX_LINES = 2_500
 export const YAML_DIFF_MAX_WORK = 400_000
 
 /** Creates a baseline snapshot that can be replaced only after an accepted synchronization. */
-export function createYamlDiffBaseline(text: string, object?: unknown): YamlDiffBaseline {
-  return { text, object }
+export function createYamlDiffBaseline(text: string): YamlDiffBaseline {
+  return { text }
 }
 
 /** Retains a baseline after a failed refresh or replaces it after a successful synchronization. */
@@ -87,7 +79,7 @@ export function yamlDiffLayoutForWidth(width: number): 'side-by-side' | 'unified
 }
 
 /** Builds a bounded line-level diff from the synchronized snapshot to the local draft. */
-export function buildYamlDiff(baseline: string, draft: string, options: YamlDiffBuildOptions = {}): YamlDiffModel {
+export function buildYamlDiff(baseline: string, draft: string): YamlDiffModel {
   if (!baseline.trim()) return createYamlDiffUnavailableModel()
   const baselineLineCount = yamlLines(baseline).length
   const draftLineCount = yamlLines(draft).length
@@ -95,10 +87,10 @@ export function buildYamlDiff(baseline: string, draft: string, options: YamlDiff
     return emptyYamlDiffModel('bounded', 'This YAML document is too large or complex for a bounded local diff. The editor text is unchanged.')
   }
 
-  const before = prepareYamlDiffSource(baseline, options.secret === true, options.baselineObject)
+  const before = prepareYamlDiffSource(baseline)
   if (!before.valid) return emptyYamlDiffModel('unavailable', 'The synchronized cluster snapshot is not a valid resource document.')
 
-  const after = prepareYamlDiffSource(draft, options.secret === true, options.draftObject)
+  const after = prepareYamlDiffSource(draft)
   const beforeDisplayLines = yamlLines(before.display)
   const afterDisplayLines = yamlLines(after.display)
   if (!after.valid) {
@@ -156,18 +148,14 @@ interface PreparedYamlDiffSource {
 }
 
 /** Parses and sanitizes one source without allowing invalid text into rendered diff rows. */
-function prepareYamlDiffSource(source: string, secret: boolean, object?: unknown): PreparedYamlDiffSource {
+function prepareYamlDiffSource(source: string): PreparedYamlDiffSource {
   const parsed = parseYamlObject(source)
   if (!parsed) return { valid: false, display: source, comparison: source }
 
   const sanitized = sanitizeYamlObject(parsed)
-  const displayObject = secret ? redactYamlSecret(sanitized) : sanitized
   const hasManagedFields = isRecord(parsed.metadata) && Object.prototype.hasOwnProperty.call(parsed.metadata, 'managedFields')
-  const display = secret || hasManagedFields ? stringify(displayObject) : source
-  if (!secret) return { valid: true, display, comparison: display }
-
-  const comparisonObject = object !== undefined && isRecord(object) ? sanitizeYamlObject(object) : sanitized
-  return { valid: true, display, comparison: stringify(comparisonObject) }
+  const display = hasManagedFields ? stringify(sanitized) : source
+  return { valid: true, display, comparison: display }
 }
 
 /** Parses only plain YAML resource objects and rejects empty, scalar, and sequence drafts. */
@@ -188,17 +176,6 @@ function sanitizeYamlObject(value: unknown): Record<string, unknown> {
   const copy = cloneYamlValue(value)
   if (!isRecord(copy)) return {}
   if (isRecord(copy.metadata)) delete copy.metadata.managedFields
-  return copy
-}
-
-/** Masks Secret data and stringData values while retaining their keys and line structure. */
-function redactYamlSecret(value: Record<string, unknown>): Record<string, unknown> {
-  const copy = cloneYamlValue(value)
-  if (!isRecord(copy)) return {}
-  for (const field of ['data', 'stringData']) {
-    if (!isRecord(copy[field])) continue
-    copy[field] = Object.fromEntries(Object.keys(copy[field]).map((key) => [key, '[redacted]']))
-  }
   return copy
 }
 

@@ -30,7 +30,7 @@ function yamlDiffStatusIcon(status: YamlDiffModel['status']): ReactNode {
   return status === 'clean' ? <Check size={14} /> : status === 'computing' ? <LoaderCircle size={14} className="spin" /> : <AlertTriangle size={14} />
 }
 
-/** Renders a read-only line-level diff using only the already-redacted browser-local model. */
+/** Renders a read-only line-level diff using only the browser-local model. */
 function YamlDiffPane({ model, paneID, closeButtonRef, onClose, accessibility }: { model: YamlDiffModel; paneID: string; closeButtonRef: RefObject<HTMLButtonElement>; onClose: () => void; accessibility: ReturnType<typeof yamlDiffWorkspaceAccessibility> }) {
   const statusLabel = yamlDiffStatusLabel(model.status)
   const statusIcon = yamlDiffStatusIcon(model.status)

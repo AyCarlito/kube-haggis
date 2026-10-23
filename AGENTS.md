@@ -36,8 +36,8 @@ The current product scope and implementation status are maintained in `docs/requ
 - Client-side writes use full-object Kubernetes updates with resource-version concurrency. Do not reintroduce server-side apply patches without an explicit requirements change.
 - Keep dry-run review before writes where Kubernetes supports it.
 - Do not submit `metadata.managedFields`; strip it from editor output and mutation payloads.
-- Mask Secret values by default and require an explicit reveal action.
-- Never put Secret values in logs, audit history, error messages, or generated diffs.
+- Mask Secret values by default outside the browser YAML editor and require an explicit reveal action. The browser YAML editor and its local diff may show raw Secret values after explicit reveal; do not add a separate editor-diff masking layer.
+- Never put Secret values in logs, diagnostics, audit history, error messages, URLs, backend-generated output, or mutation outcomes. Keep non-editor review and conflict surfaces redacted.
 - Use stronger confirmation for deletion, eviction, drain, namespace, and other destructive actions.
 - Record redacted mutation outcomes in the local SQLite audit store.
 

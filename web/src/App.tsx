@@ -2588,6 +2588,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const refreshInFlightRef = useRef(false)
   const refreshRequestIDRef = useRef(0)
   const yamlDiffEpochRef = useRef(0)
+  const secretRevealRef = useRef(false)
 
   useEffect(() => {
     let active = true
@@ -2598,6 +2599,8 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
     setRefreshConfirmationOpen(false)
     setRefreshLoading(false)
     refreshInFlightRef.current = false
+    setSecretsRevealed(false)
+    secretRevealRef.current = false
     setDeleteReviewPending(false)
     setOperationReviewPending(false)
     setReviewReady(false)
@@ -2629,7 +2632,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
         setObject(data)
         setYamlText(text)
         setOriginalYaml(text)
-        setYamlDiffBaseline(createYamlDiffBaseline(text, sanitizeEditorObject(data)))
+        setYamlDiffBaseline(createYamlDiffBaseline(text))
         setError('')
       })
       .catch((loadError: Error) => active && setError(loadError.message))
@@ -2643,6 +2646,19 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   }, [context, definition.group, definition.version, definition.resource, definition.kind, definition.namespaced, namespace, name, isNew, isSecret])
 
   useEffect(() => {
+    if (!isSecret || !object) return
+    if (secretsRevealed) {
+      setYamlDiffBaseline(createYamlDiffBaseline(stringify(sanitizeEditorObject(object))))
+      secretRevealRef.current = true
+      return
+    }
+    if (!secretRevealRef.current) return
+    const baselineObject = parseResourceObject(yamlDiffBaseline.text)
+    if (baselineObject) setYamlDiffBaseline(createYamlDiffBaseline(stringify(redactSecret(baselineObject))))
+    secretRevealRef.current = false
+  }, [isSecret, secretsRevealed])
+
+  useEffect(() => {
     const diffEpoch = ++yamlDiffEpochRef.current
     let active = true
     if (!yamlDiffOpen) {
@@ -2654,17 +2670,13 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
     setYamlDiffModel(createYamlDiffComputingModel())
     const timeoutID = window.setTimeout(() => {
       if (!active || diffEpoch !== yamlDiffEpochRef.current) return
-      setYamlDiffModel(buildYamlDiff(yamlDiffBaseline.text, yamlText, {
-        secret: isSecret,
-        baselineObject: yamlDiffBaseline.object,
-        draftObject: isSecret ? object : undefined,
-      }))
+      setYamlDiffModel(buildYamlDiff(yamlDiffBaseline.text, yamlText))
     }, 0)
     return () => {
       active = false
       window.clearTimeout(timeoutID)
     }
-  }, [context, definition.group, definition.version, definition.resource, definition.kind, namespace, name, yamlDiffOpen, yamlDiffBaseline, yamlText, isSecret, object])
+  }, [context, definition.group, definition.version, definition.resource, definition.kind, namespace, name, yamlDiffOpen, yamlDiffBaseline, yamlText])
 
   useEffect(() => {
     setReviewReady(false)
@@ -2761,7 +2773,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       setObject(refreshed)
        setYamlText(text)
        setOriginalYaml(text)
-       setYamlDiffBaseline((current) => updateYamlDiffBaseline(current, createYamlDiffBaseline(text, safeRefreshed), true))
+       setYamlDiffBaseline((current) => updateYamlDiffBaseline(current, createYamlDiffBaseline(text), true))
       setReviewReady(false)
        setReviewToken(undefined)
        setError(refreshError)
@@ -2803,7 +2815,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
      setObject(conflict.currentObject)
      setYamlText(text)
       setOriginalYaml(text)
-      setYamlDiffBaseline((current) => updateYamlDiffBaseline(current, createYamlDiffBaseline(text, refreshed), true))
+       setYamlDiffBaseline((current) => updateYamlDiffBaseline(current, createYamlDiffBaseline(text), true))
        setReviewReady(false)
       setReviewToken(undefined)
      setConflict(null)
@@ -2863,7 +2875,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       setObject(outcome.object)
       setYamlText(text)
       setOriginalYaml(text)
-       setYamlDiffBaseline((current) => updateYamlDiffBaseline(current, createYamlDiffBaseline(text, editorObject), true))
+       setYamlDiffBaseline((current) => updateYamlDiffBaseline(current, createYamlDiffBaseline(text), true))
       setError(outcome.error)
       if (isSecret) setSecretsRevealed(false)
     }
