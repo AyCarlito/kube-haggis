@@ -17,37 +17,23 @@ export interface YamlFoldNode {
   parentId?: string
 }
 
+/** Describes one physical source range that CodeMirror can remove from its viewport. */
+export interface YamlFoldPhysicalRange {
+  nodeId: string
+  kind: YamlFoldNodeKind
+  label: string
+  from: number
+  to: number
+  lineCount: number
+}
+
 /** Contains the local structural information used to present YAML folds. */
 export interface YamlFoldModel {
   source: string
   status: YamlFoldStatus
   lineCount: number
   nodes: YamlFoldNode[]
-}
-
-/** Describes one contiguous child-line mask shown for a collapsed structure. */
-export interface YamlFoldRange {
-  nodeId: string
-  rangeId: string
-  startLine: number
-  endLine: number
-  lineCount: number
-  label: string
-}
-
-/** Contains the currently visible controls and collapsed presentation ranges. */
-export interface YamlFoldPresentation {
-  controls: YamlFoldNode[]
-  ranges: YamlFoldRange[]
-}
-
-/** Describes the accessible DOM contract for one fold control. */
-export interface YamlFoldControlModel {
-  controlId: string
-  rangeId: string
-  ariaExpanded: boolean
-  ariaLabel: string
-  title: string
+  physicalRanges?: YamlFoldPhysicalRange[]
 }
 
 /** Caps source work so folding stays local and predictable for large documents. */
@@ -147,49 +133,63 @@ export function buildYamlFoldModel(source: string): YamlFoldModel {
 
     visitNode(document.contents, [], 0)
     if (budgetExceeded) return { source, status: 'bounded', lineCount, nodes: [] }
-    return { source, status: 'ready', lineCount, nodes }
+    return {
+      source,
+      status: 'ready',
+      lineCount,
+      nodes,
+      physicalRanges: nodes
+        .map((node) => mapYamlFoldNodeToSourceRangeWithLineStarts(source, node, lineStarts))
+        .filter((range): range is YamlFoldPhysicalRange => range !== undefined),
+    }
   } catch {
     return { source, status: 'invalid', lineCount, nodes: [] }
   }
 }
 
-/** Toggles one local fold identifier without touching the serialized YAML source. */
-export function toggleYamlFold(collapsedIds: ReadonlySet<string>, nodeId: string): Set<string> {
-  const next = new Set(collapsedIds)
-  if (next.has(nodeId)) next.delete(nodeId)
-  else next.add(nodeId)
-  return next
+/** Maps one validated fold node to source offsets without changing the YAML text. */
+export function mapYamlFoldNodeToSourceRange(source: string, node: YamlFoldNode): YamlFoldPhysicalRange | undefined {
+  return mapYamlFoldNodeToSourceRangeWithLineStarts(source, node, yamlLineStarts(source))
 }
 
-/** Builds the visible controls and non-mutating masks for the requested fold state. */
-export function buildYamlFoldPresentation(model: YamlFoldModel, collapsedIds: ReadonlySet<string>): YamlFoldPresentation {
-  if (model.status !== 'ready' || model.nodes.length === 0) return { controls: [], ranges: [] }
-  const collapsedNodes = model.nodes.filter((node) => collapsedIds.has(node.id))
-  const ranges = collapsedNodes
-    .filter((node) => !isLineHiddenByOtherNode(node.line, node, collapsedNodes))
-    .map((node) => ({
-      nodeId: node.id,
-      rangeId: yamlFoldRangeId(node.id),
-      startLine: node.line + 1,
-      endLine: node.endLine,
-      lineCount: node.endLine - node.line,
-      label: node.label,
-    }))
-  const controls = model.nodes.filter((node) => !isLineHiddenByOtherNode(node.line, undefined, collapsedNodes))
-  return { controls, ranges }
-}
-
-/** Creates keyboard and screen-reader metadata for a fold button without exposing child values. */
-export function yamlFoldControl(node: YamlFoldNode, collapsed: boolean): YamlFoldControlModel {
-  const target = node.kind === 'mapping' ? `mapping key ${node.label}` : `sequence ${node.label}`
-  const action = collapsed ? 'Expand' : 'Collapse'
+/** Maps one validated node with precomputed line starts to avoid repeated large-source scans. */
+function mapYamlFoldNodeToSourceRangeWithLineStarts(source: string, node: YamlFoldNode, lineStarts: number[]): YamlFoldPhysicalRange | undefined {
+  if (node.endLine <= node.line) return undefined
+  const from = lineStarts[node.line + 1]
+  if (from === undefined) return undefined
+  const to = yamlLineEnd(source, lineStarts, node.endLine)
+  if (to <= from) return undefined
   return {
-    controlId: yamlFoldControlId(node.id),
-    rangeId: yamlFoldRangeId(node.id),
-    ariaExpanded: !collapsed,
-    ariaLabel: `${action} nested children of ${target}`,
-    title: `${action} ${target}`,
+    nodeId: node.id,
+    kind: node.kind,
+    label: node.label,
+    from,
+    to,
+    lineCount: node.endLine - node.line,
   }
+}
+
+/** Finds the safe physical fold that starts on one zero-based source line. */
+export function findYamlFoldRangeForLine(model: YamlFoldModel, source: string, line: number): YamlFoldPhysicalRange | undefined {
+  if (model.status !== 'ready' || model.source !== source) return undefined
+  const node = model.nodes.find((candidate) => candidate.line === line)
+  if (!node) return undefined
+  return yamlFoldPhysicalRanges(model, source).find((range) => range.nodeId === node.id)
+}
+
+/** Finds the safe physical fold represented by a CodeMirror fold placeholder range. */
+export function findYamlFoldRangeByOffsets(model: YamlFoldModel, source: string, from: number, to: number): YamlFoldPhysicalRange | undefined {
+  if (model.status !== 'ready' || model.source !== source) return undefined
+  return yamlFoldPhysicalRanges(model, source).find((range) => range.from === from && range.to === to)
+}
+
+/** Returns cached physical ranges or computes them once for a manually assembled fold model. */
+function yamlFoldPhysicalRanges(model: YamlFoldModel, source: string): YamlFoldPhysicalRange[] {
+  if (model.physicalRanges) return model.physicalRanges
+  const lineStarts = yamlLineStarts(source)
+  return model.nodes
+    .map((node) => mapYamlFoldNodeToSourceRangeWithLineStarts(source, node, lineStarts))
+    .filter((range): range is YamlFoldPhysicalRange => range !== undefined)
 }
 
 /** Returns the source line starts used to translate parser offsets to zero-based editor lines. */
@@ -213,6 +213,13 @@ function yamlLineAtOffset(offset: number, lineStarts: number[]): number {
     else high = middle - 1
   }
   return Math.max(0, high)
+}
+
+/** Returns the source offset immediately before a YAML line break. */
+function yamlLineEnd(source: string, lineStarts: number[], line: number): number {
+  let end = lineStarts[line + 1] ?? source.length
+  while (end > 0 && (source[end - 1] === '\n' || source[end - 1] === '\r')) end -= 1
+  return end
 }
 
 /** Returns the line range covered by a parsed YAML collection when its source range is usable. */
@@ -246,19 +253,4 @@ function sequenceItemLine(sequence: YAMLSeq, index: number, item: Node, lineStar
 function mappingLabel(pair: Pair): string {
   if (isScalar(pair.key) && pair.key.value !== undefined) return String(pair.key.value)
   return 'mapping key'
-}
-
-/** Tests whether a fold line is inside another active collapsed structure. */
-function isLineHiddenByOtherNode(line: number, node: YamlFoldNode | undefined, collapsedNodes: YamlFoldNode[]): boolean {
-  return collapsedNodes.some((candidate) => candidate !== node && candidate.line < line && line <= candidate.endLine)
-}
-
-/** Converts a structural node identifier into a stable safe DOM identifier. */
-function yamlFoldControlId(nodeId: string): string {
-  return `yaml-fold-control-${nodeId.replace(/[^a-zA-Z0-9_-]/g, '-')}`
-}
-
-/** Converts a structural node identifier into the controlled range DOM identifier. */
-function yamlFoldRangeId(nodeId: string): string {
-  return `yaml-fold-range-${nodeId.replace(/[^a-zA-Z0-9_-]/g, '-')}`
 }

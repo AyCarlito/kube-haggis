@@ -42,7 +42,7 @@ import {
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { parse, stringify } from 'yaml'
 import {
   ApiError,
@@ -103,8 +103,8 @@ import { MetricSample } from './metricSample'
 import { resourceRefreshFailed, resourceRefreshIntent, resourceRefreshSucceeded } from './resourceDetailRefresh'
 import { contextBootstrapState, NoContextState } from './bootstrap'
 import { initialWriteModeState, isDashboardRoute, isWriteModeEnabled, reduceWriteMode, type WriteModeAction, type WriteModeState } from './writeMode'
-import { buildYamlFoldModel, buildYamlFoldPresentation, toggleYamlFold, yamlFoldControl } from './yamlFolding'
 import { buildYamlDiff, createYamlDiffBaseline, createYamlDiffComputingModel, createYamlDiffUnavailableModel, updateYamlDiffBaseline, type YamlDiffBaseline, type YamlDiffModel } from './yamlDiff'
+import { YamlCodeMirrorEditor } from './yamlCodeMirror'
 import type {
   AuditEntry,
   AuditResponse,
@@ -2558,113 +2558,6 @@ function BulkDeleteResults({ definition, result }: { definition: ResourceDefinit
   return <div className="bulk-delete-results"><div className="bulk-delete-results-heading"><div><span className="eyebrow"><span className="eyebrow-mark" /> Mutation results</span><strong>{titleCase(definition.resource)} / {result.succeeded} succeeded / {result.failed} failed</strong></div><span className={result.failed ? 'status-pill status-warning' : 'status-pill status-good'}><span />{result.status}</span></div><div className="bulk-result-list">{result.items.map((item) => <div className="bulk-result-row" key={`${item.namespace || ''}/${item.name}`}><span className={item.success ? 'bulk-result-mark bulk-result-success' : 'bulk-result-mark bulk-result-failure'}>{item.success ? <Check size={13} /> : <AlertTriangle size={13} />}</span><div><strong>{item.namespace ? `${item.namespace}/` : ''}{item.name}</strong><span>{item.success ? item.status : item.error || 'delete failed'}</span></div></div>)}</div></div>
 }
 
-/** Defines the raw-draft inputs and resource scope for the foldable YAML editor. */
-interface YamlFoldEditorProps {
-  value: string
-  readOnly: boolean
-  scopeKey: string
-  onChange: (value: string) => void
-}
-
-/** Presents local YAML fold controls over the unchanged native editor surface. */
-function YamlFoldEditor({ value, readOnly, scopeKey, onChange }: YamlFoldEditorProps) {
-  const [model, setModel] = useState(() => buildYamlFoldModel(value))
-  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set())
-  const [scrollTop, setScrollTop] = useState(0)
-  const parseEpochRef = useRef(0)
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-
-  useEffect(() => {
-    const parseEpoch = ++parseEpochRef.current
-    let active = true
-    const timeoutID = window.setTimeout(() => {
-      if (!active || parseEpoch !== parseEpochRef.current) return
-      const nextModel = buildYamlFoldModel(value)
-      setModel(nextModel)
-      setCollapsedIds((current) => {
-        const availableIDs = new Set(nextModel.nodes.map((node) => node.id))
-        const retained = new Set([...current].filter((nodeID) => availableIDs.has(nodeID)))
-        return retained.size === current.size ? current : retained
-      })
-    }, 0)
-    return () => {
-      active = false
-      window.clearTimeout(timeoutID)
-    }
-  }, [scopeKey, value])
-
-  useEffect(() => {
-    setCollapsedIds(new Set())
-    setScrollTop(0)
-  }, [scopeKey])
-
-  const currentModel = model.source === value ? model : undefined
-  const presentation = currentModel ? buildYamlFoldPresentation(currentModel, collapsedIds) : { controls: [], ranges: [] }
-  const modelNotice = currentModel?.status === 'invalid'
-    ? 'Folding is paused while this YAML is incomplete or invalid; the raw draft remains editable.'
-    : currentModel?.status === 'bounded'
-      ? 'Folding is paused for this large document; the raw draft remains available.'
-      : ''
-
-  return <div className="yaml-fold-editor">
-    <div className="yaml-fold-stage">
-      <div className="yaml-fold-gutter" aria-label="YAML fold controls">
-        <div className="yaml-fold-gutter-content" style={{ transform: `translateY(${-scrollTop}px)` }}>
-          {presentation.controls.map((node) => {
-            const collapsed = collapsedIds.has(node.id)
-            const control = yamlFoldControl(node, collapsed)
-            return <button
-              key={node.id}
-              id={control.controlId}
-              type="button"
-              className={`yaml-fold-control yaml-fold-control-${node.kind}`}
-              style={{ '--yaml-fold-line': node.line } as CSSProperties}
-              aria-expanded={control.ariaExpanded}
-              aria-controls={control.rangeId}
-              aria-label={control.ariaLabel}
-              title={control.title}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => setCollapsedIds((current) => toggleYamlFold(current, node.id))}
-            >
-              {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-            </button>
-          })}
-        </div>
-      </div>
-      <textarea
-        ref={textareaRef}
-        className="yaml-editor"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        readOnly={readOnly}
-        spellCheck={false}
-        wrap="off"
-        aria-label="Resource YAML"
-        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-      />
-      <div className="yaml-fold-text-overlay">
-        <div className="yaml-fold-text-overlay-content" style={{ transform: `translateY(${-scrollTop}px)` }}>
-          {presentation.controls
-            .filter((node) => !presentation.ranges.some((range) => range.nodeId === node.id))
-            .map((node) => {
-              const control = yamlFoldControl(node, collapsedIds.has(node.id))
-              return <span key={control.rangeId} id={control.rangeId} className="yaml-fold-range-target">Nested children of {node.label}</span>
-            })}
-          {presentation.ranges.map((range) => <div
-            key={range.nodeId}
-            id={range.rangeId}
-            className="yaml-fold-cover"
-            style={{ '--yaml-fold-start': range.startLine, '--yaml-fold-lines': range.lineCount } as CSSProperties}
-          >
-            <span>{`... ${range.lineCount} nested ${range.lineCount === 1 ? 'line' : 'lines'} folded`}</span>
-          </div>)}
-        </div>
-      </div>
-    </div>
-    {modelNotice && <div className="yaml-fold-notice" role="status"><AlertTriangle size={14} /> <span>{modelNotice}</span></div>}
-  </div>
-}
-
 /** Renders a read-only live YAML comparison without replacing the editable draft. */
 function YamlDiffPanel({ model }: { model: YamlDiffModel }) {
   const statusLabel = model.status === 'clean'
@@ -3110,7 +3003,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
            {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel key={`node-${refreshEpoch}`} context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
            {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel key={`pvc-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
-        {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); setReviewReady(false); setReviewToken(undefined); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); setReviewReady(false); setReviewToken(undefined); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<YamlFoldEditor key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} onChange={(value) => { setYamlText(value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
+        {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); setReviewReady(false); setReviewToken(undefined); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); setReviewReady(false); setReviewToken(undefined); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<YamlCodeMirrorEditor key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} onChange={(value) => { setYamlText(value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
        {tab === 'yaml' && <div className="yaml-diff-toggle-row"><button type="button" className="secondary-button" aria-expanded={yamlDiffOpen} aria-pressed={yamlDiffOpen} aria-controls="yaml-diff-panel" onClick={() => setYamlDiffOpen((open) => !open)}><FileCode2 size={15} /> {yamlDiffOpen ? 'Hide live diff' : 'Show live diff'}</button><span>Compare the local draft with the last synchronized cluster snapshot. This is explanatory only.</span></div>}
        {tab === 'yaml' && yamlDiffOpen && <YamlDiffPanel model={yamlDiffModel} />}
        {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}

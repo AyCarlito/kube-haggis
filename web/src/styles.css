@@ -942,7 +942,7 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
 .catalog-resource-cell strong, .history-operation, .history-target { font-size: var(--type-control); overflow: visible; max-width: none; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
 .catalog-resource-cell strong { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
 
-.detail-breadcrumb, .identity-row span, .identity-row strong, .field-cloud span, .editor-toolbar, .editor-footer, .secret-notice, .yaml-editor, .relationship-kind, .relationship-flag, .relationship-meta, .relationship-unresolved, .relationship-open, .terminal-footer, .port-forward-scope, .port-forward-note, .port-forward-footer, .pod-operation-scope, .pod-operation-actions, .pod-operation-footer, .workload-operation-scope, .workload-operation-actions, .workload-operation-footer, .pvc-operation-scope, .pvc-operation-actions, .pvc-operation-footer, .node-operation-scope, .node-operation-actions, .node-operation-footer, .schema-description, .schema-field > small, .schema-format, .schema-array-item-heading, .schema-map-heading, .schema-field-add span, .schema-empty, .schema-validation span, .schema-form-footer, .read-pack-field > span, .read-pack-section-heading, .read-pack-table-row code, .read-pack-table-row > span, .read-pack-rule span, .read-pack-reference > div > span, .read-pack-reference-state, .read-pack-condition code, .read-pack-map code, .read-pack-muted, .diagnostics-signal code, .diagnostics-detail-row div span, .diagnostics-detail-value, .diagnostics-session-card small, .diagnostics-request-metric > span, .diagnostics-request-metric code, .diagnostics-counter-list code, .diagnostics-counter-list strong, .diagnostics-counter-list small, .diagnostics-event-row code, .diagnostics-watch-current code, .diagnostics-watch-current small, .diagnostics-empty span { font-size: var(--type-meta); line-height: var(--leading-compact); }
+.detail-breadcrumb, .identity-row span, .identity-row strong, .field-cloud span, .editor-toolbar, .editor-footer, .secret-notice, .yaml-code-editor, .yaml-editor-fallback, .relationship-kind, .relationship-flag, .relationship-meta, .relationship-unresolved, .relationship-open, .terminal-footer, .port-forward-scope, .port-forward-note, .port-forward-footer, .pod-operation-scope, .pod-operation-actions, .pod-operation-footer, .workload-operation-scope, .workload-operation-actions, .workload-operation-footer, .pvc-operation-scope, .pvc-operation-actions, .pvc-operation-footer, .node-operation-scope, .node-operation-actions, .node-operation-footer, .schema-description, .schema-field > small, .schema-format, .schema-array-item-heading, .schema-map-heading, .schema-field-add span, .schema-empty, .schema-validation span, .schema-form-footer, .read-pack-field > span, .read-pack-section-heading, .read-pack-table-row code, .read-pack-table-row > span, .read-pack-rule span, .read-pack-reference > div > span, .read-pack-reference-state, .read-pack-condition code, .read-pack-map code, .read-pack-muted, .diagnostics-signal code, .diagnostics-detail-row div span, .diagnostics-detail-value, .diagnostics-session-card small, .diagnostics-request-metric > span, .diagnostics-request-metric code, .diagnostics-counter-list code, .diagnostics-counter-list strong, .diagnostics-counter-list small, .diagnostics-event-row code, .diagnostics-watch-current code, .diagnostics-watch-current small, .diagnostics-empty span { font-size: var(--type-meta); line-height: var(--leading-compact); }
 
 .event-row { align-items: flex-start; min-height: 0; padding: 13px 0; }
 .event-copy strong, .event-copy span { overflow: visible; text-overflow: clip; white-space: normal; font-size: var(--type-control); line-height: var(--leading-compact); overflow-wrap: anywhere; }
@@ -1071,27 +1071,90 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
   }
 }
 
-.yaml-fold-editor {
-  --yaml-fold-line-height: calc(var(--type-meta) * 1.55);
-  --yaml-fold-editor-padding-top: 14px;
+.yaml-code-editor {
   min-width: 0;
   background: #0e110e;
 }
 
-.yaml-fold-stage {
-  position: relative;
-  min-width: 0;
+.yaml-codemirror-host {
+  height: 430px;
+  min-height: 260px;
+  overflow: hidden;
+  background: radial-gradient(circle at 80% 10%, rgba(92, 122, 78, .07), transparent 20rem), #0b0e0b;
 }
 
-.yaml-fold-editor .yaml-editor {
-  position: relative;
-  z-index: 1;
+.yaml-codemirror-host .cm-editor {
+  height: 100%;
+  font: var(--type-meta)/1.55 var(--mono);
+  tab-size: 2;
+}
+
+.yaml-codemirror-host .cm-editor.cm-focused {
+  outline: 2px solid var(--copper-bright);
+  outline-offset: -2px;
+}
+
+.yaml-code-editor .cm-gutterElement {
+  line-height: 1.55;
+}
+
+.yaml-code-editor .cm-foldGutter .yaml-fold-marker {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 22px;
+  margin: 0 auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-dark);
+  font: 11px/1 var(--mono);
+  cursor: pointer;
+  transition: color .17s ease, border-color .17s ease, background .17s ease;
+}
+
+.yaml-code-editor .cm-foldGutter .yaml-fold-marker:hover {
+  border-color: rgba(215, 123, 77, .28);
+  background: rgba(215, 123, 77, .08);
+  color: var(--copper-bright);
+}
+
+.yaml-code-editor .cm-foldGutter .yaml-fold-marker:focus-visible,
+.yaml-code-editor .yaml-fold-placeholder:focus-visible {
+  outline: 2px solid var(--copper-bright);
+  outline-offset: 1px;
+}
+
+.yaml-code-editor .yaml-fold-placeholder {
+  margin-left: 4px;
+  padding: 0 6px;
+  border: 1px solid rgba(215, 123, 77, .24);
+  border-radius: 4px;
+  background: rgba(215, 123, 77, .09);
+  color: var(--copper-bright);
+  font: var(--type-label)/1.5 var(--mono);
+  cursor: pointer;
+}
+
+.yaml-code-editor .yaml-fold-placeholder:hover {
+  border-color: rgba(240, 154, 98, .6);
+  background: rgba(215, 123, 77, .16);
+  color: var(--paper);
+}
+
+.yaml-code-editor .cm-selectionBackground,
+.yaml-code-editor .cm-content ::selection {
+  background: rgba(215, 123, 77, .24) !important;
+}
+
+.yaml-editor-fallback {
   display: block;
   width: 100%;
   height: 430px;
   min-height: 260px;
   margin: 0;
-  padding: var(--yaml-fold-editor-padding-top) 15px 18px 45px;
+  padding: 14px 15px 18px;
   overflow: auto;
   border: 0;
   border-radius: 0;
@@ -1099,122 +1162,17 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
   resize: vertical;
   background: radial-gradient(circle at 80% 10%, rgba(92, 122, 78, .07), transparent 20rem), #0b0e0b;
   color: #b8c7b0;
-  font: var(--type-meta)/var(--yaml-fold-line-height) var(--mono);
+  font: var(--type-meta)/1.55 var(--mono);
   white-space: pre;
   tab-size: 2;
 }
 
-.yaml-fold-editor .yaml-editor:focus-visible {
+.yaml-editor-fallback:focus-visible {
   outline: 2px solid var(--copper-bright);
   outline-offset: -2px;
 }
 
-.yaml-fold-gutter {
-  position: absolute;
-  z-index: 3;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 39px;
-  overflow: hidden;
-  border-right: 1px solid rgba(226, 224, 204, .07);
-  background: rgba(11, 14, 11, .94);
-  pointer-events: none;
-}
-
-.yaml-fold-gutter-content,
-.yaml-fold-text-overlay-content {
-  position: absolute;
-  inset: 0;
-  will-change: transform;
-}
-
-.yaml-fold-control {
-  position: absolute;
-  top: calc(var(--yaml-fold-editor-padding-top) + var(--yaml-fold-line) * var(--yaml-fold-line-height));
-  left: 5px;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  margin: 0;
-  padding: 0;
-  transform: translateY(-2px);
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--muted-dark);
-  cursor: pointer;
-  pointer-events: auto;
-  transition: color .17s ease, border-color .17s ease, background .17s ease;
-}
-
-.yaml-fold-control:hover {
-  border-color: rgba(215, 123, 77, .25);
-  background: rgba(215, 123, 77, .08);
-  color: var(--copper-bright);
-}
-
-.yaml-fold-control:focus-visible {
-  position: absolute;
-  z-index: 1;
-  outline: 2px solid var(--copper-bright);
-  outline-offset: 1px;
-}
-
-.yaml-fold-control-mapping {
-  color: #9aa88f;
-}
-
-.yaml-fold-control-sequence-item {
-  color: var(--copper-bright);
-}
-
-.yaml-fold-text-overlay {
-  position: absolute;
-  z-index: 2;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 39px;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.yaml-fold-cover {
-  position: absolute;
-  top: calc(var(--yaml-fold-editor-padding-top) + var(--yaml-fold-start) * var(--yaml-fold-line-height));
-  right: 0;
-  left: 0;
-  display: flex;
-  align-items: flex-start;
-  height: calc(var(--yaml-fold-lines) * var(--yaml-fold-line-height));
-  padding: 0 12px;
-  overflow: hidden;
-  border-top: 1px solid rgba(215, 123, 77, .2);
-  border-bottom: 1px solid rgba(226, 224, 204, .05);
-  background: linear-gradient(90deg, rgba(24, 29, 23, .98), rgba(14, 17, 14, .99));
-  color: var(--muted);
-  font: var(--type-meta)/var(--yaml-fold-line-height) var(--mono);
-  white-space: nowrap;
-}
-
-.yaml-fold-cover span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.yaml-fold-range-target {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-.yaml-fold-notice {
+.yaml-editor-notice {
   display: flex;
   align-items: flex-start;
   gap: 8px;
@@ -1225,29 +1183,21 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
   font: var(--type-meta)/var(--leading-copy) var(--mono);
 }
 
-.yaml-fold-notice svg {
+.yaml-editor-notice svg {
   flex: 0 0 auto;
   margin-top: 2px;
 }
 
 @media (max-width: 760px) {
-  .yaml-fold-editor .yaml-editor {
+  .yaml-codemirror-host,
+  .yaml-editor-fallback {
     height: 360px;
     min-height: 220px;
+  }
+
+  .yaml-codemirror-host .cm-content {
     padding-right: 12px;
-    padding-left: 43px;
-  }
-
-  .yaml-fold-gutter {
-    width: 37px;
-  }
-
-  .yaml-fold-text-overlay {
-    left: 37px;
-  }
-
-  .yaml-fold-control {
-    left: 4px;
+    padding-left: 8px;
   }
 }
 
