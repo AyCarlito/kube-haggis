@@ -18,6 +18,8 @@ import {
   yamlMonacoWorkerLabelSupported,
 } from './yamlMonacoState'
 import 'monaco-editor/languages/definitions/yaml/register'
+import 'monaco-editor/esm/vs/base/browser/ui/codicons/codicon/codicon.css'
+import 'monaco-editor/esm/vs/editor/contrib/folding/browser/folding.js'
 
 /** Identifies the constructor shape emitted by Vite for a browser worker module. */
 type MonacoWorkerConstructor = new () => Worker
@@ -280,8 +282,9 @@ function createYamlMonacoHunkPeek(
   try {
     originalModel = monaco.editor.createModel(originalText, 'yaml', originalUri)
     modifiedModel = monaco.editor.createModel(modifiedText, 'yaml', modifiedUri)
+    const nativePeekOptions = yamlMonacoEditorOptions(true)
     peekEditor = monaco.editor.createDiffEditor(host, {
-      ...yamlMonacoEditorOptions(true),
+      ...nativePeekOptions,
       accessibilityVerbose: true,
       ariaLabel: 'Read-only YAML change peek',
       automaticLayout: true,
@@ -304,6 +307,8 @@ function createYamlMonacoHunkPeek(
       useInlineViewWhenSpaceIsLimited: false,
       wordWrap: 'off',
     })
+    peekEditor.getOriginalEditor().updateOptions(nativePeekOptions)
+    peekEditor.getModifiedEditor().updateOptions(nativePeekOptions)
     peekEditor.setModel({ original: originalModel, modified: modifiedModel })
 
     widget = {
@@ -593,8 +598,9 @@ export function YamlMonacoEditor({ value, baseline, readOnly, scopeKey, model, c
     if (!host || !models || !mainEditor) return () => undefined
     setComparisonError('')
     try {
+      const nativeDiffOptions = yamlMonacoEditorOptions(readOnly)
       const diffEditor = monaco.editor.createDiffEditor(host, {
-        ...yamlMonacoEditorOptions(readOnly),
+        ...nativeDiffOptions,
         accessibilityVerbose: true,
         ariaLabel: 'Native YAML comparison',
         diffAlgorithm: 'advanced',
@@ -619,6 +625,8 @@ export function YamlMonacoEditor({ value, baseline, readOnly, scopeKey, model, c
         useInlineViewWhenSpaceIsLimited: false,
         wordWrap: 'off',
       })
+      diffEditor.getOriginalEditor().updateOptions(nativeDiffOptions)
+      diffEditor.getModifiedEditor().updateOptions(nativeDiffOptions)
       diffEditor.setModel({ original: models.original, modified: models.modified })
       const mainViewState = mainEditor.saveViewState()
       if (mainViewState) diffEditor.restoreViewState({ original: null, modified: mainViewState, modelState: undefined })
