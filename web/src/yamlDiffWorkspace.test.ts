@@ -57,14 +57,14 @@ function testWorkspaceAccessibility(): void {
   assertYamlWorkspace(isYamlDiffWorkspaceEscapeKey('Escape') && !isYamlDiffWorkspaceEscapeKey('Enter'), 'workspace Escape handling did not distinguish the close key')
 }
 
-/** Exercises the workspace-facing model contract for accepted baselines and revealed Secret rows. */
+/** Exercises the workspace-facing model contract for accepted baselines and raw Secret rows. */
 function testWorkspaceModelSafety(): void {
   const baseline = createYamlDiffBaseline('apiVersion: v1\nkind: Secret\ndata:\n  token: old-secret\n')
   const failedRefresh = updateYamlDiffBaseline(baseline, createYamlDiffBaseline('data:\n  token: replacement\n'), false)
   const draft = 'apiVersion: v1\nkind: Secret\ndata:\n  token: new-secret\n'
   const model = buildYamlDiff(failedRefresh.text, draft)
   const rendered = JSON.stringify(model)
-  assertYamlWorkspace(model.status === 'changed' && rendered.includes('old-secret') && rendered.includes('new-secret'), 'workspace did not retain the revealed Secret diff model')
+  assertYamlWorkspace(model.status === 'changed' && rendered.includes('old-secret') && rendered.includes('new-secret'), 'workspace did not retain the raw Secret diff model')
   assertYamlWorkspace(failedRefresh.text.includes('old-secret') && !failedRefresh.text.includes('replacement'), 'workspace model replaced a failed baseline')
 }
 

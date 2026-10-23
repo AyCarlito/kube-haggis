@@ -2566,7 +2566,6 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const [yamlDiffOpen, setYamlDiffOpen] = useState(false)
   const [yamlDiffBaseline, setYamlDiffBaseline] = useState<YamlDiffBaseline>(() => createYamlDiffBaseline(''))
   const [yamlDiffModel, setYamlDiffModel] = useState<YamlDiffModel>(() => createYamlDiffUnavailableModel())
-  const [secretsRevealed, setSecretsRevealed] = useState(false)
   const [tab, setTab] = useState('overview')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -2588,7 +2587,6 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   const refreshInFlightRef = useRef(false)
   const refreshRequestIDRef = useRef(0)
   const yamlDiffEpochRef = useRef(0)
-  const secretRevealRef = useRef(false)
 
   useEffect(() => {
     let active = true
@@ -2599,8 +2597,6 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
     setRefreshConfirmationOpen(false)
     setRefreshLoading(false)
     refreshInFlightRef.current = false
-    setSecretsRevealed(false)
-    secretRevealRef.current = false
     setDeleteReviewPending(false)
     setOperationReviewPending(false)
     setReviewReady(false)
@@ -2628,7 +2624,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       .then((data) => {
         if (!active) return
         const editorObject = sanitizeEditorObject(data)
-        const text = stringify(isSecret ? redactSecret(editorObject) : editorObject)
+        const text = stringify(editorObject)
         setObject(data)
         setYamlText(text)
         setOriginalYaml(text)
@@ -2644,19 +2640,6 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       }
     }
   }, [context, definition.group, definition.version, definition.resource, definition.kind, definition.namespaced, namespace, name, isNew, isSecret])
-
-  useEffect(() => {
-    if (!isSecret || !object) return
-    if (secretsRevealed) {
-      setYamlDiffBaseline(createYamlDiffBaseline(stringify(sanitizeEditorObject(object))))
-      secretRevealRef.current = true
-      return
-    }
-    if (!secretRevealRef.current) return
-    const baselineObject = parseResourceObject(yamlDiffBaseline.text)
-    if (baselineObject) setYamlDiffBaseline(createYamlDiffBaseline(stringify(redactSecret(baselineObject))))
-    secretRevealRef.current = false
-  }, [isSecret, secretsRevealed])
 
   useEffect(() => {
     const diffEpoch = ++yamlDiffEpochRef.current
@@ -2769,7 +2752,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
         }
       }
       const safeRefreshed = sanitizeEditorObject(refreshed)
-      const text = stringify(isSecret ? redactSecret(safeRefreshed) : safeRefreshed)
+      const text = stringify(safeRefreshed)
       setObject(refreshed)
        setYamlText(text)
        setOriginalYaml(text)
@@ -2811,7 +2794,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
    function reloadConflictObject() {
      if (!conflict?.currentObject) return
      const refreshed = sanitizeEditorObject(conflict.currentObject)
-     const text = stringify(isSecret ? redactSecret(refreshed) : refreshed)
+      const text = stringify(refreshed)
      setObject(conflict.currentObject)
      setYamlText(text)
       setOriginalYaml(text)
@@ -2821,7 +2804,6 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
      setConflict(null)
      setConflictReviewed(false)
       setDraftKept(false)
-      if (isSecret) setSecretsRevealed(false)
      setError('Current cluster YAML loaded. Review any new edits before applying.')
    }
 
@@ -2870,14 +2852,13 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
     /** Commits a refreshed object into the editor while preserving the active detail tab. */
     function commitRefreshedObject(refreshed: ResourceObject) {
       const editorObject = sanitizeEditorObject(refreshed)
-      const text = stringify(isSecret ? redactSecret(editorObject) : editorObject)
+      const text = stringify(editorObject)
       const outcome = resourceRefreshSucceeded(refreshed)
       setObject(outcome.object)
       setYamlText(text)
       setOriginalYaml(text)
        setYamlDiffBaseline((current) => updateYamlDiffBaseline(current, createYamlDiffBaseline(text), true))
       setError(outcome.error)
-      if (isSecret) setSecretsRevealed(false)
     }
 
     /** Fetches the exact active resource and retains the last object when the read fails. */
@@ -2969,7 +2950,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
            {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel key={`node-${refreshEpoch}`} context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
            {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel key={`pvc-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
-        {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); setReviewReady(false); setReviewToken(undefined); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); setReviewReady(false); setReviewToken(undefined); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<YamlDiffWorkspace key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} model={yamlDiffModel} diffOpen={yamlDiffOpen} onDiffOpenChange={setYamlDiffOpen} onChange={(value) => { setYamlText(value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
+        {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>Raw Secret values are visible in this browser-local editor. Other review and conflict surfaces remain redacted.</span></div>}<YamlDiffWorkspace key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled} model={yamlDiffModel} diffOpen={yamlDiffOpen} onDiffOpenChange={setYamlDiffOpen} onChange={(value) => { setYamlText(value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
        {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
@@ -3157,9 +3138,9 @@ function ConflictResolutionPanel({ conflict, currentYaml, isSecret, draftKept, r
     <div className="conflict-version-grid"><div><span>Local draft version</span><code>{localVersion === 'not supplied' ? localVersion : `rv/${localVersion}`}</code></div><div><span>Current cluster version</span><code>{currentVersion === 'unavailable' ? currentVersion : `rv/${currentVersion}`}</code></div></div>
     <div className="conflict-summary"><strong>Safe difference summary</strong><span>{changedSections.length ? changedSections.join(', ') : 'No safe top-level field differences were identified.'}{conflict.summary.truncated ? ' and more' : ''}</span></div>
     {currentReady ? <div className="conflict-current"><div className="conflict-current-heading"><strong>Current cluster YAML</strong><span>read-only snapshot / bounded view</span></div><pre>{currentYaml}</pre></div> : <div className="conflict-current conflict-current-unavailable"><AlertTriangle size={16} /><div><strong>Current cluster snapshot unavailable</strong><span>Refresh the resource before retrying. The local draft is still preserved and can be exported.</span></div></div>}
-    {isSecret && <div className="conflict-secret-note"><LockKeyhole size={14} /><span>Secret data and stringData values stay redacted in this conflict workflow. Reloading the current Secret YAML is disabled so masked placeholders cannot be submitted as values.</span></div>}
+    {isSecret && <div className="conflict-secret-note"><LockKeyhole size={14} /><span>Secret data and stringData values stay redacted in this conflict review. The safe conflict snapshot cannot be reloaded into the editor because its placeholders must never become mutation values; refresh the resource explicitly to load raw editor values.</span></div>}
     <label className="conflict-review-check"><input type="checkbox" checked={reviewed} onChange={(event) => onReviewed(event.target.checked)} disabled={!currentReady} /><span>I reviewed the current cluster snapshot and understand the local draft may contain changes made after it.</span></label>
-    <div className="conflict-actions"><button type="button" className="secondary-button" onClick={onKeepDraft}><FileCode2 size={14} /> {draftKept ? 'Draft retained' : 'Keep local draft'}</button><button type="button" className="secondary-button" onClick={onExport}><Download size={14} /> Export local draft</button><button type="button" className="secondary-button" onClick={onReload} disabled={!currentReady || isSecret}><RefreshCw size={14} /> Reload current YAML</button><button type="button" className="primary-button" onClick={onPrepareRetry} disabled={!currentReady || !reviewed}><ShieldCheck size={14} /> Prepare draft for re-review</button></div>
+    <div className="conflict-actions"><button type="button" className="secondary-button" onClick={onKeepDraft}><FileCode2 size={14} /> {draftKept ? 'Draft retained' : 'Keep local draft'}</button><button type="button" className="secondary-button" onClick={onExport}><Download size={14} /> Export local draft</button><button type="button" className="secondary-button" onClick={onReload} disabled={!currentReady || isSecret}><RefreshCw size={15} /> Reload current YAML</button><button type="button" className="primary-button" onClick={onPrepareRetry} disabled={!currentReady || !reviewed}><ShieldCheck size={14} /> Prepare draft for re-review</button></div>
   </section>
 }
 
@@ -5242,7 +5223,7 @@ function relativeTime(value: string): string {
   return `${Math.floor(seconds / 86400)}d ago`
 }
 
-/** Masks Secret data fields before they are placed in the browser editor. */
+/** Masks Secret data fields for non-editor conflict and review surfaces. */
 function redactSecret(object: ResourceObject): ResourceObject {
   const copy = sanitizeEditorObject(object)
   for (const field of ['data', 'stringData']) {

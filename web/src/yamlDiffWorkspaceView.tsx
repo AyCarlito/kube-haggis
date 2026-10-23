@@ -1,7 +1,7 @@
 import { AlertTriangle, Check, FileCode2, GripVertical, LoaderCircle, X } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { yamlDiffWorkspaceAccessibility, yamlDiffWorkspaceModeForWidth, clampYamlDiffWorkspaceSplit, createYamlDiffWorkspaceState, isYamlDiffWorkspaceEscapeKey, reduceYamlDiffWorkspaceState, YAML_DIFF_WORKSPACE_PANE_ID, type YamlDiffWorkspaceMode, type YamlDiffWorkspaceState } from './yamlDiffWorkspace'
-import { YamlCodeMirrorEditor } from './yamlCodeMirror'
+import { YamlMonacoEditor } from './yamlMonaco'
 import type { YamlDiffModel } from './yamlDiff'
 
 /** Defines the editor and live-diff inputs for one integrated YAML workspace. */
@@ -69,7 +69,7 @@ function YamlDiffPane({ model, paneID, closeButtonRef, onClose, accessibility }:
   </section>
 }
 
-/** Renders the CodeMirror editor beside a live diff or beneath its narrow-screen drawer. */
+/** Renders the Monaco editor beside a live diff or beneath its narrow-screen drawer. */
 export function YamlDiffWorkspace({ value, readOnly, scopeKey, onChange, model, diffOpen, onDiffOpenChange }: YamlDiffWorkspaceProps) {
   const [workspaceState, setWorkspaceState] = useState<YamlDiffWorkspaceState>(() => createYamlDiffWorkspaceState(diffOpen))
   const workspaceBodyRef = useRef<HTMLDivElement | null>(null)
@@ -128,7 +128,7 @@ export function YamlDiffWorkspace({ value, readOnly, scopeKey, onChange, model, 
     setWorkspaceState((current) => reduceYamlDiffWorkspaceState(current, { type: 'resize', splitPercent: ((event.clientX - bounds.left) / bounds.width) * 100 }))
   }
 
-  /** Starts a pointer resize while retaining the CodeMirror host in place. */
+  /** Starts a pointer resize while retaining the Monaco host in place. */
   function handleDividerPointerDown(event: ReactPointerEvent<HTMLDivElement>): void {
     if (event.button !== 0) return
     draggingRef.current = true
@@ -165,7 +165,7 @@ export function YamlDiffWorkspace({ value, readOnly, scopeKey, onChange, model, 
       <span>Compare the local draft with the last synchronized cluster snapshot. This is explanatory only.</span>
     </div>
     <div ref={workspaceBodyRef} className="yaml-diff-workspace-body" style={workspaceStyle}>
-      <div className="yaml-diff-editor-pane" role="region" aria-label={accessibility.editorPaneLabel}><YamlCodeMirrorEditor scopeKey={scopeKey} value={value} readOnly={readOnly} onChange={onChange} /></div>
+      <div className="yaml-diff-editor-pane" role="region" aria-label={accessibility.editorPaneLabel}><YamlMonacoEditor scopeKey={scopeKey} value={value} readOnly={readOnly} onChange={onChange} /></div>
       {diffOpen && <>
         <div className="yaml-diff-divider" role="separator" aria-label={accessibility.dividerLabel} aria-orientation="vertical" aria-valuemin={30} aria-valuemax={70} aria-valuenow={Math.round(workspaceState.splitPercent)} aria-valuetext={`Editor ${Math.round(workspaceState.splitPercent)} percent; diff ${Math.round(100 - workspaceState.splitPercent)} percent`} tabIndex={0} onPointerDown={handleDividerPointerDown} onPointerMove={handleDividerPointerMove} onPointerUp={handleDividerPointerUp} onPointerCancel={handleDividerPointerUp} onKeyDown={handleDividerKeyDown} title={accessibility.dividerLabel}><GripVertical size={15} /></div>
         <button type="button" className="yaml-diff-drawer-scrim" onClick={() => onDiffOpenChange(false)} aria-label={accessibility.closeLabel} tabIndex={-1} />

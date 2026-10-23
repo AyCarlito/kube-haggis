@@ -95,14 +95,14 @@ function testResponsivePresentation(): void {
   assertYamlDiff(yamlDiffLayoutForWidth(760) === 'unified' && yamlDiffLayoutForWidth(360) === 'unified', 'narrow diff width did not select unified presentation')
 }
 
-/** Exercises raw Secret values in the explicitly revealed browser-local editor diff. */
+/** Exercises raw Secret values in the browser-local editor diff without a reveal gate. */
 function testSecretEditorDiff(): void {
   const baseline = 'apiVersion: v1\nkind: Secret\ndata:\n  token: old-secret\n'
   const draft = 'apiVersion: v1\nkind: Secret\ndata:\n  token: new-secret\n'
   const model = buildYamlDiff(baseline, draft)
   const renderedText = JSON.stringify(model)
   assertYamlDiff(model.status === 'changed' && model.summary.changes === 1, 'changed Secret values did not retain a changed-line marker')
-  assertYamlDiff(renderedText.includes('old-secret') && renderedText.includes('new-secret'), 'explicitly revealed Secret values did not appear in the editor diff')
+  assertYamlDiff(renderedText.includes('old-secret') && renderedText.includes('new-secret'), 'raw Secret values did not appear in the browser-local editor diff')
 }
 
 /** Exercises server-owned metadata removal before a non-Secret diff is generated. */
