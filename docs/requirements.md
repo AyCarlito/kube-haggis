@@ -28,7 +28,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Resource-scoped Events with live watches and navigation into generic Event details.
 - Owner-reference relationship view with controller/deletion flags and discovery-aware navigation to owner resources.
 - Per-context read-only/write-mode UI and backend write-mode guard.
-- Secret value masking with explicit reveal.
+- Secret value masking outside the browser YAML editor, with raw values allowed in the editor and its local diffs.
 - Removal of `metadata.managedFields` from the YAML editor and write payloads.
 - Redacted SQLite mutation history for apply and delete outcomes.
 - Native Pod log streaming with follow, previous-container, tail, and container controls.
@@ -106,7 +106,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Require a diff and server-side dry-run before applying edits where supported.
 - Use client-side apply/full-object updates for writes, with Kubernetes resource-version conflicts surfaced to the user.
 - Require stronger confirmation for deletes, evictions, drains, namespace changes, and other destructive operations.
-- Redact Secret values by default and require explicit reveal for sensitive data.
+- Redact Secret values by default outside the browser YAML editor. The editor and its local diffs may render raw Secret values without a reveal gate.
 - Persist a redacted local mutation history in SQLite without Secret values.
 
 ## First Release Native Operations
@@ -262,7 +262,7 @@ Ensure final mutations cannot bypass or reuse an unrelated client-side dry-run r
 - Bind the review to context, group/version/resource, namespace/name, expected resource version, action parameters, and a sanitized body hash where applicable.
 - Require the review handle for the final mutation and reject missing, expired, stale, or mismatched reviews.
 - Invalidate review state after resource refresh, context switch, write-mode reset, or draft/action changes.
-- Preserve existing Secret masking and redaction rules in reviews, diffs, conflicts, logs, and audit history.
+- Preserve Secret masking and redaction outside the browser YAML editor and its local diff. Keep reviews, conflicts, logs, diagnostics, URLs, and audit history redacted.
 - Keep force deletion and automatic conflict overwrites unavailable unless separately approved by the requirements.
 
 ### F8. Local diagnostics and API health visibility (Implemented)
@@ -474,3 +474,30 @@ Keep write-mode selection stable during ordinary navigation while retaining deli
 - Switching the active kubeconfig context must reset write mode to read-only. A later context selection must require an explicit enable action even if that context had previously been used in write mode.
 - Keep the frontend indicator and backend write-mode guard synchronized after every navigation and reset. A view transition must not briefly expose write-only controls based on stale state.
 - Add deterministic coverage for initial bootstrap, enable-and-navigate, dashboard reset, context-switch reset, browser-history navigation, and attempted writes after each reset boundary.
+
+### U17. Monaco YAML editor and native folding (Planned)
+
+Replace the current CodeMirror editor and custom structural folding implementation with a Monaco YAML editor that matches the KubeHaggis field-console visual language.
+
+- Use Monaco's native editor folding controls and commands for YAML mappings and sequences. Do not add a visual cover-up overlay or maintain a second application-specific folding parser.
+- Keep the complete YAML document, local draft, selection, undo history, and mutation payload unchanged when folding or unfolding content.
+- Support nested YAML, native indentation-based folding, keyboard-accessible fold controls, invalid or incomplete YAML, bounded local editor work, and cancellation of stale editor initialization or language work.
+- Preserve existing YAML sanitization, raw Secret values in the editor, schema-form synchronization, read-only behavior, review state, and resource navigation. Keep Secret values masked in non-editor surfaces.
+- Theme the Monaco editor, gutters, syntax tokens, selections, diagnostics, folding controls, and focus treatment with the existing KubeHaggis colors, typography, and responsive layout.
+- Keep the editor browser-local and do not add a Kubernetes request for folding. Monaco initialization and its required workers are hard requirements; if initialization fails, show a blocking editor error and do not fall back to a textarea, CodeMirror, or another editor.
+- Deliver this requirement as the first implementation phase and cover native folding, malformed drafts, keyboard access, draft preservation, resource-detail integration, and initialization failure handling with deterministic tests.
+
+### U18. Monaco side-by-side and inline YAML diff workspace (Planned)
+
+Use Monaco's diff editor to provide the editing and comparison workflows operators expect from a desktop code editor.
+
+- Make single-editor mode the default, showing one editable Monaco editor with change decorations relative to the last accepted baseline. An accessible Compare action opens side-by-side mode.
+- In side-by-side compare mode, show the last synchronized cluster snapshot in a read-only original pane on the left and the current local draft in an editable modified pane on the right.
+- Treat the Monaco modified model as the local draft source of truth. Recompute the diff as the operator edits it and propagate those edits to the existing review, schema-form, refresh, conflict, and mutation state.
+- Clicking a change marker must open a read-only Monaco hunk peek anchored to that change. The main editor remains editable; Escape, clicking the marker again, or selecting another change closes or replaces the peek without losing the draft, caret, selection, fold state, or review state.
+- Preserve the last accepted baseline across ordinary edits. Replace it only after a successful resource load, apply, accepted refresh, or accepted conflict reload; failed operations retain the previous baseline.
+- Use Monaco's native diff alignment, change indicators, folding, and split-view behavior on desktop. On narrow screens, use an anchored diff drawer rather than rendering a long static diff below the editor.
+- Show clear clean, changed, incomplete or invalid, unavailable, computing, and bounded states. A diff is explanatory only and never replaces server-side dry-run review or mutation authorization.
+- Always render raw Secret values in the browser-local editor, side-by-side diff, and hunk peek. Do not add a second masking transform or reveal gate inside the editor or diff. Keep managed fields, raw draft text, and Secret values out of logs, diagnostics, audit history, URLs, generated output, and non-editor review or conflict surfaces.
+- Keep diff computation browser-local, bounded, and safe against stale resource, draft, or baseline work. Retain the current diff budgets of 160,000 source characters, 2,500 lines, and 400,000 work units unless a focused performance test and requirements change expand them. Preserve the complete editable Monaco editor when comparison cannot be generated.
+- Deliver this requirement as the second implementation phase after U17 and cover default single-editor mode, side-by-side editing, live updates, hunk-peek interactions, baseline transitions, anchored responsive behavior, malformed drafts, clean or changed states, and raw editor Secret values with deterministic tests.
