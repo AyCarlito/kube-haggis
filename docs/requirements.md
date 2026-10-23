@@ -35,6 +35,7 @@ The repository contains the completed agreed first-release operation set. The ba
 - Native interactive Pod `exec` and `attach` sessions available in read-only mode with TTY input, resize handling, container selection, and Kubernetes RBAC authorization.
 - Native Pod port-forward sessions with loopback binding, target/local port controls, session lifecycle, and Kubernetes RBAC authorization.
 - Ephemeral debug-container launch through `pods/ephemeralcontainers` and bounded native file download/upload through `pods/exec`.
+- Pod-only live network capture through one reusable `pods/ephemeralcontainers` debug container, pinned netshoot by default, native `pods/exec` tcpdump headers, bounded interface counters, 60-second rolling charts, and a local observed-peer map.
 - Native `metrics.k8s.io/v1beta1` collection with node and Pod CPU/memory usage summaries, freshness states, and responsive overview charts.
 - Discovery-driven related-resource views for owner descendants, selectors, storage bindings, and safe native PodSpec references with explicit partial/RBAC states.
 - Targeted workload operations for scale, restart, pause/resume, rollback, image changes, and Job/CronJob scheduling with dry-run review and confirmation.
@@ -501,3 +502,22 @@ Use Monaco's diff editor to provide the editing and comparison workflows operato
 - Always render raw Secret values in the browser-local editor, side-by-side diff, and hunk peek. Do not add a second masking transform or reveal gate inside the editor or diff. Keep managed fields, raw draft text, and Secret values out of logs, diagnostics, audit history, URLs, generated output, and non-editor review or conflict surfaces.
 - Keep diff computation browser-local, bounded, and safe against stale resource, draft, or baseline work. Retain the current diff budgets of 160,000 source characters, 2,500 lines, and 400,000 work units unless a focused performance test and requirements change expand them. Preserve the complete editable Monaco editor when comparison cannot be generated.
 - Deliver this requirement as the second implementation phase after U17 and cover default single-editor mode, side-by-side editing, live updates, hunk-peek interactions, baseline transitions, anchored responsive behavior, malformed drafts, clean or changed states, and raw editor Secret values with deterministic tests.
+
+### U19. Live Pod network capture (Implemented)
+
+Provide a Pod-local live traffic diagnostic without requiring Prometheus, a service mesh, or a CNI telemetry dependency.
+
+- Add a `Network` tab to existing Pod detail views only. Entering the tab starts a live capture session; leaving the tab cancels the stream and resets the browser session data.
+- Create or reuse one stable `kube-haggis-net` ephemeral debug container per Pod. Keep the container attached after capture stops because Kubernetes cannot remove an ephemeral container independently.
+- Use the pinned multi-architecture `nicolaka/netshoot` image by default, with a server startup override through `-network-debug-image`. Do not use a mutable tag as the default.
+- Require application write mode to create the network debug container. Show explicit write-mode, RBAC, unsupported-subresource, image/runtime, and capability failures in the Network panel without hiding the rest of the Pod detail view.
+- Before adding a new debug container, inspect Pod network isolation and OS settings and run a server-side dry-run of the exact `NET_RAW` ephemeral-container update. If admission, Pod Security, RBAC, `hostNetwork`, or platform checks reject the capture path, show the capability notice and do not mutate the Pod.
+- Execute a fixed `tcpdump` command with packet headers only. Do not expose packet payloads or persist captured traffic in logs, diagnostics, audit history, URLs, or backend-generated output.
+- Combine non-loopback interface counters from the debug namespace with parsed tcpdump peer summaries. Use exact inbound/outbound bytes, packets, errors, and drops for live charts; treat peer payload lengths as bounded diagnostic summaries rather than historical metrics.
+- Show a 60-second rolling bandwidth and packet-rate chart, session totals, a bounded top-flow table, and a Pod-local observed-peer map. Resolve peers to namespace-local Pod names when available and leave unresolved addresses visible as IPs.
+- Aggregate source-port variants into logical peer/protocol/destination-port rows, hide localhost flows by default with an explicit opt-in toggle, and provide an in-app focus overlay for charts, the peer map, and the flow table.
+- Focused charts retain the 60-second live window with hover inspection and display-only pause/resume. Focused maps and tables expose larger peer limits, search, direction filtering, and keyboard-safe Escape/focus-return behavior.
+- Distinguish `No samples received yet` from a flat zero-traffic chart and keep empty peer/map states explicit rather than rendering blank panels.
+- Label the map as observed traffic for the active capture session. Do not infer complete cluster topology, Service traffic, historical traffic, or application request metrics from one Pod-local capture.
+- Enforce a ten-minute backend capture safety limit in addition to frontend lifecycle cancellation and request disconnect cleanup.
+- Cover command parsing, counter-rate reduction, flow bounds, rolling-window trimming, peer identity resolution, lifecycle cancellation, and explicit capability states with deterministic tests.

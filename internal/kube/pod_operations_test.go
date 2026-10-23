@@ -164,6 +164,84 @@ func TestAddEphemeralContainerUsesNativeSubresource(t *testing.T) {
 	}
 }
 
+// TestEnsureNetworkDebugContainerAddsReusableContainer verifies the stable capture container contract.
+func TestEnsureNetworkDebugContainerAddsReusableContainer(t *testing.T) {
+	var update corev1.Pod
+	dryRunSeen := false
+	updateCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/v1/namespaces/default/pods/api" && request.Method == http.MethodGet {
+			pod := &corev1.Pod{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}, ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", ResourceVersion: "7"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "app:latest"}}}}
+			if len(update.Spec.EphemeralContainers) > 0 {
+				pod.Spec.EphemeralContainers = update.Spec.EphemeralContainers
+			}
+			writeTestPod(t, writer, pod)
+			return
+		}
+		if request.URL.Path == "/api/v1/namespaces/default/pods/api/ephemeralcontainers" && request.Method == http.MethodPut {
+			updateCount++
+			if request.URL.Query().Get("dryRun") == "All" {
+				dryRunSeen = true
+			}
+			body, readErr := io.ReadAll(request.Body)
+			if readErr != nil {
+				t.Fatalf("read update: %v", readErr)
+			}
+			decoded, _, decodeErr := protobuf.NewSerializer(scheme.Scheme, scheme.Scheme).Decode(body, nil, &corev1.Pod{})
+			if decodeErr != nil {
+				t.Fatalf("decode update: %v", decodeErr)
+			}
+			update = *decoded.(*corev1.Pod)
+			writeTestPod(t, writer, &update)
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+
+	service := NewService(writeTestKubeconfig(t, server.URL))
+	result, err := service.EnsureNetworkDebugContainer(context.Background(), "test", "default", "api", DefaultNetworkDebugImage)
+	if err != nil {
+		t.Fatalf("ensure network debug container: %v", err)
+	}
+	if result == nil || !result.Created || result.Name != NetworkDebugContainerName || result.Image != DefaultNetworkDebugImage {
+		t.Fatalf("unexpected network container result: %+v", result)
+	}
+	if !dryRunSeen || updateCount != 2 {
+		t.Fatalf("network capability dry-run was not completed before the real update: dryRun=%v updates=%d", dryRunSeen, updateCount)
+	}
+	if len(update.Spec.EphemeralContainers) != 1 || update.Spec.EphemeralContainers[0].Name != NetworkDebugContainerName || update.Spec.EphemeralContainers[0].SecurityContext == nil || update.Spec.EphemeralContainers[0].SecurityContext.Capabilities == nil || len(update.Spec.EphemeralContainers[0].SecurityContext.Capabilities.Add) != 1 || update.Spec.EphemeralContainers[0].SecurityContext.Capabilities.Add[0] != "NET_RAW" {
+		t.Fatalf("unexpected network container security payload: %+v", update.Spec.EphemeralContainers)
+	}
+}
+
+// TestEnsureNetworkDebugContainerRejectsRunAsNonRootBeforeMutation verifies incompatible default images are blocked preflight.
+func TestEnsureNetworkDebugContainerRejectsRunAsNonRootBeforeMutation(t *testing.T) {
+	updated := false
+	runAsNonRoot := true
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/v1/namespaces/default/pods/api" && request.Method == http.MethodGet {
+			writeTestPod(t, writer, &corev1.Pod{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}, ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", ResourceVersion: "7"}, Spec: corev1.PodSpec{SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: &runAsNonRoot}, Containers: []corev1.Container{{Name: "app", Image: "app:latest"}}}})
+			return
+		}
+		if request.URL.Path == "/api/v1/namespaces/default/pods/api/ephemeralcontainers" {
+			updated = true
+			t.Fatalf("ephemeral-container update was attempted after failed preflight")
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+
+	service := NewService(writeTestKubeconfig(t, server.URL))
+	_, err := service.EnsureNetworkDebugContainer(context.Background(), "test", "default", "api", DefaultNetworkDebugImage)
+	if err == nil || !strings.Contains(err.Error(), "non-root-compatible network debug image") {
+		t.Fatalf("expected runAsNonRoot preflight failure, got %v", err)
+	}
+	if updated {
+		t.Fatal("preflight failure mutated the Pod")
+	}
+}
+
 // TestDescribeEphemeralContainerUpdateErrorExplainsUnsupportedAndForbidden verifies operator-facing API errors.
 func TestDescribeEphemeralContainerUpdateErrorExplainsUnsupportedAndForbidden(t *testing.T) {
 	resource := schema.GroupResource{Resource: "pods"}

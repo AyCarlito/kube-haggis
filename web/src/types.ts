@@ -102,6 +102,7 @@ export interface DiagnosticsSessions {
   terminal: number
   logs: number
   portForward: number
+  network: number
   watch: number
 }
 
@@ -929,6 +930,62 @@ export interface PodOperationResponse {
   status: string
   pod: string
   container?: string
+}
+
+/** Identifies one namespace-local Pod IP returned for live network peer labels. */
+export interface NetworkPodIdentity {
+  ip: string
+  name: string
+  namespace: string
+}
+
+/** Acknowledges the reusable network debug container prepared for one Pod. */
+export interface NetworkCapturePrepareResponse {
+  status: string
+  container: string
+  image: string
+  created: boolean
+  peers?: Record<string, NetworkPodIdentity>
+}
+
+/** Contains one exact interface-counter sample derived from the live capture session. */
+export interface NetworkCaptureSample {
+  inboundBytesPerSecond: number
+  outboundBytesPerSecond: number
+  inboundPacketsPerSecond: number
+  outboundPacketsPerSecond: number
+  inboundBytesTotal: number
+  outboundBytesTotal: number
+  inboundPacketsTotal: number
+  outboundPacketsTotal: number
+  inboundErrors: number
+  outboundErrors: number
+  inboundDrops: number
+  outboundDrops: number
+}
+
+/** Contains one cumulative directional flow summary observed by tcpdump. */
+export interface NetworkPeerSnapshot {
+  source: string
+  destination: string
+  sourcePort?: number
+  destinationPort?: number
+  protocol: string
+  packets: number
+  payloadBytes: number
+  lastSeen: string
+}
+
+/** Describes one server-sent event in the live Pod network capture stream. */
+export interface NetworkCaptureEvent {
+  type: 'status' | 'sample' | 'peers' | 'error' | 'closed'
+  state?: string
+  message?: string
+  at?: string
+  container?: string
+  maxDurationSeconds?: number
+  sample?: NetworkCaptureSample
+  peers?: NetworkPeerSnapshot[]
 }
 
 /** Describes one targeted native operation request for a built-in workload. */

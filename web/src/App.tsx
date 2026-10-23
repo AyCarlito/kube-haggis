@@ -29,6 +29,7 @@ import {
   MoreHorizontal,
   Network,
   Pencil,
+  Radio,
   RefreshCw,
   Search,
   Server,
@@ -106,6 +107,7 @@ import { contextBootstrapState, NoContextState } from './bootstrap'
 import { initialWriteModeState, isDashboardRoute, isWriteModeEnabled, reduceWriteMode, type WriteModeAction, type WriteModeState } from './writeMode'
 import { buildYamlDiff, createYamlDiffBaseline, createYamlDiffComputingModel, createYamlDiffUnavailableModel, updateYamlDiffBaseline, type YamlDiffBaseline, type YamlDiffModel } from './yamlDiff'
 import { YamlDiffWorkspace } from './yamlDiffWorkspaceView'
+import { NetworkCaptureView } from './networkCaptureView'
 import type {
   AuditEntry,
   AuditResponse,
@@ -1653,7 +1655,7 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
 
   const discoveryTone = diagnosticsStateTone(response.discovery.state)
   const dependencyReady = response.kubeconfig.state !== 'error' && response.context.state === 'available' && response.discovery.state === 'available' && response.audit.state === 'available'
-  const sessions = response.sessions ?? { terminal: 0, logs: 0, portForward: 0, watch: 0 }
+  const sessions = response.sessions ?? { terminal: 0, logs: 0, portForward: 0, network: 0, watch: 0 }
   const watches = response.watches ?? { active: 0, current: [], recent: [] }
   const requests = response.requests ?? { total: 0, errors: 0, averageDurationMilliseconds: 0, maxDurationMilliseconds: 0, statuses: {}, operations: {}, errorCategories: {} }
   const recentErrors = Array.isArray(response.recentErrors) ? [...response.recentErrors].reverse() : []
@@ -1686,7 +1688,7 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
         <DiagnosticsSummaryCard label="Kubeconfig" value={`r${response.kubeconfig.revision}`} detail={`${titleCase(response.kubeconfig.state)} / ${response.kubeconfig.source || 'unknown source'}`} tone={response.kubeconfig.state === 'error' ? 'warning' : 'good'} icon={<Database size={17} />} />
         <DiagnosticsSummaryCard label="Discovery cache" value={diagnosticsStateLabel(response.discovery.state)} detail={`${response.discovery.itemCount} resources / ${diagnosticsAgeLabel(response.discovery.ageSeconds)}`} tone={discoveryTone} icon={<Box size={17} />} />
         <DiagnosticsSummaryCard label="Audit store" value={diagnosticsStateLabel(response.audit.state)} detail="SQLite mutation history" tone={response.audit.state === 'available' ? 'good' : 'warning'} icon={<History size={17} />} />
-        <DiagnosticsSummaryCard label="Active sessions" value={String(diagnosticsSessionTotal(sessions))} detail={`${sessions.watch} watches / ${sessions.terminal + sessions.logs + sessions.portForward} native streams`} tone={diagnosticsSessionTotal(sessions) ? 'neutral' : 'good'} icon={<Activity size={17} />} />
+        <DiagnosticsSummaryCard label="Active sessions" value={String(diagnosticsSessionTotal(sessions))} detail={`${sessions.watch} watches / ${sessions.terminal + sessions.logs + sessions.portForward + sessions.network} native streams`} tone={diagnosticsSessionTotal(sessions) ? 'neutral' : 'good'} icon={<Activity size={17} />} />
       </section>
 
       <div className="diagnostics-grid">
@@ -1707,6 +1709,7 @@ function DiagnosticsPage({ context, revision }: { context: string; revision: num
             <DiagnosticsSessionCard icon={<TerminalSquare size={16} />} label="Terminal" count={sessions.terminal} detail="Pod exec / attach" />
             <DiagnosticsSessionCard icon={<TerminalSquare size={16} />} label="Logs" count={sessions.logs} detail="Pod log streams" />
             <DiagnosticsSessionCard icon={<Network size={16} />} label="Port-forward" count={sessions.portForward} detail="Loopback forwards" />
+            <DiagnosticsSessionCard icon={<Radio size={16} />} label="Network" count={sessions.network} detail="Live Pod captures" />
             <DiagnosticsSessionCard icon={<Activity size={16} />} label="Watch" count={sessions.watch} detail="SSE Kubernetes watches" />
           </div>
           <div className="diagnostics-panel-note"><LockKeyhole size={14} /> Only counts and safe context/GVR lifecycle metadata are retained.</div>
@@ -1822,6 +1825,7 @@ function normalizeDiagnosticsResponse(value: unknown): DiagnosticsResponse {
       terminal: typeof sessions.terminal === 'number' && Number.isFinite(sessions.terminal) ? sessions.terminal : 0,
       logs: typeof sessions.logs === 'number' && Number.isFinite(sessions.logs) ? sessions.logs : 0,
       portForward: typeof sessions.portForward === 'number' && Number.isFinite(sessions.portForward) ? sessions.portForward : 0,
+      network: typeof sessions.network === 'number' && Number.isFinite(sessions.network) ? sessions.network : 0,
       watch: typeof sessions.watch === 'number' && Number.isFinite(sessions.watch) ? sessions.watch : 0,
     },
     audit: { state: typeof audit.state === 'string' ? audit.state : 'unavailable' },
@@ -1922,7 +1926,7 @@ function formatMilliseconds(value: number): string {
 
 /** Returns the total count of active diagnostics sessions. */
 function diagnosticsSessionTotal(sessions: DiagnosticsResponse['sessions']): number {
-  return sessions.terminal + sessions.logs + sessions.portForward + sessions.watch
+  return sessions.terminal + sessions.logs + sessions.portForward + sessions.network + sessions.watch
 }
 
 /** Converts a watch lifecycle event into safe operator-facing copy. */
@@ -2934,7 +2938,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
   const conflictCurrentYaml = conflict?.currentObject ? boundedConflictText(stringify(isSecret ? redactSecret(sanitizeEditorObject(conflict.currentObject)) : sanitizeEditorObject(conflict.currentObject))) : ''
-  const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
+  const baseDetailTabs = definition.resource === 'events' ? ['overview', 'yaml', 'related'] : definition.resource === 'pods' && !isNew ? ['overview', 'network', 'debug', 'files', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : definition.resource === 'pods' ? ['overview', 'yaml', 'events', 'terminal', 'port-forward', 'logs', 'related'] : ['overview', 'yaml', 'events', 'related']
   const schemaTabs = schemaCandidate ? [baseDetailTabs[0], 'form', ...baseDetailTabs.slice(1)] : baseDetailTabs
   const detailTabs = !isNew ? [schemaTabs[0], ...(isOperationalReadPackResource(definition) ? ['read-pack'] : []), ...((targetedWorkloadResource(definition) || targetedNodeResource(definition) || targetedPVCResource(definition)) ? ['operations'] : []), ...schemaTabs.slice(1)] : schemaTabs
   const resourceNamespace = definition.namespaced ? metadataString(object, 'namespace') || (namespace === 'all' ? '' : namespace) : ''
@@ -2953,8 +2957,9 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
            {tab === 'operations' && targetedWorkloadResource(definition) && <WorkloadActionsPanel key={`workload-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
            {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel key={`node-${refreshEpoch}`} context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
            {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel key={`pvc-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
-     {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
-          {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div><span className={writeEnabled ? 'editor-editable' : 'editor-lock'}>{writeEnabled ? <><Pencil size={13} /> Editable</> : <><LockKeyhole size={13} /> Read-only / enable write mode to edit</>}</span>{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>Raw Secret values are visible in this browser-local editor. Other review and conflict surfaces remain redacted.</span></div>}<YamlDiffWorkspace key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} baseline={yamlDiffBaseline.text} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled} model={yamlDiffModel} diffOpen={yamlDiffOpen} onDiffOpenChange={setYamlDiffOpen} onChange={handleYamlDraftChange} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
+           {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
+           {tab === 'network' && definition.resource === 'pods' && !isNew && <NetworkCaptureView context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
+           {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div><span className={writeEnabled ? 'editor-editable' : 'editor-lock'}>{writeEnabled ? <><Pencil size={13} /> Editable</> : <><LockKeyhole size={13} /> Read-only / enable write mode to edit</>}</span>{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>Raw Secret values are visible in this browser-local editor. Other review and conflict surfaces remain redacted.</span></div>}<YamlDiffWorkspace key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} baseline={yamlDiffBaseline.text} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled} model={yamlDiffModel} diffOpen={yamlDiffOpen} onDiffOpenChange={setYamlDiffOpen} onChange={handleYamlDraftChange} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
        {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}

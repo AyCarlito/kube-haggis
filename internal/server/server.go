@@ -27,26 +27,27 @@ import (
 
 // Server connects HTTP handlers to the Kubernetes service and frontend files.
 type Server struct {
-	kube           *kube.Service
-	webDir         string
-	logger         *slog.Logger
-	audit          *audit.Store
-	overview       func(context.Context, string) (kube.ClusterOverview, error)
-	related        relatedLoader
-	relatedReverse relatedLoader
-	resourceSchema resourceSchemaLoader
-	resourceGet    resourceGetLoader
-	readPack       operationalReadPackLoader
-	resourceApply  resourceApplyLoader
-	resourceDelete resourceDeleteLoader
-	workloadAction workloadActionLoader
-	nodeAction     nodeActionLoader
-	pvcOperations  pvcOperationsLoader
-	pvcAction      pvcActionLoader
-	reviewStoreMu  sync.Mutex
-	reviewStore    *mutationReviewStore
-	diagnosticsMu  sync.Mutex
-	diagnostics    *diagnosticsStore
+	kube              *kube.Service
+	webDir            string
+	networkDebugImage string
+	logger            *slog.Logger
+	audit             *audit.Store
+	overview          func(context.Context, string) (kube.ClusterOverview, error)
+	related           relatedLoader
+	relatedReverse    relatedLoader
+	resourceSchema    resourceSchemaLoader
+	resourceGet       resourceGetLoader
+	readPack          operationalReadPackLoader
+	resourceApply     resourceApplyLoader
+	resourceDelete    resourceDeleteLoader
+	workloadAction    workloadActionLoader
+	nodeAction        nodeActionLoader
+	pvcOperations     pvcOperationsLoader
+	pvcAction         pvcActionLoader
+	reviewStoreMu     sync.Mutex
+	reviewStore       *mutationReviewStore
+	diagnosticsMu     sync.Mutex
+	diagnostics       *diagnosticsStore
 }
 
 // relatedLoader describes the read-only relationship aggregation seam used by the HTTP handler.
@@ -65,8 +66,11 @@ type resourceApplyLoader func(context.Context, string, string, string, string, s
 type resourceDeleteLoader func(context.Context, string, string, string, string, string, string, bool, kube.ResourceDeleteOptions) error
 
 // New creates an HTTP server for the KubeHaggis API.
-func New(kubernetes *kube.Service, webDir string, logger *slog.Logger, auditStore *audit.Store) *Server {
-	return &Server{kube: kubernetes, webDir: webDir, logger: logger, audit: auditStore, reviewStore: newMutationReviewStore(), diagnostics: newDiagnosticsStore()}
+func New(kubernetes *kube.Service, webDir, networkDebugImage string, logger *slog.Logger, auditStore *audit.Store) *Server {
+	if strings.TrimSpace(networkDebugImage) == "" {
+		networkDebugImage = kube.DefaultNetworkDebugImage
+	}
+	return &Server{kube: kubernetes, webDir: webDir, networkDebugImage: networkDebugImage, logger: logger, audit: auditStore, reviewStore: newMutationReviewStore(), diagnostics: newDiagnosticsStore()}
 }
 
 // Handler returns the complete API and frontend HTTP handler tree.
@@ -92,6 +96,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/events/watch", s.handleEventWatch)
 	mux.HandleFunc("/api/logs", s.handleLogs)
 	mux.HandleFunc("/api/pod/debug", s.handleEphemeralContainer)
+	mux.HandleFunc("/api/pod/network/prepare", s.handleNetworkPrepare)
+	mux.HandleFunc("/api/pod/network", s.handleNetworkCapture)
 	mux.HandleFunc("/api/pod/copy", s.handlePodCopy)
 	mux.HandleFunc("/api/workload/action", s.handleWorkloadAction)
 	mux.HandleFunc("/api/node/action", s.handleNodeAction)

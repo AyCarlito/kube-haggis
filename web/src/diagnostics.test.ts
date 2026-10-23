@@ -20,7 +20,7 @@ export function runDiagnosticsModelTests(): void {
     discovery: { context: 'field', revision: 3, state: 'partial', ageSeconds: 7, itemCount: 12, issueCount: 1 },
     watches: { active: 1, current: [], recent: [] },
     recentErrors: [{ at: '2026-10-21T12:00:00Z', category: 'permission-denied', operation: 'watch' }],
-    sessions: { terminal: 1, logs: 0, portForward: 0, watch: 1 },
+    sessions: { terminal: 1, logs: 0, portForward: 0, network: 0, watch: 1 },
     audit: { state: 'available' },
     requests: { total: 4, errors: 1, averageDurationMilliseconds: 3, maxDurationMilliseconds: 9, statuses: { '200': 3, '403': 1 }, operations: { watch: 1 }, errorCategories: { 'permission-denied': 1 } },
   }

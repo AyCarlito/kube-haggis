@@ -4,6 +4,7 @@ import type {
   ContextsResponse,
   DiagnosticsResponse,
   EphemeralContainerRequest,
+  NetworkCapturePrepareResponse,
   PodOperationResponse,
   ResourceDefinition,
   ResourceDeleteItem,
@@ -517,6 +518,22 @@ export function launchEphemeralContainer(context: string, namespace: string, pod
       body: JSON.stringify(request),
     },
   )
+}
+
+/** Creates or reuses the stable network debug container for one Pod. */
+export function prepareNetworkCapture(context: string, namespace: string, pod: string): Promise<NetworkCapturePrepareResponse> {
+  return fetchJson<NetworkCapturePrepareResponse>(
+    apiUrl('/api/pod/network/prepare', { context, namespace, pod }),
+    {
+      method: 'POST',
+      headers: writeRequestHeaders(),
+    },
+  )
+}
+
+/** Builds the live Pod network capture stream URL. */
+export function networkCaptureUrl(context: string, namespace: string, pod: string): string {
+  return apiUrl('/api/pod/network', { context, namespace, pod })
 }
 
 /** Builds the native Pod file-download URL; downloads do not require application write mode. */
