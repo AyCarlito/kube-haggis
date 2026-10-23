@@ -36,12 +36,30 @@ export interface YamlDiffModel {
   summary: YamlDiffSummary
 }
 
+/** Describes one contiguous changed region in the local YAML draft. */
+export interface YamlDiffHunk {
+  id: string
+  kind: Exclude<YamlDiffRowKind, 'context'>
+  originalStartLineNumber: number
+  originalEndLineNumber: number
+  modifiedStartLineNumber: number
+  modifiedEndLineNumber: number
+}
+
+/** Describes the modified-side marker range associated with one YAML hunk. */
+export interface YamlDiffMarker {
+  hunkID: string
+  kind: YamlDiffHunk['kind']
+  startLineNumber: number
+  endLineNumber: number
+}
+
 /** Stores the last accepted cluster snapshot used by the live draft diff. */
 export interface YamlDiffBaseline {
   text: string
 }
 
-/** Selects the responsive diff layout breakpoint shared by the model and CSS. */
+/** Selects the responsive native comparison breakpoint shared by the workspace and CSS. */
 export const YAML_DIFF_DESKTOP_BREAKPOINT = 760
 
 /** Caps the source characters examined by one browser-local comparison. */
@@ -73,9 +91,40 @@ export function createYamlDiffUnavailableModel(): YamlDiffModel {
   return emptyYamlDiffModel('unavailable', 'No synchronized cluster snapshot is available for this resource yet.')
 }
 
-/** Chooses side-by-side presentation for desktop widths and unified presentation for narrow widths. */
-export function yamlDiffLayoutForWidth(width: number): 'side-by-side' | 'unified' {
-  return width > YAML_DIFF_DESKTOP_BREAKPOINT ? 'side-by-side' : 'unified'
+/** Returns whether the bounded model has enough information for native Monaco comparison. */
+export function yamlDiffComparisonAvailable(baseline: string, status: YamlDiffStatus): boolean {
+  return Boolean(baseline.trim()) && (status === 'clean' || status === 'changed' || status === 'invalid')
+}
+
+/** Converts changed diff rows into stable original and modified line ranges for editor UX. */
+export function yamlDiffHunks(model: YamlDiffModel): YamlDiffHunk[] {
+  if (model.status !== 'changed') return []
+  const hunks: YamlDiffHunk[] = []
+  let changedRows: YamlDiffRow[] = []
+
+  /** Flushes the current contiguous changed-row group into one hunk. */
+  function flushChangedRows(): void {
+    if (!changedRows.length) return
+    hunks.push(createYamlDiffHunk(changedRows, hunks.length, model.beforeLineCount, model.afterLineCount))
+    changedRows = []
+  }
+
+  for (const row of model.rows) {
+    if (row.kind === 'context') flushChangedRows()
+    else changedRows.push(row)
+  }
+  flushChangedRows()
+  return hunks
+}
+
+/** Returns only the modified-side line ranges used by Monaco gutter decorations. */
+export function yamlDiffMarkers(model: YamlDiffModel): YamlDiffMarker[] {
+  return yamlDiffHunks(model).map((hunk) => ({
+    hunkID: hunk.id,
+    kind: hunk.kind,
+    startLineNumber: hunk.modifiedStartLineNumber,
+    endLineNumber: hunk.modifiedEndLineNumber,
+  }))
 }
 
 /** Builds a bounded line-level diff from the synchronized snapshot to the local draft. */
@@ -353,4 +402,28 @@ function summarizeYamlDiffRows(rows: YamlDiffRow[]): YamlDiffSummary {
     if (row.kind === 'changed') summary.changes += 1
     return summary
   }, emptyYamlDiffSummary())
+}
+
+/** Creates one hunk from changed rows while anchoring one-sided edits to a valid line. */
+function createYamlDiffHunk(rows: YamlDiffRow[], index: number, beforeLineCount: number, afterLineCount: number): YamlDiffHunk {
+  const originalLines = rows.flatMap((row) => row.before ? [row.before.lineNumber] : [])
+  const modifiedLines = rows.flatMap((row) => row.after ? [row.after.lineNumber] : [])
+  const firstOriginalLine = originalLines[0] ?? clampYamlDiffLine(modifiedLines[0] ?? 1, beforeLineCount)
+  const lastOriginalLine = originalLines[originalLines.length - 1] ?? firstOriginalLine
+  const firstModifiedLine = modifiedLines[0] ?? clampYamlDiffLine(originalLines[0] ?? 1, afterLineCount)
+  const lastModifiedLine = modifiedLines[modifiedLines.length - 1] ?? firstModifiedLine
+  const kind = originalLines.length && modifiedLines.length ? 'changed' : originalLines.length ? 'removed' : 'added'
+  return {
+    id: `yaml-hunk-${index + 1}`,
+    kind,
+    originalStartLineNumber: clampYamlDiffLine(firstOriginalLine, beforeLineCount),
+    originalEndLineNumber: clampYamlDiffLine(lastOriginalLine, beforeLineCount),
+    modifiedStartLineNumber: clampYamlDiffLine(firstModifiedLine, afterLineCount),
+    modifiedEndLineNumber: clampYamlDiffLine(lastModifiedLine, afterLineCount),
+  }
+}
+
+/** Keeps a one-based diff anchor inside the line count of its source model. */
+function clampYamlDiffLine(lineNumber: number, lineCount: number): number {
+  return Math.min(Math.max(1, lineNumber), Math.max(1, lineCount))
 }

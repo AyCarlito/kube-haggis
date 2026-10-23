@@ -12,6 +12,7 @@ export interface YamlMonacoEditorOptions {
   foldingHighlight: boolean
   foldingStrategy: 'indentation'
   showFoldingControls: 'always'
+  glyphMargin: boolean
   largeFileOptimizations: boolean
   foldingMaximumRegions: number
   maxTokenizationLineLength: number
@@ -38,6 +39,18 @@ export function yamlMonacoModelUri(scopeKey: string): string {
   return `inmemory://kube-haggis/yaml/${encodedScope}.yaml`
 }
 
+/** Builds the browser-local URI for the accepted cluster snapshot model. */
+export function yamlMonacoOriginalModelUri(scopeKey: string): string {
+  const encodedScope = encodeURIComponent(scopeKey || 'unscoped')
+  return `inmemory://kube-haggis/yaml/${encodedScope}.baseline.yaml`
+}
+
+/** Builds a disposable browser-local URI for one read-only hunk peek side. */
+export function yamlMonacoHunkModelUri(scopeKey: string, hunkID: string, side: 'original' | 'modified'): string {
+  const encodedScope = encodeURIComponent(`${scopeKey || 'unscoped'}|peek|${hunkID}|${side}`)
+  return `inmemory://kube-haggis/yaml/${encodedScope}.yaml`
+}
+
 /** Returns the native Monaco editor options shared by every YAML resource scope. */
 export function yamlMonacoEditorOptions(readOnly: boolean): YamlMonacoEditorOptions {
   return {
@@ -46,6 +59,7 @@ export function yamlMonacoEditorOptions(readOnly: boolean): YamlMonacoEditorOpti
     foldingHighlight: true,
     foldingStrategy: 'indentation',
     showFoldingControls: 'always',
+    glyphMargin: true,
     largeFileOptimizations: true,
     foldingMaximumRegions: 512,
     maxTokenizationLineLength: 20_000,
@@ -63,4 +77,14 @@ export function yamlMonacoWorkerLabelSupported(label: string): label is YamlMona
 /** Returns a safe blocking message for Monaco or worker initialization failures. */
 export function yamlMonacoInitializationError(_error: unknown): string {
   return 'Monaco YAML editor initialization failed because a required local worker could not start. Reload the page to retry; no alternate editor is available.'
+}
+
+/** Returns a safe blocking message when Monaco cannot initialize the native comparison. */
+export function yamlMonacoComparisonInitializationError(_error: unknown): string {
+  return 'Native Monaco comparison could not initialize. The editable Monaco draft remains available; reload the page to retry. No alternate diff surface is available.'
+}
+
+/** Returns a safe blocking message when a native Monaco hunk peek cannot initialize. */
+export function yamlMonacoHunkPeekInitializationError(_error: unknown): string {
+  return 'Native Monaco hunk peek is unavailable for this change. The editable Monaco draft remains unchanged; reload the page to retry.'
 }

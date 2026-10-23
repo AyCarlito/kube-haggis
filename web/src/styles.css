@@ -1734,3 +1734,411 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
     min-height: var(--control-height-narrow);
   }
 }
+
+/* U18: native Monaco comparison and anchored hunk-peek presentation. */
+.yaml-diff-workspace {
+  position: relative;
+  min-width: 0;
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0b0e0b;
+}
+
+.yaml-diff-workspace-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted-dark);
+  background: rgba(32, 37, 31, .54);
+}
+
+.yaml-diff-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  height: 34px;
+  margin: 0;
+  padding: 0 11px;
+  white-space: nowrap;
+}
+
+.yaml-diff-toggle[aria-pressed='true'] {
+  border-color: rgba(215, 123, 77, .42);
+  color: var(--copper-bright);
+  background: rgba(215, 123, 77, .09);
+}
+
+.yaml-diff-workspace-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+  color: var(--muted-dark);
+  font: var(--type-meta)/var(--leading-copy) var(--mono);
+  text-align: right;
+}
+
+.yaml-diff-workspace-status > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yaml-diff-status.yaml-diff-panel-clean {
+  border-color: rgba(168, 189, 131, .25);
+  color: var(--moss);
+  background: rgba(168, 189, 131, .07);
+}
+
+.yaml-diff-status.yaml-diff-panel-changed {
+  border-color: rgba(215, 123, 77, .28);
+  color: var(--copper-bright);
+  background: rgba(215, 123, 77, .08);
+}
+
+.yaml-diff-status.yaml-diff-panel-invalid,
+.yaml-diff-status.yaml-diff-panel-bounded,
+.yaml-diff-status.yaml-diff-panel-unavailable,
+.yaml-diff-status.yaml-diff-panel-computing {
+  border-color: rgba(230, 182, 111, .25);
+  color: var(--gold);
+  background: rgba(230, 182, 111, .06);
+}
+
+.yaml-diff-workspace-body {
+  position: relative;
+  display: block;
+  height: 430px;
+  min-height: 260px;
+  min-width: 0;
+  overflow: hidden;
+  background: #0b0e0b;
+}
+
+.yaml-diff-workspace-body > .yaml-monaco-editor {
+  height: 100%;
+}
+
+.yaml-monaco-editor {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0e110e;
+}
+
+.yaml-monaco-main-host {
+  height: 100%;
+  min-height: 0;
+}
+
+.yaml-monaco-editor-compare-open.yaml-monaco-editor-desktop:not(.yaml-monaco-editor-comparison-unavailable):not(.yaml-monaco-editor-comparison-error) .yaml-monaco-main-host {
+  display: none;
+}
+
+.yaml-monaco-editor-compare-open.yaml-monaco-editor-narrow .yaml-monaco-main-host,
+.yaml-monaco-editor-comparison-unavailable:not(.yaml-monaco-editor-initialization-error) .yaml-monaco-main-host,
+.yaml-monaco-editor-comparison-error:not(.yaml-monaco-editor-initialization-error) .yaml-monaco-main-host {
+  display: block;
+}
+
+.yaml-monaco-compare-scrim {
+  display: none;
+}
+
+.yaml-monaco-compare-pane {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 0;
+  background: #0b0e0b;
+}
+
+.yaml-monaco-editor-desktop.yaml-monaco-editor-comparison-unavailable .yaml-monaco-compare-pane,
+.yaml-monaco-editor-desktop.yaml-monaco-editor-comparison-error .yaml-monaco-compare-pane {
+  inset: auto 12px 12px auto;
+  width: min(440px, calc(100% - 24px));
+  height: auto;
+  max-height: calc(100% - 24px);
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, .42);
+}
+
+.yaml-monaco-compare-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 0 0 auto;
+  padding: 13px 15px 11px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(13, 17, 13, .98);
+}
+
+.yaml-monaco-compare-heading > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.yaml-monaco-compare-heading strong {
+  color: var(--paper);
+  font-size: 12px;
+}
+
+.yaml-monaco-compare-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.yaml-monaco-compare-copy {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 9px 15px;
+  border-bottom: 1px solid rgba(226, 224, 204, .08);
+  color: var(--muted-dark);
+  font: var(--type-meta)/var(--leading-copy) var(--mono);
+}
+
+.yaml-monaco-compare-close {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: var(--line);
+}
+
+.yaml-monaco-diff-host {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #0b0e0b;
+}
+
+.yaml-monaco-diff-host .monaco-diff-editor,
+.yaml-monaco-diff-host .monaco-editor {
+  font: var(--type-meta)/1.55 var(--mono);
+}
+
+.yaml-monaco-compare-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 14px 15px;
+  padding: 13px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+  color: var(--muted);
+  background: rgba(11, 14, 11, .5);
+}
+
+.yaml-monaco-compare-state > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.yaml-monaco-compare-state strong {
+  color: var(--paper);
+  font-size: 11px;
+}
+
+.yaml-monaco-compare-state span:last-child {
+  font: var(--type-meta)/var(--leading-copy) var(--mono);
+}
+
+.yaml-monaco-compare-state-error {
+  border-color: rgba(230, 182, 111, .28);
+  color: var(--gold);
+  background: rgba(230, 182, 111, .06);
+}
+
+.yaml-monaco-compare-state-error strong {
+  color: var(--paper);
+}
+
+.yaml-monaco-peek-error,
+.yaml-monaco-marker-help {
+  position: absolute;
+  z-index: 5;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(230, 182, 111, .27);
+  border-radius: 5px;
+  color: var(--gold);
+  background: rgba(20, 23, 18, .96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .24);
+  font: var(--type-meta)/var(--leading-copy) var(--mono);
+}
+
+.yaml-monaco-marker-help {
+  border-color: rgba(135, 174, 182, .22);
+  color: var(--muted);
+  background: rgba(13, 17, 13, .94);
+}
+
+.yaml-diff-marker {
+  width: 7px;
+  margin-left: 2px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.yaml-diff-marker-added {
+  background: var(--moss);
+}
+
+.yaml-diff-marker-removed {
+  background: var(--copper);
+}
+
+.yaml-diff-marker-changed {
+  background: var(--copper-bright);
+}
+
+.yaml-diff-line-marker-added {
+  border-left: 2px solid rgba(168, 189, 131, .65);
+}
+
+.yaml-diff-line-marker-removed {
+  border-left: 2px solid rgba(215, 123, 77, .65);
+}
+
+.yaml-diff-line-marker-changed {
+  border-left: 2px solid rgba(240, 154, 98, .75);
+}
+
+.yaml-monaco-hunk-peek {
+  width: min(640px, calc(100vw - 48px));
+  overflow: hidden;
+  border: 1px solid rgba(240, 154, 98, .38);
+  border-radius: 7px;
+  background: #0b0e0b;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, .48);
+}
+
+.yaml-monaco-hunk-peek-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--paper);
+  background: rgba(32, 37, 31, .88);
+  font: var(--type-control)/1.2 var(--mono);
+}
+
+.yaml-monaco-hunk-peek-close {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+}
+
+.yaml-monaco-hunk-peek-summary {
+  display: block;
+  padding: 6px 10px;
+  color: var(--muted-dark);
+  background: rgba(13, 17, 13, .9);
+  font: var(--type-meta)/var(--leading-compact) var(--mono);
+}
+
+.yaml-monaco-hunk-peek-host {
+  height: 174px;
+  min-height: 174px;
+  overflow: hidden;
+}
+
+@media (max-width: 760px) {
+  .yaml-diff-workspace-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .yaml-diff-toggle {
+    width: 100%;
+  }
+
+  .yaml-diff-workspace-status {
+    justify-content: flex-start;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+    text-align: left;
+  }
+
+  .yaml-diff-workspace-status > span:last-child {
+    white-space: normal;
+  }
+
+  .yaml-diff-workspace-body {
+    height: 360px;
+    min-height: 220px;
+  }
+
+  .yaml-monaco-compare-scrim {
+    position: absolute;
+    z-index: 3;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: rgba(5, 7, 5, .66);
+    cursor: default;
+  }
+
+  .yaml-monaco-compare-pane {
+    inset: 8px;
+    z-index: 4;
+    max-height: calc(100% - 16px);
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    box-shadow: 0 16px 38px rgba(0, 0, 0, .42);
+  }
+
+  .yaml-monaco-compare-heading {
+    align-items: flex-start;
+    padding: 11px;
+  }
+
+  .yaml-monaco-compare-copy {
+    padding: 8px 11px;
+    overflow-wrap: anywhere;
+  }
+
+  .yaml-monaco-compare-actions .yaml-diff-status {
+    align-self: center;
+  }
+
+  .yaml-monaco-hunk-peek {
+    width: min(640px, calc(100vw - 28px));
+  }
+}

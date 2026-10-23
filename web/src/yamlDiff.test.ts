@@ -3,7 +3,9 @@ import {
   createYamlDiffBaseline,
   updateYamlDiffBaseline,
   YAML_DIFF_MAX_LINES,
-  yamlDiffLayoutForWidth,
+  yamlDiffComparisonAvailable,
+  yamlDiffHunks,
+  yamlDiffMarkers,
 } from './yamlDiff'
 
 /** Fails a focused YAML diff assertion with a readable message. */
@@ -89,10 +91,27 @@ function testBoundedDraft(): void {
   assertYamlDiff(model.status === 'bounded' && model.rows.length === 0, 'over-budget YAML did not produce an explicit bounded state')
 }
 
-/** Exercises the responsive presentation contract used by the side-by-side and unified renderers. */
-function testResponsivePresentation(): void {
-  assertYamlDiff(yamlDiffLayoutForWidth(1200) === 'side-by-side', 'desktop diff width did not select side-by-side presentation')
-  assertYamlDiff(yamlDiffLayoutForWidth(760) === 'unified' && yamlDiffLayoutForWidth(360) === 'unified', 'narrow diff width did not select unified presentation')
+/** Exercises native comparison eligibility without treating invalid or over-budget states as editor fallbacks. */
+function testNativeComparisonStates(): void {
+  const baseline = 'spec:\n  replicas: 1\n'
+  assertYamlDiff(yamlDiffComparisonAvailable(baseline, 'clean'), 'a clean bounded model was not comparison-ready')
+  assertYamlDiff(yamlDiffComparisonAvailable(baseline, 'changed'), 'a changed bounded model was not comparison-ready')
+  assertYamlDiff(yamlDiffComparisonAvailable(baseline, 'invalid'), 'an invalid draft did not retain native text comparison eligibility')
+  assertYamlDiff(!yamlDiffComparisonAvailable('', 'clean') && !yamlDiffComparisonAvailable(baseline, 'bounded') && !yamlDiffComparisonAvailable(baseline, 'computing'), 'unavailable, bounded, or computing states opened a native comparison')
+}
+
+/** Exercises deterministic hunk grouping and modified-side marker ranges for changed YAML lines. */
+function testHunkMarkers(): void {
+  const baseline = 'spec:\n  replicas: 1\n  strategy: Recreate\n'
+  const draft = 'spec:\n  replicas: 2\n  mode: Active\n'
+  const model = buildYamlDiff(baseline, draft)
+  const hunks = yamlDiffHunks(model)
+  const markers = yamlDiffMarkers(model)
+  assertYamlDiff(hunks.length === 1 && hunks[0].kind === 'changed', 'contiguous changed YAML rows were not grouped into one hunk')
+  assertYamlDiff(hunks[0].originalStartLineNumber === 2 && hunks[0].modifiedStartLineNumber === 2, 'hunk anchors did not retain the changed source lines')
+  assertYamlDiff(markers.length === 1 && markers[0].hunkID === hunks[0].id && markers[0].startLineNumber === 2, 'modified-side marker range did not follow the hunk')
+  const removed = yamlDiffMarkers(buildYamlDiff('spec:\n  replicas: 1\n  strategy: Recreate\n', 'spec:\n  replicas: 1\n'))
+  assertYamlDiff(removed.length === 1 && removed[0].startLineNumber === 2, 'a removed trailing line was not anchored to a valid modified line')
 }
 
 /** Exercises raw Secret values in the browser-local editor diff without a reveal gate. */
@@ -122,7 +141,8 @@ export function runYamlDiffModelTests(): void {
   testBaselineTransitions()
   testMalformedDraft()
   testBoundedDraft()
-  testResponsivePresentation()
+  testNativeComparisonStates()
+  testHunkMarkers()
   testSecretEditorDiff()
   testDiffSanitization()
 }

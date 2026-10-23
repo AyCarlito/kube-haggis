@@ -2644,12 +2644,6 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
   useEffect(() => {
     const diffEpoch = ++yamlDiffEpochRef.current
     let active = true
-    if (!yamlDiffOpen) {
-      setYamlDiffModel(createYamlDiffUnavailableModel())
-      return () => {
-        active = false
-      }
-    }
     setYamlDiffModel(createYamlDiffComputingModel())
     const timeoutID = window.setTimeout(() => {
       if (!active || diffEpoch !== yamlDiffEpochRef.current) return
@@ -2659,7 +2653,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
       active = false
       window.clearTimeout(timeoutID)
     }
-  }, [context, definition.group, definition.version, definition.resource, definition.kind, namespace, name, yamlDiffOpen, yamlDiffBaseline, yamlText])
+  }, [context, definition.group, definition.version, definition.resource, definition.kind, namespace, name, yamlDiffBaseline, yamlText])
 
   useEffect(() => {
     setReviewReady(false)
@@ -2926,6 +2920,15 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
     if (parsed) setObject(sanitizeEditorObject(parsed))
   }
 
+  /** Propagates edits from either Monaco modified pane into draft, form, and review state. */
+  function handleYamlDraftChange(value: string): void {
+    setYamlText(value)
+    setReviewReady(false)
+    setReviewToken(undefined)
+    const parsed = parseResourceObject(value)
+    if (parsed) setObject(sanitizeEditorObject(parsed))
+  }
+
   if (error && !object) return <ConnectionState error={error} />
   if (!object) return <LoadingState label={`Opening ${name}`} />
   const dirty = yamlText !== originalYaml
@@ -2950,7 +2953,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
            {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel key={`node-${refreshEpoch}`} context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
            {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel key={`pvc-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
-        {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>Raw Secret values are visible in this browser-local editor. Other review and conflict surfaces remain redacted.</span></div>}<YamlDiffWorkspace key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled} model={yamlDiffModel} diffOpen={yamlDiffOpen} onDiffOpenChange={setYamlDiffOpen} onChange={(value) => { setYamlText(value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
+         {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>Raw Secret values are visible in this browser-local editor. Other review and conflict surfaces remain redacted.</span></div>}<YamlDiffWorkspace key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} baseline={yamlDiffBaseline.text} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled} model={yamlDiffModel} diffOpen={yamlDiffOpen} onDiffOpenChange={setYamlDiffOpen} onChange={handleYamlDraftChange} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
        {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
