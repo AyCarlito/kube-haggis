@@ -104,7 +104,7 @@ import { resourceRefreshFailed, resourceRefreshIntent, resourceRefreshSucceeded 
 import { contextBootstrapState, NoContextState } from './bootstrap'
 import { initialWriteModeState, isDashboardRoute, isWriteModeEnabled, reduceWriteMode, type WriteModeAction, type WriteModeState } from './writeMode'
 import { buildYamlDiff, createYamlDiffBaseline, createYamlDiffComputingModel, createYamlDiffUnavailableModel, updateYamlDiffBaseline, type YamlDiffBaseline, type YamlDiffModel } from './yamlDiff'
-import { YamlCodeMirrorEditor } from './yamlCodeMirror'
+import { YamlDiffWorkspace } from './yamlDiffWorkspaceView'
 import type {
   AuditEntry,
   AuditResponse,
@@ -2558,52 +2558,6 @@ function BulkDeleteResults({ definition, result }: { definition: ResourceDefinit
   return <div className="bulk-delete-results"><div className="bulk-delete-results-heading"><div><span className="eyebrow"><span className="eyebrow-mark" /> Mutation results</span><strong>{titleCase(definition.resource)} / {result.succeeded} succeeded / {result.failed} failed</strong></div><span className={result.failed ? 'status-pill status-warning' : 'status-pill status-good'}><span />{result.status}</span></div><div className="bulk-result-list">{result.items.map((item) => <div className="bulk-result-row" key={`${item.namespace || ''}/${item.name}`}><span className={item.success ? 'bulk-result-mark bulk-result-success' : 'bulk-result-mark bulk-result-failure'}>{item.success ? <Check size={13} /> : <AlertTriangle size={13} />}</span><div><strong>{item.namespace ? `${item.namespace}/` : ''}{item.name}</strong><span>{item.success ? item.status : item.error || 'delete failed'}</span></div></div>)}</div></div>
 }
 
-/** Renders a read-only live YAML comparison without replacing the editable draft. */
-function YamlDiffPanel({ model }: { model: YamlDiffModel }) {
-  const statusLabel = model.status === 'clean'
-    ? 'Clean'
-    : model.status === 'changed'
-      ? 'Draft differs'
-      : model.status === 'invalid'
-        ? 'Incomplete draft'
-        : model.status === 'bounded'
-          ? 'Bounded'
-          : model.status === 'computing'
-            ? 'Calculating'
-            : 'No snapshot'
-  const statusIcon = model.status === 'clean' ? <Check size={14} /> : model.status === 'computing' ? <LoaderCircle size={14} className="spin" /> : <AlertTriangle size={14} />
-  const changed = model.status === 'changed'
-  return <section id="yaml-diff-panel" className={`yaml-diff-panel yaml-diff-panel-${model.status}`} aria-label="Live YAML draft diff" aria-live="polite">
-    <div className="yaml-diff-heading">
-      <div>
-        <span className="eyebrow"><span className="eyebrow-mark" /> Live draft diff</span>
-        <strong>Cluster snapshot / local draft</strong>
-      </div>
-      <span className="yaml-diff-status">{statusIcon}{statusLabel}</span>
-    </div>
-    <p className="yaml-diff-copy">Read-only, browser-local comparison. It does not review or authorize a mutation.</p>
-    {!changed && <div className="yaml-diff-state"><span className="yaml-diff-state-icon">{statusIcon}</span><div><strong>{statusLabel}</strong><span>{model.message}</span></div></div>}
-    {changed && <>
-      <div className="yaml-diff-summary"><span>{model.message}</span><span>{model.beforeLineCount} snapshot lines / {model.afterLineCount} draft lines</span></div>
-      <div className="yaml-diff-desktop" role="table" aria-label="Side-by-side YAML diff">
-        <div className="yaml-diff-column-heading" role="row"><span role="columnheader">Cluster snapshot</span><span role="columnheader">Local draft</span></div>
-        {model.rows.map((row, index) => <div className={`yaml-diff-row yaml-diff-row-${row.kind}`} role="row" key={`${row.kind}-${index}`}>
-          <div className="yaml-diff-cell" role="cell"><span className="yaml-diff-line-number">{row.before?.lineNumber ?? ''}</span><code>{row.before?.text || ' '}</code></div>
-          <div className="yaml-diff-cell" role="cell"><span className="yaml-diff-line-number">{row.after?.lineNumber ?? ''}</span><code>{row.after?.text || ' '}</code></div>
-        </div>)}
-      </div>
-      <div className="yaml-diff-unified" aria-label="Unified YAML diff">
-        {model.rows.map((row, index) => row.kind === 'changed'
-          ? <div className="yaml-diff-unified-change" key={`${row.kind}-${index}`}>
-            <div className="yaml-diff-unified-line yaml-diff-unified-removed"><span className="yaml-diff-sign">-</span><span className="yaml-diff-line-number">{row.before?.lineNumber ?? ''}</span><code>{row.before?.text || ' '}</code></div>
-            <div className="yaml-diff-unified-line yaml-diff-unified-added"><span className="yaml-diff-sign">+</span><span className="yaml-diff-line-number">{row.after?.lineNumber ?? ''}</span><code>{row.after?.text || ' '}</code></div>
-          </div>
-          : <div className={`yaml-diff-unified-line yaml-diff-unified-${row.kind}`} key={`${row.kind}-${index}`}><span className="yaml-diff-sign">{row.kind === 'added' ? '+' : row.kind === 'removed' ? '-' : ' '}</span><span className="yaml-diff-line-number">{row.after?.lineNumber ?? row.before?.lineNumber ?? ''}</span><code>{row.after?.text || row.before?.text || ' '}</code></div>)}
-      </div>
-    </>}
-  </section>
-}
-
 /** Renders the tabbed detail view for one generic resource. */
 function ResourceDetailPage({ context, namespace, definition, name, revision, reloadEpoch, writeEnabled, onBack, onOpenEvent, onOpenResource }: { context: string; namespace: string; definition: ResourceDefinition; name: string; revision: number; reloadEpoch: number; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
   const [object, setObject] = useState<ResourceObject | null>(null)
@@ -3003,9 +2957,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
            {tab === 'operations' && targetedNodeResource(definition) && <NodeOperationsPanel key={`node-${refreshEpoch}`} context={context} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
            {tab === 'operations' && targetedPVCResource(definition) && <PVCOperationsPanel key={`pvc-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} name={name} object={object} writeEnabled={writeEnabled} reloadEpoch={reloadEpoch} onRefresh={refreshObject} onReviewPending={setOperationReviewPending} />}
      {tab === 'form' && schemaCandidate && <SchemaFormPanel response={resourceSchema} loading={schemaLoading} object={sanitizeEditorObject(object)} isNew={isNew} namespaced={definition.namespaced} namespace={namespace} writeEnabled={writeEnabled} reviewReady={reviewReady} onChange={updateFormObject} onOpenYaml={() => setTab('yaml')} />}
-        {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); setReviewReady(false); setReviewToken(undefined); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); setReviewReady(false); setReviewToken(undefined); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<YamlCodeMirrorEditor key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} onChange={(value) => { setYamlText(value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
-       {tab === 'yaml' && <div className="yaml-diff-toggle-row"><button type="button" className="secondary-button" aria-expanded={yamlDiffOpen} aria-pressed={yamlDiffOpen} aria-controls="yaml-diff-panel" onClick={() => setYamlDiffOpen((open) => !open)}><FileCode2 size={15} /> {yamlDiffOpen ? 'Hide live diff' : 'Show live diff'}</button><span>Compare the local draft with the last synchronized cluster snapshot. This is explanatory only.</span></div>}
-       {tab === 'yaml' && yamlDiffOpen && <YamlDiffPanel model={yamlDiffModel} />}
+        {tab === 'yaml' && <div className="editor-panel"><div className="editor-toolbar"><div><span className="editor-dot" /><strong>{isSecret ? 'Secret YAML' : 'Resource YAML'}</strong><span>{dirty ? 'unsaved changes' : 'synced with cluster'}</span></div><div>{!writeEnabled && <span className="editor-lock"><LockKeyhole size={13} /> Enable write mode to edit</span>}{reviewReady && <span className="review-ready"><Check size={13} /> Dry-run passed</span>}</div></div>{isSecret && <div className="secret-notice"><LockKeyhole size={15} /><span>{secretsRevealed ? 'Secret values are visible in this editor.' : 'Secret values are masked by default.'}</span>{secretsRevealed ? <button className="reveal-button" onClick={() => { setSecretsRevealed(false); setReviewReady(false); setReviewToken(undefined); const safeText = stringify(redactSecret(object)); setYamlText(safeText); setOriginalYaml(safeText) }}>Mask values</button> : <button className="reveal-button" onClick={() => { setSecretsRevealed(true); setReviewReady(false); setReviewToken(undefined); const rawText = stringify(sanitizeEditorObject(object)); setYamlText(rawText); setOriginalYaml(rawText) }}>Reveal values</button>}</div>}<YamlDiffWorkspace key={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} scopeKey={`${context}|${definition.group}|${definition.version}|${definition.resource}|${namespace}|${name}`} value={yamlText} readOnly={!writeEnabled || (isSecret && !secretsRevealed)} model={yamlDiffModel} diffOpen={yamlDiffOpen} onDiffOpenChange={setYamlDiffOpen} onChange={(value) => { setYamlText(value); setReviewReady(false); setReviewToken(undefined); const parsed = parseResourceObject(value); if (parsed) setObject(sanitizeEditorObject(parsed)) }} /><div className="editor-footer"><span><FileCode2 size={14} /> client-side apply / full object update</span>{reviewReady && writeEnabled && <button className="primary-button" onClick={saveChanges} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Apply reviewed changes</button>}</div></div>}
        {tab === 'logs' && definition.resource === 'pods' && <PodLogsPanel context={context} namespace={namespace} pod={name} />}
       {tab === 'terminal' && definition.resource === 'pods' && <PodTerminalPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
       {tab === 'port-forward' && definition.resource === 'pods' && <PodPortForwardPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} />}
