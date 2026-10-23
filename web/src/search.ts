@@ -32,7 +32,7 @@ export function emptySearchQuery(namespace = 'all'): SearchQuery {
 export function normalizeSearchQuery(value: Partial<SearchQuery>): SearchQuery {
   const next: SearchQuery = {
     query: boundedFilter(value.query),
-    group: boundedFilter(value.group),
+    group: searchGroupQueryValue(boundedFilter(value.group)),
     kind: boundedFilter(value.kind),
     resource: boundedFilter(value.resource),
     namespace: boundedFilter(value.namespace) || 'all',
@@ -119,6 +119,19 @@ export function searchGroupOptions(definitions: ResourceDefinition[]): SearchGro
     if (right === 'core') return 1
     return left.localeCompare(right)
   }).map((value) => ({ value, label: value === 'core' ? 'Core API' : value }))
+}
+
+/** Returns the friendly text shown in the editable API-group control. */
+export function searchGroupInputValue(group: string): string {
+  return group.trim().toLowerCase() === 'core' ? 'Core API' : group
+}
+
+/** Converts editable API-group text back to the canonical query value. */
+export function searchGroupQueryValue(value: string): string {
+  const normalized = value.trim()
+  if (!normalized || normalized.toLowerCase() === 'all groups') return ''
+  if (normalized.toLowerCase() === 'core' || normalized.toLowerCase() === 'core api') return 'core'
+  return normalized
 }
 
 /** Returns kind choices limited to the selected API group and annotated with served versions. */
