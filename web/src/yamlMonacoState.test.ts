@@ -20,7 +20,7 @@ function assertYamlMonaco(condition: boolean, message: string): void {
 function testNativeFoldingOptions(): void {
   const editable = yamlMonacoEditorOptions(false)
   const readOnly = yamlMonacoEditorOptions(true)
-  assertYamlMonaco(editable.folding && editable.foldingHighlight && editable.glyphMargin, 'Monaco native folding or change-marker margin was not enabled')
+  assertYamlMonaco(editable.contextmenu && editable.find.seedSearchStringFromSelection === 'always' && editable.folding && editable.foldingHighlight && editable.glyphMargin, 'Monaco context menu, find behavior, or change-marker margin was not enabled')
   assertYamlMonaco(editable.foldingStrategy === 'indentation' && editable.showFoldingControls === 'always', 'Monaco did not use accessible indentation folding controls')
   assertYamlMonaco(editable.largeFileOptimizations && editable.foldingMaximumRegions === 512 && editable.maxTokenizationLineLength === 20_000 && editable.stopRenderingLineAfter === 10_000, 'Monaco bounded rendering safeguards were not enabled')
   assertYamlMonaco(!editable.readOnly && !editable.domReadOnly && readOnly.readOnly && readOnly.domReadOnly, 'Monaco read-only options did not follow the resource write mode')

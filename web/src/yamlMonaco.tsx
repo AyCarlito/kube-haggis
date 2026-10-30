@@ -19,6 +19,10 @@ import {
 } from './yamlMonacoState'
 import 'monaco-editor/languages/definitions/yaml/register'
 import 'monaco-editor/esm/vs/base/browser/ui/codicons/codicon/codicon.css'
+import 'monaco-editor/esm/vs/editor/contrib/clipboard/browser/clipboard.js'
+import 'monaco-editor/esm/vs/editor/contrib/contextmenu/browser/contextmenu.js'
+import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController.js'
+import 'monaco-editor/esm/vs/editor/contrib/format/browser/formatActions.js'
 import 'monaco-editor/esm/vs/editor/contrib/folding/browser/folding.js'
 
 /** Identifies the constructor shape emitted by Vite for a browser worker module. */
@@ -152,7 +156,7 @@ function configureYamlLanguage(): void {
   if (yamlLanguageService) return
   yamlLanguageService = configureMonacoYaml(monaco, {
     enableSchemaRequest: false,
-    format: { enable: false },
+    format: { enable: true },
     isKubernetes: true,
     validate: true,
   })
