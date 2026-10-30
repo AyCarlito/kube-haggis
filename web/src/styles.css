@@ -2380,3 +2380,9 @@ h1 { margin-top: 15px; color: var(--paper); font-size: clamp(30px, 4vw, 50px); l
     width: min(640px, calc(100vw - 28px));
   }
 }
+
+/* Resource destinations remain real links so browser tab and modifier-click behavior works. */
+.resource-name, .search-result-name, .catalog-row, .relationship-row-link { text-decoration: none; }
+.resource-name:focus-visible, .search-result-name:focus-visible, .catalog-row:focus-visible, .relationship-row-link:focus-visible { outline: 2px solid var(--copper-bright); outline-offset: 3px; }
+.relationship-row-link { width: 100%; color: inherit; text-align: left; cursor: pointer; transition: background .17s ease; }
+.relationship-row-link:hover { background: rgba(215,123,77,.055); }

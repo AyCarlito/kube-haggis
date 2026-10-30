@@ -109,6 +109,7 @@ import { buildYamlDiff, createYamlDiffBaseline, createYamlDiffComputingModel, cr
 import { YamlDiffWorkspace } from './yamlDiffWorkspaceView'
 import { NetworkCaptureView } from './networkCaptureView'
 import { SearchCombobox, type SearchComboboxOption } from './searchCombobox'
+import { terminalClipboardAction } from './terminalInput'
 import type {
   AuditEntry,
   AuditResponse,
@@ -528,7 +529,7 @@ export default function App() {
   ) : route.view === 'search' ? (
     <GlobalSearchPage context={selectedContext} namespace={selectedNamespace} revision={contextRevision} searchKey={route.search || ''} definitions={definitions} catalog={catalog} catalogLoading={catalogLoading} onNamespace={changeNamespace} onOpen={(result) => navigate(searchResultResourcePath(result), result.resource, result.name, result.namespace || undefined)} />
   ) : route.view === 'catalog' ? (
-    <ResourceCatalogPage catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} onOpen={(definition) => navigate(catalogResourcePath(definition), definition.resource)} />
+    <ResourceCatalogPage context={selectedContext} namespace={selectedNamespace} catalog={catalog} loading={catalogLoading} error={catalogError} onRetry={retryCatalog} />
   ) : bootstrapState === 'setup' ? (
     <SetupState error={contexts.error} />
   ) : route.view === 'workloads' ? (
@@ -552,7 +553,6 @@ export default function App() {
       reloadEpoch={kubeconfigReloadEpoch}
       onBack={() => navigate(catalogResourcePath(activeDefinition), activeDefinition.resource)}
       onOpenEvent={(event) => navigate(catalogEventResourcePath(definitions, event.name), 'events', event.name, event.namespace || undefined)}
-      onOpenResource={(definition, resourceName, resourceNamespace) => navigate(catalogResourcePath(definition, resourceName), definition.resource, resourceName, resourceNamespace)}
     />
   ) : route.resource && activeDefinition ? (
     <ResourceListPage
@@ -1115,7 +1115,7 @@ function DiscoveryNotice({ catalog, loading, error, onRetry }: { catalog: Resour
 }
 
 /** Renders the complete grouped API resource catalog without truncating large CRD sets. */
-function ResourceCatalogPage({ catalog, loading, error, onRetry, onOpen }: { catalog: ResourceCatalogResponse | null; loading: boolean; error: string; onRetry: () => void; onOpen: (definition: ResourceDefinition) => void }) {
+function ResourceCatalogPage({ context, namespace, catalog, loading, error, onRetry }: { context: string; namespace: string; catalog: ResourceCatalogResponse | null; loading: boolean; error: string; onRetry: () => void }) {
   const [filter, setFilter] = useState('')
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
 
@@ -1151,17 +1151,17 @@ function ResourceCatalogPage({ catalog, loading, error, onRetry, onOpen }: { cat
       const expanded = filterActive || collapsedGroups[group] !== false
       const headingID = `catalog-group-heading-${groupIndex}`
       const contentID = `catalog-group-content-${groupIndex}`
-      return <section className="catalog-group" key={group} aria-labelledby={headingID}><div className="catalog-group-heading"><span className="panel-eyebrow">API group</span><h2 id={headingID}>{groupLabel}</h2><code>{versions.reduce((total, version) => total + version.definitions.length, 0)} resources</code><button type="button" className="catalog-group-toggle" aria-expanded={expanded} aria-controls={contentID} aria-label={filterActive ? `${groupLabel} API group is expanded while filtering` : `${expanded ? 'Collapse' : 'Expand'} ${groupLabel} API group`} disabled={filterActive} onClick={() => toggleGroup(group)}><ChevronDown size={16} aria-hidden="true" /></button></div><div id={contentID} hidden={!expanded}>{versions.map(({ version, definitions }) => <div className="catalog-version" key={`${group}/${version}`}><div className="catalog-version-heading"><strong>{version}</strong><span>{definitions.length} top-level resource{definitions.length === 1 ? '' : 's'}</span></div><div className="catalog-table"><div className="catalog-table-heading"><span>Resource</span><span>Kind</span><span>Scope</span><span>Discovery</span><span>Capabilities</span></div>{definitions.map((definition) => <CatalogResourceRow key={`${definition.group}/${definition.version}/${definition.resource}`} definition={definition} onOpen={onOpen} />)}</div></div>)}</div></section>
+       return <section className="catalog-group" key={group} aria-labelledby={headingID}><div className="catalog-group-heading"><span className="panel-eyebrow">API group</span><h2 id={headingID}>{groupLabel}</h2><code>{versions.reduce((total, version) => total + version.definitions.length, 0)} resources</code><button type="button" className="catalog-group-toggle" aria-expanded={expanded} aria-controls={contentID} aria-label={filterActive ? `${groupLabel} API group is expanded while filtering` : `${expanded ? 'Collapse' : 'Expand'} ${groupLabel} API group`} disabled={filterActive} onClick={() => toggleGroup(group)}><ChevronDown size={16} aria-hidden="true" /></button></div><div id={contentID} hidden={!expanded}>{versions.map(({ version, definitions }) => <div className="catalog-version" key={`${group}/${version}`}><div className="catalog-version-heading"><strong>{version}</strong><span>{definitions.length} top-level resource{definitions.length === 1 ? '' : 's'}</span></div><div className="catalog-table"><div className="catalog-table-heading"><span>Resource</span><span>Kind</span><span>Scope</span><span>Discovery</span><span>Capabilities</span></div>{definitions.map((definition) => <CatalogResourceRow key={`${definition.group}/${definition.version}/${definition.resource}`} definition={definition} href={routeHref(catalogResourcePath(definition), context, namespace)} />)}</div></div>)}</div></section>
     })}</div>}
   </div>
 }
 
 /** Renders one complete GVR row with verbs, aliases, categories, and subresources. */
-function CatalogResourceRow({ definition, onOpen }: { definition: ResourceDefinition; onOpen: (definition: ResourceDefinition) => void }) {
+function CatalogResourceRow({ definition, href }: { definition: ResourceDefinition; href: string }) {
   const scope = definition.scope || (definition.namespaced ? 'Namespaced' : 'Cluster')
   const subresources = definition.subresources ?? []
   const custom = definition.customResourceCapabilities
-  return <button type="button" className="catalog-row" onClick={() => onOpen(definition)}><span className="catalog-resource-cell"><strong>{definition.resource}</strong><code>{definition.group ? `${definition.group}/${definition.version}` : definition.version}</code></span><span className="catalog-kind-cell">{definition.kind || 'Unknown kind'}</span><span><span className={`catalog-scope catalog-scope-${scope.toLowerCase()}`}>{scope}</span></span><span className="catalog-meta-cell"><span className="catalog-chip-list">{(definition.verbs ?? []).map((verb) => <code key={verb}>{verb}</code>)}</span>{definition.shortNames?.length ? <small>aliases: {definition.shortNames.join(', ')}</small> : null}{definition.categories?.length ? <small>categories: {definition.categories.join(', ')}</small> : null}{custom ? <><small>CRD / {customResourceCapabilityLabel(custom)}</small><span className="catalog-chip-list">{custom.statusSubresource && <code>status</code>}{custom.scaleSubresource && <code>scale</code>}{custom.printerColumns?.length ? <code>{custom.printerColumns.length} printer columns</code> : null}</span></> : null}</span><span className="catalog-meta-cell">{subresources.length ? <span className="catalog-chip-list">{subresources.map((subresource) => <code key={subresource.name}>{subresource.name}</code>)}</span> : <small>No discovered subresources</small>}{subresources.map((subresource) => <small key={`${subresource.name}-verbs`}>{subresource.name}: {(subresource.verbs ?? []).join(', ') || 'verbs not advertised'}</small>)}{custom?.printerColumnWarnings?.length ? <small>Some printer columns use the generic table fallback.</small> : null}</span></button>
+  return <a className="catalog-row" href={href}><span className="catalog-resource-cell"><strong>{definition.resource}</strong><code>{definition.group ? `${definition.group}/${definition.version}` : definition.version}</code></span><span className="catalog-kind-cell">{definition.kind || 'Unknown kind'}</span><span><span className={`catalog-scope catalog-scope-${scope.toLowerCase()}`}>{scope}</span></span><span className="catalog-meta-cell"><span className="catalog-chip-list">{(definition.verbs ?? []).map((verb) => <code key={verb}>{verb}</code>)}</span>{definition.shortNames?.length ? <small>aliases: {definition.shortNames.join(', ')}</small> : null}{definition.categories?.length ? <small>categories: {definition.categories.join(', ')}</small> : null}{custom ? <><small>CRD / {customResourceCapabilityLabel(custom)}</small><span className="catalog-chip-list">{custom.statusSubresource && <code>status</code>}{custom.scaleSubresource && <code>scale</code>}{custom.printerColumns?.length ? <code>{custom.printerColumns.length} printer columns</code> : null}</span></> : null}</span><span className="catalog-meta-cell">{subresources.length ? <span className="catalog-chip-list">{subresources.map((subresource) => <code key={subresource.name}>{subresource.name}</code>)}</span> : <small>No discovered subresources</small>}{subresources.map((subresource) => <small key={`${subresource.name}-verbs`}>{subresource.name}: {(subresource.verbs ?? []).join(', ') || 'verbs not advertised'}</small>)}{custom?.printerColumnWarnings?.length ? <small>Some printer columns use the generic table fallback.</small> : null}</span></a>
 }
 
 /** Renders a retryable resource-catalog failure without substituting a guessed resource. */
@@ -1417,7 +1417,7 @@ function GlobalSearchPage({ context, namespace, revision, searchKey, definitions
           {loading && !response && <div className="search-loading"><LoaderCircle size={18} className="spin" /> Reading bounded search sources</div>}
           {loading && response && <div className="search-refresh-strip"><LoaderCircle size={14} className="spin" /> Refreshing this submitted search; the previous bounded result remains visible.</div>}
           {response && <SearchSourcesPanel sources={response.sources} issues={response.issues} />}
-          {response && response.items.length > 0 && <SearchResultTable items={response.items} onOpen={onOpen} />}
+           {response && response.items.length > 0 && <SearchResultTable context={context} namespace={namespace} items={response.items} onOpen={onOpen} />}
           {response && <SearchPagination response={response} pageIndex={pageIndex} pageSize={pageSize} loading={loading} onPageSize={changePageSize} onPrevious={previousSearchPage} onNext={nextSearchPage} />}
           {response && !response.items.length && !response.hasMore && !loading && <SearchNoResults response={response} />}
           {!response && !loading && <div className="search-landing panel"><span className="search-landing-mark"><BookmarkPlus size={21} /></span><strong>Ready for a deliberate scan</strong><span>Use a name, kind, resource, namespace, or label selector, then run the search. No Kubernetes list calls happen while you type.</span></div>}
@@ -1459,8 +1459,8 @@ function SearchPagination({ response, pageIndex, pageSize, loading, onPageSize, 
 }
 
 /** Renders bounded safe summaries with canonical full-GVR navigation. */
-function SearchResultTable({ items, onOpen }: { items: SearchResult[]; onOpen: (result: SearchResult) => void }) {
-  return <section className="search-results panel"><div className="search-results-heading"><div><span className="panel-eyebrow">Safe coordinates</span><h2>Search results</h2></div><span>{items.length} returned</span></div><div className="search-results-wrap"><table className="search-results-table"><thead><tr><th>Object</th><th>API identity</th><th>Namespace</th><th>State</th><th>Labels</th><th /></tr></thead><tbody>{items.map((item) => <tr key={searchResultKey(item)} onClick={() => onOpen(item)}><td><button type="button" className="search-result-name" onClick={(event) => { event.stopPropagation(); onOpen(item) }}>{item.name || 'Unnamed'}</button><span className="search-result-kind">{item.kind}</span></td><td><code>{item.group ? `${item.group}/${item.version}` : item.version}</code><span>{item.resource}</span></td><td>{item.namespace || 'cluster'}</td><td><span className={`status-pill status-${resourceStatusTone(item.status)}`}><span />{item.status || 'Unknown'}{item.ready ? ` / ${item.ready}` : ''}</span></td><td><div className="label-stack">{Object.entries(item.labels ?? {}).slice(0, 2).map(([key, value]) => <span key={key}>{key}={value}</span>)}{!Object.keys(item.labels ?? {}).length && <span>—</span>}</div></td><td><ArrowUpRight size={15} className="search-result-open" /></td></tr>)}</tbody></table></div><div className="search-results-footer"><span><Search size={13} /> Results contain coordinates and summaries only; open YAML/detail for the complete generic fallback.</span><span>Click a row to open its canonical route.</span></div></section>
+function SearchResultTable({ context, namespace, items, onOpen }: { context: string; namespace: string; items: SearchResult[]; onOpen: (result: SearchResult) => void }) {
+  return <section className="search-results panel"><div className="search-results-heading"><div><span className="panel-eyebrow">Safe coordinates</span><h2>Search results</h2></div><span>{items.length} returned</span></div><div className="search-results-wrap"><table className="search-results-table"><thead><tr><th>Object</th><th>API identity</th><th>Namespace</th><th>State</th><th>Labels</th><th /></tr></thead><tbody>{items.map((item) => <tr key={searchResultKey(item)} onClick={(event) => { const target = event.target; if (target instanceof Element && target.closest('a,button')) return; onOpen(item) }}><td><a className="search-result-name" href={routeHref(searchResultResourcePath(item), context, item.namespace || namespace)}>{item.name || 'Unnamed'}</a><span className="search-result-kind">{item.kind}</span></td><td><code>{item.group ? `${item.group}/${item.version}` : item.version}</code><span>{item.resource}</span></td><td>{item.namespace || 'cluster'}</td><td><span className={`status-pill status-${resourceStatusTone(item.status)}`}><span />{item.status || 'Unknown'}{item.ready ? ` / ${item.ready}` : ''}</span></td><td><div className="label-stack">{Object.entries(item.labels ?? {}).slice(0, 2).map(([key, value]) => <span key={key}>{key}={value}</span>)}{!Object.keys(item.labels ?? {}).length && <span>—</span>}</div></td><td><ArrowUpRight size={15} className="search-result-open" /></td></tr>)}</tbody></table></div><div className="search-results-footer"><span><Search size={13} /> Results contain coordinates and summaries only; open YAML/detail for the complete generic fallback.</span><span>Click a row to open its canonical route.</span></div></section>
 }
 
 /** Renders the explicit empty, denied, unavailable, or error search state. */
@@ -2443,7 +2443,7 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
           {loading && !response ? <tr><td colSpan={tableColumnCount}><div className="table-loading"><LoaderCircle size={18} className="spin" /> Reading API objects</div></td></tr> : null}
            {!loading && !response ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><AlertTriangle size={20} /><strong>Resource data unavailable</strong><span>Waiting for a successful Kubernetes refresh.</span></div></td></tr> : null}
            {!loading && response && !filtered.length ? <tr><td colSpan={tableColumnCount}><div className="table-empty"><Box size={20} /><strong>No matching objects</strong><span>Try a different local filter or label selector.</span></div></td></tr> : null}
-          {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} columns={visibleColumnDefinitions.map((column) => column.key)} printerColumns={printerColumns} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
+           {filtered.map((item) => <ResourceRow key={resourceItemKey(item)} item={item} href={routeHref(catalogResourcePath(definition, item.name), context, definition.namespaced && namespace === 'all' ? item.namespace || namespace : namespace)} columns={visibleColumnDefinitions.map((column) => column.key)} printerColumns={printerColumns} selected={selectedKeys.includes(resourceItemKey(item))} selectionDisabled={selectionLocked} onToggle={toggleSelection} onOpen={onOpen} />)}
         </tbody></table>
       </div>
        <div className="table-footer resource-pagination"><span>Showing {filtered.length} of {response?.items.length ?? 0} on page {pageIndex + 1}{response?.continue ? ' / more available' : ''}</span><div className="pagination-controls"><label>Rows <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{resourcePageSizes.map((size) => <option value={size} key={size}>{size}</option>)}</select></label><button type="button" className="secondary-button" onClick={previousPage} disabled={pageIndex === 0 || loading}><ChevronLeft size={14} /> Previous</button><button type="button" className="secondary-button" onClick={nextPage} disabled={!response?.continue || loading}>Next <ChevronRight size={14} /></button></div><span><span className="table-footer-dot" /> {watchSnapshot.state === 'live' ? 'updates arrive through the Kubernetes watch' : freshnessFooterLabel(watchSnapshot.state)}</span></div>
@@ -2452,8 +2452,8 @@ function ResourceListPage({ context, namespace, definition, revision, reloadEpoc
 }
 
 /** Renders one row in the generic resource table. */
-function ResourceRow({ item, columns, printerColumns, selected, selectionDisabled, onToggle, onOpen }: { item: ResourceSummary; columns: ResourceColumnKey[]; printerColumns: CustomResourcePrinterColumn[]; selected: boolean; selectionDisabled: boolean; onToggle: (item: ResourceSummary, checked: boolean) => void; onOpen: (name: string, namespace?: string) => void }) {
-  return <tr className={selected ? 'resource-row-selected' : ''} onClick={() => onOpen(item.name, item.namespace)}><td><input className="table-checkbox" type="checkbox" checked={selected} disabled={selectionDisabled} aria-label={`Select ${item.name}`} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggle(item, event.target.checked)} /></td>{columns.map((column) => <td key={column}>{renderResourceCell(column, item, onOpen)}</td>)}{printerColumns?.map((column) => <td key={`printer-${column.name}`}><code className="printer-column-cell">{printerColumnDisplay(item, column.name)}</code></td>)}<td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
+function ResourceRow({ item, href, columns, printerColumns, selected, selectionDisabled, onToggle, onOpen }: { item: ResourceSummary; href: string; columns: ResourceColumnKey[]; printerColumns: CustomResourcePrinterColumn[]; selected: boolean; selectionDisabled: boolean; onToggle: (item: ResourceSummary, checked: boolean) => void; onOpen: (name: string, namespace?: string) => void }) {
+  return <tr className={selected ? 'resource-row-selected' : ''} onClick={(event) => { const target = event.target; if (target instanceof Element && target.closest('a,button,input,select,textarea')) return; onOpen(item.name, item.namespace) }}><td><input className="table-checkbox" type="checkbox" checked={selected} disabled={selectionDisabled} aria-label={`Select ${item.name}`} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggle(item, event.target.checked)} /></td>{columns.map((column) => <td key={column}>{renderResourceCell(column, item, href)}</td>)}{printerColumns?.map((column) => <td key={`printer-${column.name}`}><code className="printer-column-cell">{printerColumnDisplay(item, column.name)}</code></td>)}<td><button className="icon-button row-menu" aria-label={`Actions for ${item.name}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={16} /></button></td></tr>
 }
 
 /** Builds the server query identity used to invalidate stale continuation tokens. */
@@ -2524,10 +2524,10 @@ function sortResourceItems(items: ResourceSummary[], key: ResourceSortKey, direc
 }
 
 /** Renders one configurable generic summary cell with safe fallbacks for missing fields. */
-function renderResourceCell(column: ResourceColumnKey, item: ResourceSummary, onOpen: (name: string, namespace?: string) => void): ReactNode {
+function renderResourceCell(column: ResourceColumnKey, item: ResourceSummary, href: string): ReactNode {
   switch (column) {
     case 'name':
-      return <><button className="resource-name" onClick={(event) => { event.stopPropagation(); onOpen(item.name, item.namespace) }}>{item.name || 'Unnamed'}</button><span className="resource-uid">{typeof item.uid === 'string' && item.uid ? item.uid.slice(0, 12) : 'no uid'}</span></>
+      return <><a className="resource-name" href={href}>{item.name || 'Unnamed'}</a><span className="resource-uid">{typeof item.uid === 'string' && item.uid ? item.uid.slice(0, 12) : 'no uid'}</span></>
     case 'namespace':
       return <span className="namespace-cell">{item.namespace || 'cluster'}</span>
     case 'status': {
@@ -2571,7 +2571,7 @@ function BulkDeleteResults({ definition, result }: { definition: ResourceDefinit
 }
 
 /** Renders the tabbed detail view for one generic resource. */
-function ResourceDetailPage({ context, namespace, definition, name, revision, reloadEpoch, writeEnabled, onBack, onOpenEvent, onOpenResource }: { context: string; namespace: string; definition: ResourceDefinition; name: string; revision: number; reloadEpoch: number; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
+function ResourceDetailPage({ context, namespace, definition, name, revision, reloadEpoch, writeEnabled, onBack, onOpenEvent }: { context: string; namespace: string; definition: ResourceDefinition; revision: number; name: string; reloadEpoch: number; writeEnabled: boolean; onBack: () => void; onOpenEvent: (event: EventSummary) => void }) {
   const [object, setObject] = useState<ResourceObject | null>(null)
   const [yamlText, setYamlText] = useState('')
   const [originalYaml, setOriginalYaml] = useState('')
@@ -2952,7 +2952,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
 
   return <div className="detail-page">
     <div className="detail-breadcrumb"><button className="back-link" onClick={onBack}>← {titleCase(definition.resource)}</button><span>/</span><strong>{isNew ? 'new' : name}</strong></div>
-      <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span>{!isNew && <button type="button" className="secondary-button" disabled={refreshLoading || saving || refreshConfirmationOpen} onClick={requestResourceRefresh} aria-label="Refresh resource" title="Read the current resource from Kubernetes">{refreshLoading ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />} {refreshLoading ? 'Refreshing' : 'Refresh'}</button>}<button type="button" className="secondary-button" disabled={!writeEnabled || !dirty || saving || refreshLoading || refreshConfirmationOpen || Boolean(conflict)} onClick={() => void reviewChanges}><ShieldCheck size={15} /> Review changes</button></div></section>
+       <section className="detail-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {isNew ? 'Create resource' : 'Resource detail'}</div><h1>{isNew ? `New ${definition.kind}` : name}</h1><p>{definition.kind} / {namespace === 'all' || !definition.namespaced ? 'cluster-scoped' : namespace}</p></div><div className="detail-actions"><span className="status-pill status-good"><span /> {isNew ? 'draft' : 'loaded'}</span>{!isNew && <button type="button" className="secondary-button" disabled={refreshLoading || saving || refreshConfirmationOpen} onClick={requestResourceRefresh} aria-label="Refresh resource" title="Read the current resource from Kubernetes">{refreshLoading ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />} {refreshLoading ? 'Refreshing' : 'Refresh'}</button>}<button type="button" className="secondary-button" disabled={!writeEnabled || !dirty || saving || refreshLoading || refreshConfirmationOpen || Boolean(conflict)} onClick={() => void reviewChanges()}><ShieldCheck size={15} /> Review changes</button></div></section>
       {definition.customResourceCapabilities && <CustomResourceCapabilityPanel capabilities={definition.customResourceCapabilities} />}
       {!isNew && <DeleteReviewPanel key={`delete-${refreshEpoch}`} context={context} namespace={resourceNamespace || namespace} definition={definition} name={name} resourceVersion={metadataString(object, 'resourceVersion')} writeEnabled={writeEnabled} onDeleted={onBack} onReviewPending={setDeleteReviewPending} />}
       {refreshConfirmationOpen && <section className="detail-refresh-confirmation" role="alertdialog" aria-label="Confirm resource refresh"><div><strong>Replace local draft?</strong><span>Refreshing replaces the unsaved YAML or form changes and clears any pending review. The current route and detail tab will stay open.</span></div><div><button type="button" className="secondary-button" onClick={() => setRefreshConfirmationOpen(false)} disabled={refreshLoading}>Keep local draft</button><button type="button" className="primary-button" onClick={() => void runResourceRefresh()} disabled={refreshLoading}>{refreshLoading ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />} {refreshLoading ? 'Refreshing' : 'Refresh and replace draft'}</button></div></section>}
@@ -2973,7 +2973,7 @@ function ResourceDetailPage({ context, namespace, definition, name, revision, re
        {tab === 'debug' && definition.resource === 'pods' && !isNew && <PodDebugPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} onRefresh={refreshObject} />}
       {tab === 'files' && definition.resource === 'pods' && !isNew && <PodFileCopyPanel context={context} namespace={resourceNamespace || namespace} pod={name} object={object} writeEnabled={writeEnabled} />}
       {tab === 'events' && <ResourceEventsPanel context={context} namespace={namespace} uid={metadataString(object, 'uid')} revision={revision} reloadEpoch={reloadEpoch} onOpenEvent={onOpenEvent} />}
-      {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} onOpenResource={onOpenResource} />}
+      {tab === 'related' && <RelatedResourcesPanel context={context} definition={definition} namespace={resourceNamespace} name={name} isNew={isNew} />}
  </div>
 }
 
@@ -3534,7 +3534,7 @@ function DeleteReviewPanel({ context, namespace, definition, name, resourceVersi
 }
 
 /** Renders discovery-backed relationships and explicit read limitations for a resource. */
-function RelatedResourcesPanel({ context, definition, namespace, name, isNew, onOpenResource }: { context: string; definition: ResourceDefinition; namespace: string; name: string; isNew: boolean; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
+function RelatedResourcesPanel({ context, definition, namespace, name, isNew }: { context: string; definition: ResourceDefinition; namespace: string; name: string; isNew: boolean }) {
   const [response, setResponse] = useState<RelatedResourcesResponse | null>(null)
   const [reverseResponse, setReverseResponse] = useState<RelatedResourcesResponse | null>(null)
   const [loading, setLoading] = useState(!isNew)
@@ -3607,7 +3607,7 @@ function RelatedResourcesPanel({ context, definition, namespace, name, isNew, on
       {displayedResponse?.diagnostics && <div className="panel-note"><Activity size={13} /> {displayedResponse.diagnostics.queryCount}/{displayedResponse.diagnostics.queryBudget} relationship reads · {displayedResponse.diagnostics.durationMilliseconds} ms · {displayedResponse.diagnostics.concurrentLimit} concurrent max</div>}
     </div>
     {notices.length ? <div className="relationship-notices">{notices.map((notice, index) => <RelatedNotice key={`${notice.type}-${notice.source}-${index}`} notice={notice} />)}</div> : null}
-    {items.length ? <div className="relationship-list">{items.map((item, index) => <RelatedResourceRow key={`${item.type}-${item.source}-${item.namespace || ''}-${item.name || ''}-${item.uid || index}`} item={item} onOpenResource={onOpenResource} />)}</div> : notices.length ? <div className="relationship-limited"><AlertTriangle size={16} /><span>No resolved links are visible. The source states above explain what Kubernetes allowed this identity to read.</span></div> : <QuietState icon={<Network size={22} />} title="No related resources" detail={displayedResponse?.message || 'No safe native relationship was found for this object.'} />}
+     {items.length ? <div className="relationship-list">{items.map((item, index) => { const targetPath = relatedResourceDetailPath(item); const targetNamespace = item.definition?.namespaced ? item.namespace || namespace : namespace; return <RelatedResourceRow key={`${item.type}-${item.source}-${item.namespace || ''}-${item.name || ''}-${item.uid || index}`} item={item} href={targetPath ? routeHref(targetPath, context, targetNamespace) : undefined} /> })}</div> : notices.length ? <div className="relationship-limited"><AlertTriangle size={16} /><span>No resolved links are visible. The source states above explain what Kubernetes allowed this identity to read.</span></div> : <QuietState icon={<Network size={22} />} title="No related resources" detail={displayedResponse?.message || 'No safe native relationship was found for this object.'} />}
   </div>
 }
 
@@ -4468,9 +4468,8 @@ function pvcRequestedStorage(object: ResourceObject): string {
 }
 
 /** Renders one related-resource target as a deep-link when it is verified and discovered. */
-function RelatedResourceRow({ item, onOpenResource }: { item: RelatedResource; onOpenResource: (definition: ResourceDefinition, name: string, namespace?: string) => void }) {
-  const targetPath = relatedResourceDetailPath(item)
-  const canOpen = Boolean(targetPath)
+function RelatedResourceRow({ item, href }: { item: RelatedResource; href?: string }) {
+  const canOpen = Boolean(href)
   const kind = item.kind || item.definition?.kind || 'Resource'
   const name = item.name || 'Unnamed target'
   const row = <>
@@ -4482,9 +4481,8 @@ function RelatedResourceRow({ item, onOpenResource }: { item: RelatedResource; o
     </div>
     {item.state === 'resolved' ? <span className="relationship-open">Open <ArrowUpRight size={13} /></span> : <span className={`relationship-unresolved relationship-state-${item.state}`}>{relatedStateLabel(item.state)}{item.message ? ` / ${item.message}` : ''}</span>}
   </>
-  if (!canOpen || !item.definition || !item.name) return <div className={`relationship-row relationship-row-state-${item.state}`}>{row}</div>
-  const namespace = item.definition.namespaced ? item.namespace : undefined
-  return <button type="button" className="relationship-row relationship-row-button" aria-label={`Open related ${kind}/${name}`} onClick={() => onOpenResource(item.definition!, item.name!, namespace)}>{row}</button>
+  if (!canOpen || !item.definition || !item.name || !href) return <div className={`relationship-row relationship-row-state-${item.state}`}>{row}</div>
+  return <a className="relationship-row relationship-row-link" href={href} aria-label={`Open related ${kind}/${name}`}>{row}</a>
 }
 
 /** Renders one explicit partial, permission, malformed, or unavailable relationship source. */
@@ -4785,6 +4783,21 @@ function PodTerminalPanel({ context, namespace, pod, object }: { context: string
     terminalRef.current = terminal
     fitAddonRef.current = fitAddon
 
+    terminal.attachCustomKeyEventHandler((event) => {
+      const action = terminalClipboardAction(event, terminal.hasSelection(), Boolean(navigator.clipboard?.readText))
+      if (action === 'copy-selection') {
+        event.preventDefault()
+        void copyTerminalSelection()
+        return false
+      }
+      if (action === 'paste') {
+        event.preventDefault()
+        void pasteTerminalClipboard()
+        return false
+      }
+      return true
+    })
+
     const dataSubscription = terminal.onData((data) => {
       const socket = socketRef.current
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data }))
@@ -4866,6 +4879,52 @@ function PodTerminalPanel({ context, namespace, pod, object }: { context: string
     setStatus('closed')
   }
 
+  /** Copies the active xterm selection through the browser clipboard with a legacy fallback. */
+  async function copyTerminalText(text: string): Promise<void> {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+        return
+      }
+    } catch {
+      // Fall through to the synchronous browser fallback.
+    }
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.setAttribute('readonly', '')
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    const copied = document.execCommand('copy')
+    textarea.remove()
+    if (!copied) throw new Error('The browser denied clipboard copy access.')
+  }
+
+  /** Copies selected terminal text without interrupting the remote process. */
+  async function copyTerminalSelection(): Promise<void> {
+    const terminal = terminalRef.current
+    if (!terminal?.hasSelection()) return
+    try {
+      await copyTerminalText(terminal.getSelection())
+      terminal.clearSelection()
+      setError('')
+    } catch {
+      setError('Clipboard copy was blocked by the browser. Allow clipboard access and try again.')
+    }
+  }
+
+  /** Reads browser clipboard text and sends it through xterm paste handling to the remote TTY. */
+  async function pasteTerminalClipboard(): Promise<void> {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text) terminalRef.current?.paste(text)
+      setError('')
+    } catch {
+      setError('Clipboard paste was blocked by the browser. Allow clipboard access and try again.')
+    }
+  }
+
   const active = status === 'connecting' || status === 'connected'
   const statusLabel = status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting' : status === 'closed' ? 'Disconnected' : 'Not connected'
   const disconnected = status !== 'connected'
@@ -4884,7 +4943,7 @@ function PodTerminalPanel({ context, namespace, pod, object }: { context: string
       <div ref={terminalHostRef} className="terminal-host" aria-label="Pod terminal" />
       {disconnected && <div className="terminal-overlay"><div><span className="terminal-overlay-icon"><TerminalSquare size={18} /></span><strong>{status === 'closed' ? 'Session disconnected' : 'Terminal not connected'}</strong><span>{status === 'closed' ? 'Reconnect to open a new TTY session.' : 'Connect to open a TTY session.'}</span></div></div>}
     </div>
-    <div className="terminal-footer"><span><TerminalSquare size={14} /> TTY session / Kubernetes remote command</span><span>{mode === 'exec' ? 'command starts in a new process' : 'attached to the existing process'}</span></div>
+     <div className="terminal-footer"><span><TerminalSquare size={14} /> TTY session / Kubernetes remote command</span><span>Ctrl/Cmd+C copies selection · Ctrl/Cmd+V pastes</span><span>{mode === 'exec' ? 'command starts in a new process' : 'attached to the existing process'}</span></div>
   </div>
 }
 

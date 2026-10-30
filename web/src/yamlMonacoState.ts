@@ -8,6 +8,7 @@ export interface YamlEditorDocumentChange {
 /** Describes the Monaco options that make native YAML folding the editor contract. */
 export interface YamlMonacoEditorOptions {
   automaticLayout: boolean
+  contextmenu: boolean
   folding: boolean
   foldingHighlight: boolean
   foldingStrategy: 'indentation'
@@ -17,6 +18,9 @@ export interface YamlMonacoEditorOptions {
   foldingMaximumRegions: number
   maxTokenizationLineLength: number
   stopRenderingLineAfter: number
+  find: {
+    seedSearchStringFromSelection: 'always' | 'never' | 'selection'
+  }
   readOnly: boolean
   domReadOnly: boolean
 }
@@ -55,6 +59,7 @@ export function yamlMonacoHunkModelUri(scopeKey: string, hunkID: string, side: '
 export function yamlMonacoEditorOptions(readOnly: boolean): YamlMonacoEditorOptions {
   return {
     automaticLayout: true,
+    contextmenu: true,
     folding: true,
     foldingHighlight: true,
     foldingStrategy: 'indentation',
@@ -64,6 +69,7 @@ export function yamlMonacoEditorOptions(readOnly: boolean): YamlMonacoEditorOpti
     foldingMaximumRegions: 512,
     maxTokenizationLineLength: 20_000,
     stopRenderingLineAfter: 10_000,
+    find: { seedSearchStringFromSelection: 'always' },
     readOnly,
     domReadOnly: readOnly,
   }
